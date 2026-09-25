@@ -41,3 +41,12 @@ def test_database_is_closed_before_a_file_is_sent(client, media_root, monkeypatc
     monkeypatch.setattr(FileResponse, "__call__", sending)
     assert client.get(f"/api/items/{video}/file").status_code == 200
     assert opened and open_while_sending == [0]
+
+
+def test_connections_use_wal_with_normal_sync(tmp_path):
+    from reel.db import connect
+
+    conn = connect(tmp_path / "r.db")
+    assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+    assert conn.execute("PRAGMA synchronous").fetchone()[0] == 1       # NORMAL
+    assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1

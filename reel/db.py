@@ -158,6 +158,9 @@ def connect(db_path: Path) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")
+    # In WAL mode this can't corrupt the database; a power cut may lose the last
+    # commit (a file or two probed again next scan), and commits skip an fsync.
+    conn.execute("PRAGMA synchronous = NORMAL")
     return conn
 
 

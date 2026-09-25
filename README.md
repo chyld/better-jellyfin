@@ -488,6 +488,10 @@ data/
     └── folders/<uuid>-<version>.jpg
 ```
 
+- **Stopping or killing Reel can't corrupt the database.** SQLite runs in WAL mode with
+  `synchronous=NORMAL`: a crash or `docker compose stop` loses nothing that was saved, and a
+  power cut can at most lose the very last save (a video or two is probed again on the next
+  scan).
 - **Back up** `reel.db` and `images/`. `thumbs/` and `hls/` are only caches. Don't copy
   `reel.db` while Reel runs: recent changes can still be in `reel.db-wal`, so the copy may miss
   them. Either:
