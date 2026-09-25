@@ -21,15 +21,24 @@ points of a video don't fight. For a viewer's request:
   that its viewer gave up waiting for, is killed and reaped, and the reason is
   kept for the error message.
 
-Sessions are keyed on the file's size and modification time and on
-PROFILE_VERSION, so a replaced file or changed encoder settings never serve old
-segments: the old session's encoders are stopped, then its cache is removed. A
-moved file (same contents) keeps its session, with the new path.
+Each encoder writes into a private staging folder; finished segments are then
+published into the session's shared folder with a hard link, which fails if the
+segment is already there. So when two viewers' encoders overlap, the first
+finished copy of a segment wins and nothing ever writes over a published one.
+
+Sessions are keyed on the file's size and modification time, the facts the
+encoder uses (length, height, interlacing, audio codec) and PROFILE_VERSION, so
+a replaced file, a re-probe that changed those facts, or changed encoder
+settings never serve old segments: the old session's encoders are stopped, then
+its cache is removed. A moved file (same contents) keeps its session, with the
+new path.
 
 Viewers unused for IDLE_SECONDS are dropped, and then sessions without viewers.
 The caller recreates a dropped session from the segment URL (see main.py), so a
-long pause just resumes. The whole cache is kept under a size limit, deleting
-the segments no viewer is near first.
+long pause just resumes. The cache has a size target (REEL_HLS_CACHE_MB): over
+it, the segments no viewer is near are deleted first. It's a soft target: the
+segments viewers are about to play (at most about KEEP_NEAR per viewer) and the
+ones being encoded are kept even over it, and a warning is logged.
 
 Encoders take the same slots as other streams (REEL_MAX_STREAMS).
 
@@ -40,8 +49,10 @@ at the start of the timeline. TS stamps every packet with its real time.
 """
 import asyncio
 import hashlib
+import itertools
 import logging
 import math
+import os
 import re
 import secrets
 import shutil
@@ -70,6 +81,7 @@ SEGMENT_TIMEOUT = 60.0  # a viewer gives up waiting for a segment after this lon
 STARTUP_TIMEOUT = 60.0  # an encoder must finish its first segment within this
 STALL_TIMEOUT = 60.0    # ...and each next one within this
 MAX_VIEWERS = 8         # per session; the least recently used is dropped beyond this
+KEEP_NEAR = AHEAD_LIMIT + LOOKAHEAD + 2  # segments around a viewer the cache limit never deletes
 CACHE_LIMIT = 2048 * 1024**2  # bytes, all sessions together (REEL_HLS_CACHE_MB)
 POLL = 0.1
 
@@ -124,9 +136,9 @@ def revision(path: Path) -> str:
     return f"{st.st_size}-{st.st_mtime_ns}"
 
 
-def session_id(item_uid: str, plan: Plan, rev: str) -> str:
-    """Stable per video, plan, file version and encoder profile."""
-    key = f"{item_uid}|{plan.video}|{plan.audio}|{rev}|{PROFILE_VERSION}"
+def session_id(item_uid: str, source: "Source") -> str:
+    """Stable per video, plan, file version, encoder facts and encoder profile."""
+    key = f"{item_uid}|{source.plan.video}|{source.plan.audio}|{source.version}|{PROFILE_VERSION}"
     return hashlib.sha256(key.encode()).hexdigest()[:20]
 
 
@@ -141,6 +153,11 @@ class Source:
     audio_codec: str | None
     revision: str
 
+    @property
+    def version(self) -> tuple:
+        """Everything about the file that changes the segments (not its path)."""
+        return (self.revision, round(self.duration, 3), self.interlaced, self.height, self.audio_codec)
+
 
 @dataclass
 class Encoder:
@@ -148,6 +165,7 @@ class Encoder:
     owner: str
     start: int
     proc: asyncio.subprocess.Process
+    staging: Path                # where this encoder writes; see HlsManager.publish
     progress_at: float = field(default_factory=time.monotonic)
     highest: int = -1            # the highest segment known to exist from `start` on
     errors: deque = field(default_factory=lambda: deque(maxlen=20))
@@ -214,6 +232,8 @@ class HlsManager:
         self.streams = streams
         self.cache_limit = cache_limit
         self.sessions: dict[str, Session] = {}
+        self._runs = itertools.count(1)
+        self._over_limit = False
         # Leftovers from a previous run are useless: start clean.
         shutil.rmtree(cache_dir, ignore_errors=True)
 
@@ -222,9 +242,9 @@ class HlsManager:
 
         Sessions of the same video made from another version of the file are
         retired. A session whose file has moved carries on from the new path."""
-        sid = session_id(item_uid, source.plan, source.revision)
+        sid = session_id(item_uid, source)
         for other in [s for s in self.sessions.values() if s.item_uid == item_uid and s.sid != sid]:
-            if other.source.revision != source.revision:
+            if other.source.version != source.version:   # made from other facts: stale
                 await self.retire(other)
         session = self.sessions.get(sid)
         if session is None:
@@ -266,16 +286,22 @@ class HlsManager:
         started = False
         deadline = now + SEGMENT_TIMEOUT
         while not path.exists():
+            self.publish(session)
+            if path.exists():
+                break
             if session.retired:
                 raise HlsGone("The video has changed. Reload the player.")
             if session.covering(n) is None:
                 async with session.lock:
                     if not path.exists() and session.covering(n) is None and not session.retired:
-                        if started:  # our encoder ended without making it
+                        if started:  # our encoder has ended
                             enc = viewer.encoder
                             if enc is not None and enc.watcher is not None:
-                                await asyncio.wait({enc.watcher})  # it records why
-                            raise HlsError(self._failure(viewer))
+                                await asyncio.wait({enc.watcher})  # it publishes its last segments
+                            self.publish(session)
+                            if path.exists():
+                                continue                          # it made it after all
+                            raise HlsError(self._failure(viewer))  # it didn't: the watcher says why
                         await self._start(session, viewer, n)
                         started = True
             if time.monotonic() > deadline:
@@ -316,7 +342,33 @@ class HlsManager:
 
     # ---- encoders ------------------------------------------------------------------
 
-    def command(self, session: Session, start_segment: int, owner: str) -> list[str]:
+    # ---- publishing ------------------------------------------------------------------
+
+    @staticmethod
+    def publish(session: Session) -> int:
+        """Move finished segments from the encoders' staging folders into the shared
+        folder. A hard link is atomic and fails if the segment is already there, so
+        the first finished copy wins and a published segment is never written over.
+        Returns how many were published."""
+        published = 0
+        for staging in session.folder.glob("enc-*"):
+            try:
+                names = [e.name for e in os.scandir(staging) if e.name.endswith(".ts")]  # not .ts.tmp
+            except OSError:
+                continue
+            for name in names:
+                src = staging / name
+                try:
+                    os.link(src, session.folder / name)
+                    published += 1
+                except FileExistsError:
+                    pass                      # another encoder got there first
+                except OSError:
+                    continue
+                src.unlink(missing_ok=True)
+        return published
+
+    def command(self, session: Session, start_segment: int, staging: Path) -> list[str]:
         src = session.source
         offset = start_segment * SEGMENT
         return [
@@ -328,11 +380,11 @@ class HlsManager:
             "-f", "hls", "-hls_time", f"{SEGMENT:g}", "-hls_playlist_type", "vod",
             "-hls_segment_type", "mpegts",
             "-start_number", str(start_segment),
-            "-hls_segment_filename", str(session.folder / "%d.ts"),
+            # Into this encoder's own folder; publish() shares them.
+            "-hls_segment_filename", str(staging / "%d.ts"),
             # Segments appear under their final name only once complete.
             "-hls_flags", "independent_segments+temp_file",
-            # Each encoder writes its own (unused) playlist, so several can share the folder.
-            str(session.folder / f"ffmpeg-{owner}.m3u8"),
+            str(staging / "ffmpeg.m3u8"),
         ]
 
     async def _start(self, session: Session, viewer: Viewer, n: int) -> None:
@@ -349,15 +401,18 @@ class HlsManager:
             asyncio.create_task(self.retire(session))  # it takes the lock we hold
             raise HlsGone("The video has changed or is missing. Reload the player.")
         await self.streams.acquire_slot()
+        staging = session.folder / f"enc-{viewer.id}-{next(self._runs)}"
         try:
+            staging.mkdir(parents=True)
             proc = await asyncio.create_subprocess_exec(
-                *self.command(session, n, viewer.id), stdin=asyncio.subprocess.DEVNULL,
+                *self.command(session, n, staging), stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
             )
         except BaseException:
+            shutil.rmtree(staging, ignore_errors=True)
             self.streams.release_slot()
             raise
-        enc = Encoder(viewer.id, n, proc, highest=n - 1)
+        enc = Encoder(viewer.id, n, proc, staging, highest=n - 1)
         viewer.encoder = enc
         viewer.last_failure = None
         session.starts += 1
@@ -372,11 +427,12 @@ class HlsManager:
         try:
             while proc.returncode is None:
                 try:
-                    await asyncio.wait_for(proc.wait(), 0.5)
+                    await asyncio.wait_for(proc.wait(), 0.25)
                 except TimeoutError:
                     pass
                 if proc.returncode is not None:
                     break
+                self.publish(session)
                 produced = session.produced(enc)
                 if produced - self._needed(session, enc, produced) >= AHEAD_LIMIT:
                     proc.kill()  # far enough ahead; a later request restarts it
@@ -397,6 +453,8 @@ class HlsManager:
                     reader.cancel()
                 self.streams.active.discard(proc)
                 self.streams.release_slot()
+                self.publish(session)                              # what it finished last
+                shutil.rmtree(enc.staging, ignore_errors=True)     # and any half-written part
                 if proc.returncode not in (0, -9) and enc.failure is None:
                     enc.failure = enc.errors[-1] if enc.errors else f"ffmpeg exited with {proc.returncode}"
                 if enc.failure:
@@ -444,40 +502,47 @@ class HlsManager:
         return removed
 
     def cache_size(self) -> int:
+        """Everything in the cache: published segments, and files encoders are
+        still writing or haven't published yet."""
         total = 0
-        for path in self.cache_dir.glob("*/*.ts"):
-            try:
-                total += path.stat().st_size
-            except OSError:
-                pass
+        for root, _, files in os.walk(self.cache_dir):
+            for name in files:
+                try:
+                    total += os.stat(os.path.join(root, name)).st_size
+                except OSError:
+                    pass
         return total
 
     def enforce_cache_limit(self) -> int:
-        """Delete segments until the cache fits its limit, least useful first:
+        """Delete segments until the cache fits its size target, least useful first:
         sessions used longest ago, and within them the segments furthest from any
         viewer. Segments a viewer is about to play are kept. Returns bytes freed."""
         candidates = []
-        total = 0
         for session in list(self.sessions.values()):
             wanted = set()
             for v in session.viewers.values():
-                wanted.update(range(v.position - 1, v.position + AHEAD_LIMIT + LOOKAHEAD + 1))
+                wanted.update(range(v.position - 1, v.position - 1 + KEEP_NEAR))
             positions = [v.position for v in session.viewers.values()]
             for path in session.folder.glob("*.ts"):
                 try:
                     n, size = int(path.stem), path.stat().st_size
                 except (ValueError, OSError):
                     continue
-                total += size
                 if n not in wanted:
                     distance = min((abs(n - p) for p in positions), default=math.inf)
                     candidates.append((session.last_used, -distance, path, size))
+        total = self.cache_size()           # published, staging and in-progress files
         freed = 0
         for _, _, path, size in sorted(candidates, key=lambda c: (c[0], c[1])):
             if total - freed <= self.cache_limit:
                 break
             path.unlink(missing_ok=True)
             freed += size
+        over = total - freed > self.cache_limit
+        if over and not self._over_limit:
+            log.warning("HLS cache is over REEL_HLS_CACHE_MB (%d MB, target %d MB): what's left is "
+                        "what viewers are playing now", (total - freed) // 1024**2, self.cache_limit // 1024**2)
+        self._over_limit = over
         return freed
 
     async def run_housekeeping(self) -> None:

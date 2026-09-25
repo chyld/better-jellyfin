@@ -6,6 +6,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from .db import connect
+from .probe import stop_running_probes
 from .scanner import ScanCancelled, scan_library
 
 log = logging.getLogger(__name__)
@@ -31,10 +32,15 @@ class ScanManager:
         self._thread.start()
 
     def stop(self, timeout: float = 10) -> None:
-        """Stop soon: queued scans are dropped, a running one stops at its next
-        folder or file (keeping what it has recorded). Blocks until it has, so call
-        it from a thread, not the event loop."""
+        """Stop soon: queued scans are dropped, running ffprobes are killed, and a
+        running scan stops at its next folder or file (keeping what it has
+        recorded). Blocks until it has, so call it from a thread, not the event loop.
+
+        A file-system call stuck on a hung NAS can't be interrupted: it finishes
+        when the OS returns it. The scan writes nothing after that; if it takes
+        longer than `timeout`, the process just exits without waiting for it."""
         self._cancel.set()
+        stop_running_probes()
         while True:
             try:
                 library_id = self._queue.get_nowait()

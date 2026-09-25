@@ -232,3 +232,32 @@ def test_scan_stopped_before_it_starts_changes_nothing(conn, lib, media_root, fa
     with pytest.raises(ScanCancelled):
         scan_library(conn, lib, probe_fn=fake_probe, cancel=cancel)
     assert rows(conn, lib) == before
+
+
+def test_stopped_while_matching_moves_changes_nothing(conn, media_root, fake_probe, monkeypatch):
+    """Stopped while fingerprinting new files to spot moved ones: no move is half-applied."""
+    import threading
+
+    from reel import scanner
+    from reel.scanner import ScanCancelled
+
+    for i in range(4):
+        (media_root / "Tapes").mkdir(exist_ok=True)
+        (media_root / f"Tapes/t{i}.mpg").write_bytes(f"tape {i} ".encode() * 20000)
+    lib = create_library(conn, media_root, "Media", str(media_root))
+    scan_library(conn, lib, probe_fn=fake_probe)
+    (media_root / "Moved").mkdir()
+    for i in range(4):
+        os.rename(media_root / f"Tapes/t{i}.mpg", media_root / f"Moved/t{i}.mpg")
+    before = rows(conn, lib)
+    cancel = threading.Event()
+    real = scanner.fingerprint
+
+    def fingerprint_then_stop(path, size):
+        cancel.set()                                   # Reel is asked to stop mid-way
+        return real(path, size)
+
+    monkeypatch.setattr(scanner, "fingerprint", fingerprint_then_stop)
+    with pytest.raises(ScanCancelled):
+        scan_library(conn, lib, probe_fn=fake_probe, workers=1, cancel=cancel)
+    assert rows(conn, lib) == before                   # nothing moved, nothing marked missing

@@ -303,8 +303,10 @@ def scan_library(
         if new_videos and any(row["fingerprint"] for row in gone):
             prints = dict(zip(
                 (v.rel_path for v in new_videos),
-                pool.map(lambda v: fingerprint(root / v.rel_path, v.size), new_videos),
+                pool.map(lambda v: None if cancel is not None and cancel.is_set()
+                         else fingerprint(root / v.rel_path, v.size), new_videos),
             ))
+            _check(cancel)  # before matching moves on a partial set of fingerprints
         moves = _match_moves(new_videos, prints, gone)
         for row, video in moves:
             conn.execute(

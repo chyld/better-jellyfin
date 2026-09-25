@@ -1,6 +1,7 @@
 """Read a video's technical details with ffprobe and decide how it can be played."""
 import json
 import subprocess
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -27,19 +28,44 @@ class ProbeError(Exception):
     pass
 
 
+# The ffprobe processes running now, so a scan being stopped can end them.
+_running: set[subprocess.Popen] = set()
+_running_lock = threading.Lock()
+
+
+def stop_running_probes() -> int:
+    """Kill every ffprobe running now (Reel is shutting down). Returns how many."""
+    with _running_lock:
+        procs = list(_running)
+    for proc in procs:
+        proc.kill()
+    return len(procs)
+
+
 def probe(path: Path) -> ProbeResult:
     """Run ffprobe on a file. Raises ProbeError if it can't be read."""
     cmd = [
         "ffprobe", "-v", "error", "-print_format", "json",
         "-show_format", "-show_streams", str(path),
     ]
+    proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    with _running_lock:
+        _running.add(proc)
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=PROBE_TIMEOUT)
-    except subprocess.TimeoutExpired:
-        raise ProbeError(f"ffprobe timed out after {PROBE_TIMEOUT}s")
+        try:
+            stdout, stderr = proc.communicate(timeout=PROBE_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate()
+            raise ProbeError(f"ffprobe timed out after {PROBE_TIMEOUT}s")
+    finally:
+        with _running_lock:
+            _running.discard(proc)
     if proc.returncode != 0:
-        raise ProbeError(proc.stderr.strip().splitlines()[-1] if proc.stderr.strip() else "ffprobe failed")
-    return parse_probe(json.loads(proc.stdout))
+        if proc.returncode < 0:
+            raise ProbeError("ffprobe was stopped")
+        raise ProbeError(stderr.strip().splitlines()[-1] if stderr.strip() else "ffprobe failed")
+    return parse_probe(json.loads(stdout))
 
 
 def parse_probe(data: dict) -> ProbeResult:

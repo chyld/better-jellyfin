@@ -3,6 +3,7 @@ import shutil
 import threading
 import time
 
+import pytest
 from fastapi.testclient import TestClient
 
 from reel.db import init_db
@@ -175,3 +176,32 @@ def test_shutting_down_during_a_scan_is_quick(settings, media_root):
         assert scan.started.wait(5)
         began = time.monotonic()
     assert time.monotonic() - began < 2                    # never released: it was stopped
+
+
+@pytest.mark.skipif(not shutil.which("ffprobe"), reason="ffprobe not installed")
+def test_stopping_kills_a_probe_that_hangs(settings, media_root, monkeypatch):
+    """A real scan whose ffprobe never returns (a file that never answers) still stops at once."""
+    import os
+    from functools import partial
+
+    from reel import scanner
+    from reel.probe import probe
+    from reel.scanner import scan_library
+
+    folder = make_dir(media_root / "Tapes")
+    os.mkfifo(folder / "stuck.mkv")
+    monkeypatch.setattr(scanner, "fingerprint", lambda path, size: "fp")   # only ffprobe opens it
+    init_db(settings.db_path)
+    manager = ScanManager(settings.db_path, scan_fn=partial(scan_library, probe_fn=probe))
+    app = create_app(settings, manager)
+    with TestClient(app) as client:
+        lib = client.post("/api/libraries", json={"name": "Tapes", "path": str(folder)}).json()["id"]
+        client.post(f"/api/libraries/{lib}/scan")
+        for _ in range(100):
+            if (client.get("/api/libraries").json()[0]["scan"] or {}).get("state") == "scanning":
+                break
+            time.sleep(0.05)
+        time.sleep(0.5)                                  # ffprobe is now waiting on the file
+        began = time.monotonic()
+    assert time.monotonic() - began < 3                  # shutdown killed it
+    assert manager.status(1)["state"] == "cancelled"

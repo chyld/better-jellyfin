@@ -41,14 +41,23 @@ def test_playlist_covers_the_whole_video():
     assert f"hls/abc/{V}/0.ts?video=h264" in with_query
 
 
-def test_sessions_are_shared_per_video_plan_and_file_version(monkeypatch):
-    a = hls.session_id("video-1", CONVERT, "r1")
-    assert a == hls.session_id("video-1", CONVERT, "r1")
-    assert a != hls.session_id("video-2", CONVERT, "r1")
-    assert a != hls.session_id("video-1", Plan("transcode", "encode", "copy"), "r1")
-    assert a != hls.session_id("video-1", CONVERT, "r2")                  # the file changed
+def facts(**changes):
+    base = dict(path=Path("/m/a.avi"), plan=CONVERT, duration=40.0, interlaced=False, height=240,
+                audio_codec="mp3", revision="r1")
+    return Source(**{**base, **changes})
+
+
+def test_sessions_are_shared_per_video_plan_file_version_and_facts(monkeypatch):
+    a = hls.session_id("video-1", facts())
+    assert a == hls.session_id("video-1", facts())
+    assert a == hls.session_id("video-1", facts(path=Path("/m/moved.avi")))   # a move keeps it
+    assert a != hls.session_id("video-2", facts())
+    assert a != hls.session_id("video-1", facts(plan=Plan("transcode", "encode", "copy")))
+    assert a != hls.session_id("video-1", facts(revision="r2"))               # the file changed
+    for change in ({"duration": 41.0}, {"interlaced": True}, {"height": 480}, {"audio_codec": "aac"}):
+        assert a != hls.session_id("video-1", facts(**change))                 # re-probed differently
     monkeypatch.setattr(hls, "PROFILE_VERSION", hls.PROFILE_VERSION + 1)
-    assert a != hls.session_id("video-1", CONVERT, "r1")                  # the encoder changed
+    assert a != hls.session_id("video-1", facts())                            # the encoder changed
 
 
 # ---- Encoding on demand (real ffmpeg) ------------------------------------------------------
@@ -510,8 +519,7 @@ def test_cache_limit_keeps_what_viewers_need(tmp_path, long_clip, monkeypatch):
         for n in range(7):
             await m.media_segment(s, V, n)
         await m._stop(s.viewers[V])
-        monkeypatch.setattr(hls, "AHEAD_LIMIT", 0)
-        monkeypatch.setattr(hls, "LOOKAHEAD", 0)
+        monkeypatch.setattr(hls, "KEEP_NEAR", 2)
         freed = m.enforce_cache_limit()              # the viewer is at 6: keeps 5 and 6
         left = sorted(int(p.stem) for p in s.folder.glob("*.ts"))
         await m.shutdown()
@@ -566,3 +574,129 @@ def test_segment_for_a_bad_viewer_id_is_refused(client, hls_video):
     parts = segments[0].split("/")
     parts[-2] = "not-a-viewer"
     assert client.get("/".join(parts)).status_code == 404
+
+
+# ---- Overlapping encoders, refreshed facts, the cache target --------------------------------
+
+
+def test_publishing_keeps_the_first_copy_and_never_overwrites(tmp_path):
+    m = manager(tmp_path)
+
+    async def scenario():
+        s = m.get(await m.open("vid", facts(path=tmp_path / "x.avi")))
+        a, b = s.folder / "enc-a-1", s.folder / "enc-b-2"
+        a.mkdir(), b.mkdir()
+        (a / "3.ts").write_bytes(b"from encoder a")
+        first = m.publish(s)
+        (b / "3.ts").write_bytes(b"from encoder b")        # the same segment, finished later
+        (b / "4.ts.tmp").write_bytes(b"half written")       # not finished: not published
+        m.publish(s)
+        result = ((s.folder / "3.ts").read_bytes(), first, sorted(p.name for p in s.folder.glob("*.ts")),
+                  list(a.iterdir()), sorted(p.name for p in b.iterdir()))
+        await m.shutdown()
+        return result
+
+    content, count, shared, left_a, left_b = run(scenario())
+    assert content == b"from encoder a" and count == 1 and shared == ["3.ts"]
+    assert left_a == [] and left_b == ["4.ts.tmp"]           # the losing copy is dropped
+
+
+@requires_ffmpeg
+def test_overlapping_encoders_publish_whole_segments(tmp_path, long_clip, monkeypatch):
+    """Two viewers' encoders cover the same segments: every published segment is
+    complete and in the right place, and nothing is left half-written."""
+    monkeypatch.setattr(hls, "LOOKAHEAD", 0)                 # so the second viewer starts its own
+    m = manager(tmp_path)
+
+    async def scenario():
+        s = m.get(await m.open("vid", source(long_clip)))
+        await asyncio.gather(m.media_segment(s, V, 0), m.media_segment(s, V2, 2))
+        both_ran = s.starts == 2
+        for n in range(1, 7):                                # both keep asking, overlapping
+            await asyncio.gather(m.media_segment(s, V, n), m.media_segment(s, V2, min(n + 2, 6)))
+        for viewer in list(s.viewers.values()):
+            await m._stop(viewer)
+        names = sorted(p.name for p in s.folder.iterdir())
+        checks = [(codecs(s.segment(n)), first_pts(s.segment(n))) for n in range(7)]
+        await m.shutdown()
+        return both_ran, names, checks
+
+    both_ran, names, checks = run(scenario())
+    assert both_ran
+    assert names == [f"{n}.ts" for n in sorted(range(7), key=str)]  # no staging or temp files left
+    for n, (names_, start) in enumerate(checks):
+        assert names_ == ["h264", "aac"]
+        assert start == pytest.approx(n * 6 + 1.4, abs=0.3)
+
+
+@requires_ffmpeg
+def test_reopening_with_changed_facts_starts_afresh(tmp_path, long_clip):
+    """A rescan re-probed the file (same size and time) and its facts changed."""
+    m = manager(tmp_path)
+
+    async def scenario():
+        old = m.get(await m.open("vid", source(long_clip)))
+        await m.media_segment(old, V, 0)
+        proc = old.viewers[V].encoder.proc
+        changed = Source(long_clip, CONVERT, 39.0, True, 240, "mp3", hls.revision(long_clip))
+        new_sid = await m.open("vid", changed)
+        result = (new_sid != old.sid, old.retired, old.folder.exists(), proc.returncode is not None,
+                  m.get(new_sid).source.interlaced, m.get(new_sid).count)
+        await m.shutdown()
+        return result
+
+    assert run(scenario()) == (True, True, False, True, True, 7)
+
+
+def test_other_plans_of_the_same_file_version_are_kept(tmp_path):
+    """Two browsers (different plans) of the same video share nothing, and neither retires the other."""
+    m = manager(tmp_path)
+
+    async def scenario():
+        a = await m.open("vid", facts(path=tmp_path / "x.avi"))
+        b = await m.open("vid", facts(path=tmp_path / "x.avi", plan=Plan("transcode", "encode", "copy")))
+        result = (a != b, sorted(m.sessions) == sorted([a, b]))
+        await m.shutdown()
+        return result
+
+    assert run(scenario()) == (True, True)
+
+
+def test_cache_size_counts_unpublished_and_unfinished_files(tmp_path):
+    m = manager(tmp_path)
+
+    async def scenario():
+        s = m.get(await m.open("vid", facts(path=tmp_path / "x.avi")))
+        (s.folder / "0.ts").write_bytes(b"x" * 1000)
+        (s.folder / "enc-a-1").mkdir()
+        (s.folder / "enc-a-1" / "1.ts").write_bytes(b"x" * 300)       # finished, not yet published
+        (s.folder / "enc-a-1" / "2.ts.tmp").write_bytes(b"x" * 200)   # still being written
+        size = m.cache_size()
+        await m.shutdown()
+        return size
+
+    assert run(scenario()) == 1500
+
+
+def test_cache_target_is_soft_for_what_viewers_need(tmp_path, monkeypatch, caplog):
+    """Over the target, only segments a viewer is near remain, and it says so once."""
+    import logging
+    monkeypatch.setattr(hls, "KEEP_NEAR", 3)
+    m = manager(tmp_path)
+    m.cache_limit = 1000
+
+    async def scenario():
+        s = m.get(await m.open("vid", facts(path=tmp_path / "x.avi")))
+        s.viewers[V] = hls.Viewer(V, position=4)
+        for n in range(8):
+            s.segment(n).write_bytes(b"x" * 1000)
+        with caplog.at_level(logging.WARNING, logger="reel.hls"):
+            m.enforce_cache_limit()
+            m.enforce_cache_limit()                                   # still over: no second warning
+        left = sorted(int(p.stem) for p in s.folder.glob("*.ts"))
+        await m.shutdown()
+        return left
+
+    assert run(scenario()) == [3, 4, 5]                               # position - 1 .. KEEP_NEAR
+    warnings = [r for r in caplog.records if "over REEL_HLS_CACHE_MB" in r.getMessage()]
+    assert len(warnings) == 1

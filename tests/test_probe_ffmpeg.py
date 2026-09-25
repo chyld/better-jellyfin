@@ -62,3 +62,31 @@ def test_full_scan_with_real_ffprobe(conn, media_root, clips):
     assert modes["h264_aac.mkv"] == "remux"
     assert modes["vhs_interlaced.mpg"] == "transcode"
     assert modes["corrupt.mp4"] == "unsupported"
+
+
+def test_a_running_ffprobe_can_be_stopped(tmp_path):
+    """A probe stuck on a file that never answers ends when Reel stops."""
+    import os
+    import threading
+    import time
+
+    from reel.probe import ProbeError, probe, stop_running_probes
+
+    stuck = tmp_path / "stuck.mkv"
+    os.mkfifo(stuck)                                   # ffprobe waits on it forever
+    outcome = {}
+
+    def run():
+        try:
+            probe(stuck)
+        except ProbeError as exc:
+            outcome["error"] = str(exc)
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    for _ in range(50):
+        if stop_running_probes():
+            break
+        time.sleep(0.1)
+    thread.join(5)
+    assert not thread.is_alive() and outcome == {"error": "ffprobe was stopped"}

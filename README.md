@@ -141,7 +141,7 @@ documents each one.
 | `REEL_DATA_DIR` | `./data` (`/data` in Docker) | The data folder. |
 | `REEL_PROBE_WORKERS` | `4` | How many ffprobe processes run at once during a scan. |
 | `REEL_MAX_STREAMS` | `3` | How many videos may be converted or repackaged at once. More viewers get a "try again in a moment" message. |
-| `REEL_HLS_CACHE_MB` | `2048` | Disk space the HLS segment cache (`<data>/hls`) may use. Segments no viewer is near are deleted first. |
+| `REEL_HLS_CACHE_MB` | `2048` | Size target for the HLS segment cache (`<data>/hls`). Over it, segments no viewer is near are deleted first. A soft target: see [HLS details](#playback). |
 | `REEL_MISSING_GRACE_DAYS` | `7` | How long a video a scan can no longer find stays in the catalog (hidden, with its tags and pictures) before it's removed. |
 | `REEL_IMAGE_URLS` | `internet` | Where pictures may be downloaded from when you paste a URL: `internet` (public addresses only), `lan` (also your local network) or `off`. |
 | `FORWARDED_ALLOW_IPS` | `127.0.0.1` | *(uvicorn)* Behind a reverse proxy, set this to the proxy's address so its forwarded headers are trusted. Nothing else's are. |
@@ -228,6 +228,11 @@ the database, so **browsing never touches the NAS**.
   at its next folder or file. Videos it already recorded stay recorded. It stops *before* the
   step that marks unseen videos missing, so a half-finished walk never hides anything. The next
   scan picks up where it left off, since unchanged files aren't probed again.
+  - Running ffprobes are killed, and the scan checks for the stop between folders, between
+    files, and while fingerprinting files to spot moved ones.
+  - One thing can't be interrupted: a file-system call stuck on a hung NAS mount. It finishes
+    when the operating system returns it. The scan writes nothing after that point, and Reel
+    waits at most 10 seconds for it before exiting anyway.
 - A file ffprobe can't read is kept, marked *unsupported* with the error, and retried on the
   next scan.
 - After every scan, uploaded pictures whose video or folder no longer exists are deleted (see
@@ -300,20 +305,30 @@ length is known and any point can be sought. ffmpeg encodes ahead of the viewer 
 (`<data>/hls`, emptied at startup), with a keyframe forced on every segment boundary, and
 **pauses once it's 2 minutes ahead**.
 
-- **Sessions and viewers.** A session is one video, one plan and one *version* of the file (its
-  size and modification time, plus the encoder settings' version). Each playlist load is a
+- **Sessions and viewers.** A session is one video, one plan and one *version* of the file: its
+  size and modification time, the facts the encoder uses (length, height, interlacing, audio
+  codec) and the encoder settings' version. Each playlist load is a
   viewer with its own position and at most one encoder of its own. Viewers share the session's
   segments but never restart each other's encoder, so two tabs at different points of a video
   don't fight. (At most 8 viewers per session; the least recently used is dropped.)
+- **Overlapping encoders.** Each encoder writes into its own staging folder, and finished
+  segments are published into the shared folder with a hard link, which fails if the segment is
+  already there. When two viewers' encoders cover the same stretch, the first finished copy of a
+  segment wins, and a published segment is never written over or read half-written.
 - **Failures are cleaned up.** An encoder that makes nothing for 60 seconds, or whose viewer
   gives up waiting, is killed and reaped and its slot freed; the error says why.
-- **Changed files.** Opening a replaced file retires the old session: its encoders are stopped,
-  then its segments deleted. A file replaced mid-play is noticed when an encoder starts, and the
+- **Changed files.** Opening a replaced file, or one a rescan re-probed with different facts,
+  retires the old session: its encoders are stopped, then its segments deleted. A file replaced mid-play is noticed when an encoder starts, and the
   player gets a 410 and reloads the playlist where it was. A moved file keeps its session.
 - **Expiry and space.** Viewers idle for 10 minutes are dropped, then sessions without viewers.
   Segment URLs carry everything needed to make the session again, so resuming after a long pause
-  just works. Segments far behind every viewer are deleted, and the whole cache stays under
-  `REEL_HLS_CACHE_MB`, dropping the segments no viewer is near first.
+  just works. Segments far behind every viewer are deleted.
+- **Cache size is a soft target.** `REEL_HLS_CACHE_MB` counts everything in the cache,
+  including segments still being written or not yet published. Over it, segments no viewer is
+  near are deleted first, from the sessions used longest ago. The segments around each viewer
+  (26: the one just behind, and 2½ minutes ahead) are never deleted for space, so the cache can
+  stay over the target while people watch. That's at most about 25–75 MB per viewer at 1080p.
+  Reel logs a warning when that happens instead of interrupting playback.
 
 Encoders use the same `REEL_MAX_STREAMS` slots. Safari plays HLS natively; other browsers use the
 bundled [hls.js](https://github.com/video-dev/hls.js) (light build, Apache-2.0). (Segments are
@@ -582,7 +597,7 @@ changes how thumbnails are made.
 ### Tests
 
 ```sh
-uv run pytest              # backend: 486 tests
+uv run pytest              # backend: 495 tests
 node --test tests/js/      # frontend: 27 tests
 uv run pytest -m browser   # browser: 12 tests (about 2 minutes; needs Chromium and ffmpeg)
 scripts/docker-smoke.sh    # builds the image and checks it end to end (needs Docker)
