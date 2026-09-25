@@ -284,3 +284,46 @@ def test_stopped_while_fingerprinting_starts_no_probe(conn, media_root, fake_pro
     with pytest.raises(ScanCancelled):
         scan_library(conn, lib, probe_fn=fake_probe, workers=1, cancel=cancel)
     assert fake_probe.calls == [] and rows(conn, lib) == {}
+
+
+def _unreadable(monkeypatch, *names):
+    """lstat fails with 'permission denied' for these file names (as a flaky NAS may)."""
+    import reel.scanner
+    real = os.lstat
+
+    def flaky(path, *args, **kwargs):
+        if os.path.basename(str(path)) in names:
+            raise PermissionError(13, "Permission denied", str(path))
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(reel.scanner.os, "lstat", flaky)
+
+
+def test_an_unreadable_poster_or_folder_picture_is_kept_as_stored(conn, media_root, fake_probe, monkeypatch):
+    make_files(media_root, "Tapes/a.mpg", "Tapes/a.png", "Tapes/folder.jpg")
+    lib = create_library(conn, media_root, "Media", str(media_root))
+    scan_library(conn, lib, probe_fn=fake_probe)
+    poster = lambda: dict(conn.execute(
+        "SELECT poster_path, poster_rev FROM media_items WHERE rel_path = 'Tapes/a.mpg'").fetchone())
+    art = lambda: [dict(r) for r in conn.execute("SELECT rel_dir, art_path, art_rev FROM folder_art")]
+    before_poster, before_art = poster(), art()
+    assert before_poster["poster_rev"] and before_art[0]["art_rev"]
+
+    _unreadable(monkeypatch, "a.png", "folder.jpg")
+    scan_library(conn, lib, probe_fn=fake_probe)
+    assert poster() == before_poster and art() == before_art     # left alone
+    monkeypatch.undo()
+
+    os.remove(media_root / "Tapes/a.png")                          # really gone: cleared
+    os.remove(media_root / "Tapes/folder.jpg")
+    scan_library(conn, lib, probe_fn=fake_probe)
+    assert poster() == {"poster_path": None, "poster_rev": None} and art() == []
+
+
+def test_a_new_video_whose_poster_cant_be_read_still_gets_it(conn, media_root, fake_probe, monkeypatch):
+    make_files(media_root, "Tapes/b.mpg", "Tapes/b.png")
+    lib = create_library(conn, media_root, "Media", str(media_root))
+    _unreadable(monkeypatch, "b.png")
+    scan_library(conn, lib, probe_fn=fake_probe)
+    row = conn.execute("SELECT poster_path, poster_rev FROM media_items").fetchone()
+    assert (row["poster_path"], row["poster_rev"]) == ("Tapes/b.png", None)   # version filled in next time

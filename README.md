@@ -216,7 +216,9 @@ the database, so **browsing never touches the NAS**.
   cheap, so a poster added later or a title-rule change is picked up without re-probing.
 - **A scan never throws data away because of something it couldn't read:**
   - A folder it can't list, or a video it can't read, is left exactly as it was: the videos,
-    their tags, pictures and the folder's art are all kept. The scan finishes, and the
+    their tags, pictures and the folder's art are all kept. Likewise a poster or `folder.<ext>`
+    that's there but can't be read keeps the picture recorded before; only one that's really
+    gone is cleared. The scan finishes, and the
     Libraries page shows a warning naming what it couldn't read.
   - A library folder that's missing, or that used to have videos but is now completely
     empty (an unmounted NAS usually leaves an empty mount point), stops the scan with nothing
@@ -656,7 +658,7 @@ version); bump `THUMBS` when the server changes how thumbnails are made.
 ### Tests
 
 ```sh
-uv run pytest              # backend: 553 tests
+uv run pytest              # backend: 555 tests
 node --test tests/js/      # frontend: 30 tests
 uv run pytest -m browser   # browser: 15 tests (about 2 minutes; needs Chromium and ffmpeg)
 scripts/docker-smoke.sh    # builds the image and checks it end to end (needs Docker)

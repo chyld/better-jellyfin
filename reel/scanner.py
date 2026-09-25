@@ -9,7 +9,7 @@ import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
 
@@ -60,6 +60,7 @@ class FoundVideo:
     size: int
     mtime: float
     poster_rev: str | None = None   # the poster's size and time: its thumbnail's version
+    poster_unreadable: bool = False # the poster is there but couldn't be read: keep what's stored
 
 
 def _matters(filename: str) -> bool:
@@ -119,6 +120,7 @@ class Walk:
     unreadable_files: set[str]      # videos listed but not readable (relative)
     outside_library: int = 0        # symlinks leading out of the library, skipped
     folders: set[str] = None        # every folder that was listed ('' is the root)
+    art_unreadable: set[str] = field(default_factory=set)  # folders whose folder.<ext> couldn't be read
 
     def protects(self, rel_path: str) -> bool:
         """Was this path hidden from the walk by something it couldn't read?
@@ -169,6 +171,7 @@ def walk_library(root: Path, cancel: threading.Event | None = None) -> Walk:
     unreadable_files: set[str] = set()
     outside = 0
     folders: set[str] = set()
+    art_unreadable: set[str] = set()
 
     def on_error(err: OSError) -> None:
         if Path(err.filename) == root:
@@ -204,6 +207,8 @@ def walk_library(root: Path, cancel: threading.Event | None = None) -> Walk:
             except OSError:
                 if is_video(f):
                     unreadable_files.add((rel_dir / f).as_posix())  # there, but unreadable right now
+                else:
+                    kept.append(f)  # a picture that's there: kept, its version unknown (no stats entry)
                 continue
             stats[f] = st
             kept.append(f)
@@ -213,7 +218,11 @@ def walk_library(root: Path, cancel: threading.Event | None = None) -> Walk:
 
         art = _find_image(names_lower, "folder")
         if art:
-            folder_art[rel_dir.as_posix() if rel_dir.parts else ""] = ((rel_dir / art).as_posix(), _rev(stats[art]))
+            here = rel_dir.as_posix() if rel_dir.parts else ""
+            if art in stats:
+                folder_art[here] = ((rel_dir / art).as_posix(), _rev(stats[art]))
+            else:
+                art_unreadable.add(here)  # there but unreadable: its stored row stays as it is
 
         for name in video_names:
             rel_path = (rel_dir / name).as_posix()
@@ -228,11 +237,13 @@ def walk_library(root: Path, cancel: threading.Event | None = None) -> Walk:
                 title=title,
                 year=year,
                 poster_path=(rel_dir / poster).as_posix() if poster else None,
-                poster_rev=_rev(stats[poster]) if poster else None,
+                poster_rev=_rev(stats[poster]) if poster in stats else None,
+                poster_unreadable=bool(poster) and poster not in stats,
                 size=st.st_size,
                 mtime=st.st_mtime,
             ))
-    return Walk(videos, folder_art, sorted(unreadable_folders), unreadable_files, outside, folders)
+    return Walk(videos, folder_art, sorted(unreadable_folders), unreadable_files, outside, folders,
+                art_unreadable=art_unreadable)
 
 
 def fingerprint(path: Path, size: int) -> str | None:
@@ -356,6 +367,11 @@ def scan_library(
             (library_id,),
         )
     }
+    # A poster that's there but couldn't be read leaves the stored poster as it was.
+    for v in videos:
+        if v.poster_unreadable and v.rel_path in existing:
+            v.poster_path = existing[v.rel_path]["poster_path"]
+            v.poster_rev = existing[v.rel_path]["poster_rev"]
     # A library that used to have videos but now reads as completely empty is
     # almost always an unmounted NAS (an empty mount point), not a real deletion.
     present = sum(1 for row in existing.values() if not row["missing_since"])
@@ -554,7 +570,8 @@ def scan_library(
         "SELECT rel_dir, art_path, art_rev FROM folder_art WHERE library_id = ?", (library_id,))}
     conn.executemany(
         "DELETE FROM folder_art WHERE library_id = ? AND rel_dir = ?",
-        [(library_id, d) for d in stored if d not in walk.folder_art and not walk.protects(d)],
+        [(library_id, d) for d in stored
+         if d not in walk.folder_art and not walk.protects(d) and d not in walk.art_unreadable],
     )
     conn.executemany(
         "INSERT OR REPLACE INTO folder_art (library_id, rel_dir, art_path, art_rev) VALUES (?, ?, ?, ?)",
