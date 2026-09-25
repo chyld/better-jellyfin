@@ -666,13 +666,11 @@ Dockerfile, compose.yaml, .env.example
 
 ## Roadmap
 
-Ideas and planned features:
+Nothing planned right now: Reel does what it was built to do.
 
-1. An optional background "optimize" pass that converts old formats once into cached MP4s,
-   for perfect seeking and zero CPU on replay.
-
-Not planned: watch progress / resume (single-user setup), sorting a tag's videos (they stay in
-tagging order), subtitles, and hardware transcoding.
+Decided against: watch progress / resume (single-user setup), sorting a tag's videos (they stay
+in tagging order), subtitles, hardware transcoding, and a background pass that pre-converts old
+formats (videos are converted live, when played).
 
 ---
 
