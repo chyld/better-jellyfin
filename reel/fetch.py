@@ -123,6 +123,16 @@ def fetch_image_bytes(url: str, *, policy: str = DEFAULT_POLICY) -> bytes:
                 continue
             if response.status != 200:
                 raise FetchError(f"The site answered {response.status} ({response.reason}).")
+            # Refuse before downloading what clearly isn't a picture. (Not "must be
+            # image/*": some servers label real pictures application/octet-stream;
+            # the picture itself is checked once downloaded.)
+            kind = (response.getheader("Content-Type") or "").split(";")[0].strip().lower()
+            if kind.startswith("text/") or kind in ("application/json", "application/xml", "application/xhtml+xml"):
+                raise FetchError("That address is a web page, not a picture. Copy the picture's own address "
+                                 "(right-click it, \"Copy image address\").")
+            length = response.getheader("Content-Length")
+            if length and length.isdigit() and int(length) > MAX_UPLOAD_BYTES:
+                raise FetchError(f"Images can be at most {MAX_UPLOAD_BYTES // (1024 * 1024)} MB.")
             data = bytearray()
             while len(data) <= MAX_UPLOAD_BYTES:
                 if time.monotonic() > deadline:

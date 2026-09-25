@@ -71,7 +71,9 @@ def site(tmp_path_factory):
                     "-frames:v", "1", str(folder / "pic.png")], check=True)
     pages = {
         "/pic.png": (200, (folder / "pic.png").read_bytes()),
-        "/page.html": (200, b"<html>not a picture</html>"),
+        "/page.html": (200, b"<html>not a picture</html>", "text/html; charset=utf-8"),
+        "/fake.png": (200, b"<html>not a picture</html>", "image/png"),        # says image, isn't
+        "/octet.png": (200, (folder / "pic.png").read_bytes(), "application/octet-stream"),
         "/huge.png": (200, b"\x89PNG\r\n\x1a\n" + b"\0" * MAX_UPLOAD_BYTES),
         "/empty.png": (200, b""),
     }
@@ -96,9 +98,11 @@ def site(tmp_path_factory):
                 self.send_header("Location", "/loop")
                 self.end_headers()
                 return
-            status, body = pages.get(self.path, (404, b"missing"))
+            status, body, *kind = pages.get(self.path, (404, b"missing"))
             self.send_response(status)
             self.send_header("Content-Length", str(len(body)))
+            if kind:
+                self.send_header("Content-Type", kind[0])
             self.end_headers()
             self.wfile.write(body)
 
@@ -153,7 +157,8 @@ def test_redirects_are_followed(client, tag_id, site, allow_test_server):
 @pytest.mark.parametrize(
     "path, message",
     [
-        ("/page.html", "isn't a JPG"),
+        ("/page.html", "is a web page, not a picture"),
+        ("/fake.png", "isn't a JPG"),
         ("/nope.png", "answered 404"),
         ("/huge.png", "at most 20 MB"),
         ("/empty.png", "returned nothing"),
@@ -203,3 +208,8 @@ def test_dns_rebinding_cannot_change_the_address(client, tag_id, site, allow_tes
 
 def test_unknown_tag(client):
     assert set_from_url(client, "nope", "https://example.com/a.jpg").status_code == 404
+
+
+def test_a_picture_labelled_octet_stream_is_accepted(client, tag_id, site, allow_test_server):
+    res = set_from_url(client, tag_id, f"{site}/octet.png")
+    assert res.status_code == 200 and res.json()["image"]

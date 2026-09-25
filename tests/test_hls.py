@@ -743,3 +743,27 @@ def test_cache_file_work_runs_off_the_event_loop_and_status_doesnt_walk(tmp_path
     before, after = run(scenario())
     assert (before, after) == (0.0, 2.0)
     assert threads["evict"] != threads["loop"]
+
+
+def test_retiring_a_session_deletes_its_files_off_the_event_loop(tmp_path, monkeypatch):
+    import threading
+
+    m = manager(tmp_path)
+    threads = {}
+    real = hls.shutil.rmtree
+
+    def watched(path, **kwargs):
+        threads.setdefault("rmtree", threading.get_ident())
+        return real(path, **kwargs)
+
+    monkeypatch.setattr(hls.shutil, "rmtree", watched)
+
+    async def scenario():
+        threads["loop"] = threading.get_ident()
+        s = m.get(await m.open("vid", facts(path=tmp_path / "x.avi")))
+        s.segment(0).write_bytes(b"x")
+        await m.retire(s)
+        return s.folder.exists()
+
+    assert run(scenario()) is False
+    assert threads["rmtree"] != threads["loop"]

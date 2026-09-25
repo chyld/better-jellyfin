@@ -444,7 +444,9 @@ Rules:
   picture, and **Change image** once you've set one; then the dialog also offers
   **Remove image**.
 - **URL safety:** only `http://` and `https://`, a 15-second limit for the whole download, at
-  most 5 redirects, and the result must really be an image.
+  most 5 redirects, and the result must really be an image. A web page (an HTML, text, JSON or
+  XML answer) or an announced size over 20 MB is refused before anything is downloaded; a
+  picture labelled as a generic download is fine, since its contents are checked.
   - Which addresses are allowed is set by `REEL_IMAGE_URLS`: `internet` (the default) allows
     only public addresses; `lan` also allows your local network (192.168.x.x, 10.x.x.x, …),
     for pictures on another homelab server; `off` turns URL downloads off.
@@ -647,7 +649,7 @@ version); bump `THUMBS` when the server changes how thumbnails are made.
 ### Tests
 
 ```sh
-uv run pytest              # backend: 534 tests
+uv run pytest              # backend: 537 tests
 node --test tests/js/      # frontend: 30 tests
 uv run pytest -m browser   # browser: 15 tests (about 2 minutes; needs Chromium and ffmpeg)
 scripts/docker-smoke.sh    # builds the image and checks it end to end (needs Docker)

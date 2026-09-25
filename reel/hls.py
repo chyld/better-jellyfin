@@ -59,6 +59,7 @@ import shutil
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 
 import anyio
@@ -274,7 +275,8 @@ class HlsManager:
         async with session.lock:
             for viewer in session.viewers.values():
                 await self._stop(viewer)
-        shutil.rmtree(session.folder, ignore_errors=True)
+        # Hundreds of segments: deleted in a worker thread, not on the event loop.
+        await anyio.to_thread.run_sync(partial(shutil.rmtree, session.folder, ignore_errors=True))
 
     # ---- serving -----------------------------------------------------------------
 
