@@ -139,6 +139,7 @@ documents each one.
 | `REEL_DATA_DIR` | `./data` (`/data` in Docker) | The data folder. |
 | `REEL_PROBE_WORKERS` | `4` | How many ffprobe processes run at once during a scan. |
 | `REEL_MAX_STREAMS` | `3` | How many videos may be converted or repackaged at once. More viewers get a "try again in a moment" message. |
+| `REEL_HLS_CACHE_MB` | `2048` | Disk space the HLS segment cache (`<data>/hls`) may use. Segments no viewer is near are deleted first. |
 | `REEL_MISSING_GRACE_DAYS` | `7` | How long a video a scan can no longer find stays in the catalog (hidden, with its tags and pictures) before it's removed. |
 | `REEL_IMAGE_URLS` | `internet` | Where pictures may be downloaded from when you paste a URL: `internet` (public addresses only), `lan` (also your local network) or `off`. |
 | `FORWARDED_ALLOW_IPS` | `127.0.0.1` | *(uvicorn)* Behind a reverse proxy, set this to the proxy's address so its forwarded headers are trusted. Nothing else's are. |
@@ -282,10 +283,25 @@ The video page shows the mode for your browser, and the player shows a **CONVERT
 | **progressive** | repackaged and audio-only streams in other browsers (the video is copied, so it can't be cut into exact segments) | a new stream from the new time (~0.5 s) |
 
 HLS details: the playlist lists the **whole video** as 6-second MPEG-TS segments up front, so the
-length is known and any point can be sought. One ffmpeg per video encodes ahead of the viewer
-into a cache (`<data>/hls`, emptied at startup), with a keyframe forced on every segment
-boundary, and **pauses once it's 2 minutes ahead**. Segments far behind the viewer are deleted,
-and a session unused for 10 minutes is removed. Viewers of the same video share a session.
+length is known and any point can be sought. ffmpeg encodes ahead of the viewer into a cache
+(`<data>/hls`, emptied at startup), with a keyframe forced on every segment boundary, and
+**pauses once it's 2 minutes ahead**.
+
+- **Sessions and viewers.** A session is one video, one plan and one *version* of the file (its
+  size and modification time, plus the encoder settings' version). Each playlist load is a
+  viewer with its own position and at most one encoder of its own. Viewers share the session's
+  segments but never restart each other's encoder, so two tabs at different points of a video
+  don't fight. (At most 8 viewers per session; the least recently used is dropped.)
+- **Failures are cleaned up.** An encoder that makes nothing for 60 seconds, or whose viewer
+  gives up waiting, is killed and reaped and its slot freed; the error says why.
+- **Changed files.** Opening a replaced file retires the old session: its encoders are stopped,
+  then its segments deleted. A file replaced mid-play is noticed when an encoder starts, and the
+  player gets a 410 and reloads the playlist where it was. A moved file keeps its session.
+- **Expiry and space.** Viewers idle for 10 minutes are dropped, then sessions without viewers.
+  Segment URLs carry everything needed to make the session again, so resuming after a long pause
+  just works. Segments far behind every viewer are deleted, and the whole cache stays under
+  `REEL_HLS_CACHE_MB`, dropping the segments no viewer is near first.
+
 Encoders use the same `REEL_MAX_STREAMS` slots. Safari plays HLS natively; other browsers use the
 bundled [hls.js](https://github.com/video-dev/hls.js) (light build, Apache-2.0). (Segments are
 MPEG-TS rather than fragmented MP4 because ffmpeg restarts fMP4 timestamps at zero on each run,
@@ -501,7 +517,7 @@ JSON over HTTP. Every ID is a UUID. There's no authentication yet (see
 | GET, HEAD | `/api/items/{id}/file` | The original file, with range requests (direct play). |
 | GET | `/api/items/{id}/plan?video=&audio=&hls_support=` | How this browser should play it: `video`/`audio` list the codecs it decodes (e.g. `video=h264,hevc&audio=aac,ac3`), `hls_support` is `native`, `mse` or `none`. Returns the mode, what happens to each track, the delivery (`file`, `progressive`, `hls`), a `note` when more work is done than the codecs alone need, and the URL to load. An empty `video=`/`audio=` means none; leaving one out means a typical browser. |
 | GET | `/api/items/{id}/hls.m3u8?video=&audio=&hls_support=` | The whole video as an HLS playlist of 6-second segments (video converted). 409 if the plan for this browser isn't HLS. |
-| GET | `/api/items/{id}/hls/{session}/{n}.ts` | Segment `n`, encoded on demand. |
+| GET | `/api/items/{id}/hls/{session}/{viewer}/{n}.ts?video=&audio=&hls_support=` | Segment `n` for one player, encoded on demand. An expired session is made again from the URL; 410 if the file has changed (load the playlist again). |
 | GET | `/api/items/{id}/stream?start=&video=&audio=` | A fragmented MP4 from `start` seconds, each track copied or converted per the plan for those codecs. |
 | PUT | `/api/items/{id}/image` | Upload a picture (request body = the image). |
 | POST | `/api/items/{id}/image-url` | `{url}`: set a picture from a URL. |
@@ -550,8 +566,8 @@ changes how thumbnails are made.
 ### Tests
 
 ```sh
-uv run pytest              # backend: 460 tests
-node --test tests/js/      # frontend: 26 tests
+uv run pytest              # backend: 472 tests
+node --test tests/js/      # frontend: 27 tests
 scripts/docker-smoke.sh    # builds the image and checks it end to end (needs Docker)
 ```
 

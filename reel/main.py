@@ -75,7 +75,7 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
     )
     thumbs = Thumbnailer(settings.thumbs_dir)
     streams = playback.StreamManager(playback.StreamLimits(max_streams=settings.max_streams))
-    hls_sessions = hls.HlsManager(settings.hls_dir, streams)
+    hls_sessions = hls.HlsManager(settings.hls_dir, streams, cache_limit=settings.hls_cache_mb * 1024**2)
     # Uploaded images whose video, folder or tag is gone are cleaned up at
     # startup and after every scan.
     custom_images.move_old_tag_images(settings.data_dir, settings.images_dir)
@@ -390,37 +390,57 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
 
     # ---- HLS ----
 
-    @app.get("/api/items/{item_uid}/hls.m3u8")
-    async def get_hls_playlist(item_uid: str, video: str | None = None, audio: str | None = None,
-                               hls_support: str = "mse"):
-        """The whole video as an HLS playlist of 6-second segments (video converted)."""
+    async def hls_session_for(item_uid: str, caps: Capabilities, hls_support: str) -> tuple[str, float]:
+        """Open (or find) the HLS session for this video and browser: (its id, the length)."""
         row, path = await run_in_threadpool(stream_source, item_uid)
-        p = make_plan(row, Capabilities.from_query(video, audio), hls_support)
+        p = make_plan(row, caps, hls_support)
         if p.mode == "unsupported":
             raise HTTPException(409, "This video can't be played.")
         if not row["duration"]:
             raise HTTPException(409, "This video's length is unknown, so it can't be split into segments.")
         if p.delivery != "hls":
             raise HTTPException(409, f"This video is played as {p.delivery}, not HLS.")
-        source = hls.Source(path, p, row["duration"],
-                            bool(row["interlaced"]), row["height"], row["audio_codec"])
-        sid = hls_sessions.open(item_uid, source)
-        return Response(hls.playlist(row["duration"], sid), media_type="application/vnd.apple.mpegurl",
-                        headers={"Cache-Control": "no-store"})
-
-    def hls_session(sid: str) -> hls.Session:
-        session = hls_sessions.get(sid)
-        if session is None:
-            raise HTTPException(404, "This playback session has expired. Reload the player.")
-        return session
-
-    @app.get("/api/items/{item_uid}/hls/{sid}/{number}.ts")
-    async def get_hls_segment(item_uid: str, sid: str, number: int):
-        session = hls_session(sid)
         try:
-            path = await hls_sessions.media_segment(session, number)
+            rev = await run_in_threadpool(hls.revision, path)
+        except OSError:
+            raise HTTPException(404, "The video file is missing. Is the NAS connected?")
+        source = hls.Source(path, p, row["duration"], bool(row["interlaced"]), row["height"],
+                            row["audio_codec"], rev)
+        return await hls_sessions.open(item_uid, source), row["duration"]
+
+    def hls_query(video: str | None, audio: str | None, hls_support: str) -> str:
+        caps = Capabilities.from_query(video, audio)
+        return urlencode({"video": ",".join(sorted(caps.video)), "audio": ",".join(sorted(caps.audio)),
+                          "hls_support": hls_support if hls_support in HLS_SUPPORT else "mse"})
+
+    @app.get("/api/items/{item_uid}/hls.m3u8")
+    async def get_hls_playlist(item_uid: str, video: str | None = None, audio: str | None = None,
+                               hls_support: str = "mse"):
+        """The whole video as an HLS playlist of 6-second segments (video converted).
+        Each load is a new viewer, with its own position and encoder."""
+        sid, duration = await hls_session_for(item_uid, Capabilities.from_query(video, audio), hls_support)
+        text = hls.playlist(duration, sid, hls.new_viewer(), hls_query(video, audio, hls_support))
+        return Response(text, media_type="application/vnd.apple.mpegurl", headers={"Cache-Control": "no-store"})
+
+    @app.get("/api/items/{item_uid}/hls/{sid}/{viewer}/{number}.ts")
+    async def get_hls_segment(item_uid: str, sid: str, viewer: str, number: int, video: str | None = None,
+                              audio: str | None = None, hls_support: str = "mse"):
+        if not hls.valid_viewer(viewer):
+            raise HTTPException(404, "Unknown player.")
+        session = hls_sessions.get(sid)
+        if session is None or session.item_uid != item_uid:
+            # Expired (a long pause) or from before a restart: make it again from
+            # the URL. If that gives another session, the file has changed.
+            fresh, _ = await hls_session_for(item_uid, Capabilities.from_query(video, audio), hls_support)
+            if fresh != sid:
+                raise HTTPException(410, "The video has changed. Reload the player.")
+            session = hls_sessions.get(sid)
+        try:
+            path = await hls_sessions.media_segment(session, viewer, number)
         except playback.StreamBusy as exc:
             raise HTTPException(503, str(exc), headers={"Retry-After": "5"})
+        except hls.HlsGone as exc:
+            raise HTTPException(410, str(exc))
         except hls.HlsError as exc:
             raise HTTPException(502, str(exc))
         return FileResponse(path, media_type="video/mp2t", headers={"Cache-Control": "no-cache"})

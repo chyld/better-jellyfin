@@ -15,6 +15,8 @@ from reel.playback import StreamLimits, StreamManager
 from conftest import make_files, requires_ffmpeg
 
 CONVERT = Plan("transcode", "encode", "encode")
+V = "0" * 16          # a viewer id
+V2 = "1" * 16
 
 
 # ---- Playlists (no ffmpeg needed) ------------------------------------------------------
@@ -28,20 +30,25 @@ def test_segment_count():
 
 
 def test_playlist_covers_the_whole_video():
-    text = playlist(20.0, "abc")
+    text = playlist(20.0, "abc", V)
     lines = text.splitlines()
     assert lines[0] == "#EXTM3U" and lines[-1] == "#EXT-X-ENDLIST"
     assert "#EXT-X-PLAYLIST-TYPE:VOD" in lines
     durations = [float(line.split(":")[1].rstrip(",")) for line in lines if line.startswith("#EXTINF")]
     assert durations == [6.0, 6.0, 6.0, 2.0]
-    assert [line for line in lines if line.endswith(".ts")] == [f"hls/abc/{n}.ts" for n in range(4)]
+    assert [line for line in lines if line.endswith(".ts")] == [f"hls/abc/{V}/{n}.ts" for n in range(4)]
+    with_query = playlist(20.0, "abc", V, "video=h264").splitlines()
+    assert f"hls/abc/{V}/0.ts?video=h264" in with_query
 
 
-def test_sessions_are_shared_per_video_and_plan():
-    a = hls.session_id("video-1", CONVERT)
-    assert a == hls.session_id("video-1", CONVERT)
-    assert a != hls.session_id("video-2", CONVERT)
-    assert a != hls.session_id("video-1", Plan("transcode", "encode", "copy"))
+def test_sessions_are_shared_per_video_plan_and_file_version(monkeypatch):
+    a = hls.session_id("video-1", CONVERT, "r1")
+    assert a == hls.session_id("video-1", CONVERT, "r1")
+    assert a != hls.session_id("video-2", CONVERT, "r1")
+    assert a != hls.session_id("video-1", Plan("transcode", "encode", "copy"), "r1")
+    assert a != hls.session_id("video-1", CONVERT, "r2")                  # the file changed
+    monkeypatch.setattr(hls, "PROFILE_VERSION", hls.PROFILE_VERSION + 1)
+    assert a != hls.session_id("video-1", CONVERT, "r1")                  # the encoder changed
 
 
 # ---- Encoding on demand (real ffmpeg) ------------------------------------------------------
@@ -75,12 +82,17 @@ def codecs(segment: Path) -> list[str]:
     return list(dict.fromkeys(out.split()))  # TS lists each stream twice (with its program)
 
 
+def segment_uris(text: str) -> list[str]:
+    return [line for line in text.splitlines() if line and not line.startswith("#")]
+
+
 def manager(tmp_path, **limits):
     return HlsManager(tmp_path / "hls", StreamManager(StreamLimits(**limits)))
 
 
 def source(path, plan=CONVERT):
-    return Source(path, plan, 40.0, False, 240, "mp3")
+    rev = hls.revision(path) if path.exists() else "none"
+    return Source(path, plan, 40.0, False, 240, "mp3", rev)
 
 
 @requires_ffmpeg
@@ -88,8 +100,8 @@ def test_first_segment(tmp_path, long_clip):
     m = manager(tmp_path)
 
     async def scenario():
-        s = m.get(m.open("vid", source(long_clip)))
-        seg0 = await m.media_segment(s, 0)
+        s = m.get(await m.open("vid", source(long_clip)))
+        seg0 = await m.media_segment(s, V, 0)
         result = (codecs(seg0), first_pts(seg0))
         await m.shutdown()
         return result
@@ -104,12 +116,12 @@ def test_a_restarted_encoder_lines_up_with_the_playlist(tmp_path, long_clip):
     whole, jumped = manager(tmp_path / "a"), manager(tmp_path / "b")
 
     async def scenario():
-        a = whole.get(whole.open("vid", source(long_clip)))
+        a = whole.get(await whole.open("vid", source(long_clip)))
         for n in range(6):
-            reference = await whole.media_segment(a, n)
-        b = jumped.get(jumped.open("vid", source(long_clip)))
-        restarted = await jumped.media_segment(b, 5)     # nothing encoded yet: starts at 5
-        result = (b.start, first_pts(reference), first_pts(restarted))
+            reference = await whole.media_segment(a, V, n)
+        b = jumped.get(await jumped.open("vid", source(long_clip)))
+        restarted = await jumped.media_segment(b, V, 5)     # nothing encoded yet: starts at 5
+        result = (b.viewers[V].encoder.start, first_pts(reference), first_pts(restarted))
         await whole.shutdown()
         await jumped.shutdown()
         return result
@@ -125,12 +137,11 @@ def test_segments_already_made_are_served_without_restarting(tmp_path, long_clip
     m = manager(tmp_path)
 
     async def scenario():
-        s = m.get(m.open("vid", source(long_clip)))
-        await m.media_segment(s, 3)
-        proc = s.proc
-        await m.media_segment(s, 3)              # again: from the cache
-        await m.media_segment(s, 4)              # just ahead: wait, don't restart
-        same = s.proc is proc or s.start == 3
+        s = m.get(await m.open("vid", source(long_clip)))
+        await m.media_segment(s, V, 3)
+        await m.media_segment(s, V, 3)              # again: from the cache
+        await m.media_segment(s, V, 4)              # just ahead: wait, don't restart
+        same = s.starts == 1
         await m.shutdown()
         return same
 
@@ -143,13 +154,14 @@ def test_encoder_stops_when_far_enough_ahead(tmp_path, long_clip, monkeypatch):
     m = manager(tmp_path)
 
     async def scenario():
-        s = m.get(m.open("vid", source(long_clip)))
-        await m.media_segment(s, 0)
+        s = m.get(await m.open("vid", source(long_clip)))
+        await m.media_segment(s, V, 0)
+        enc = s.viewers[V].encoder
         for _ in range(100):
-            if not s.running():
+            if not enc.running():
                 break
             await asyncio.sleep(0.1)
-        stopped, produced = not s.running(), s.produced()
+        stopped, produced = not enc.running(), s.produced(enc)
         await m.shutdown()
         return stopped, produced
 
@@ -162,12 +174,12 @@ def test_encoders_use_stream_slots(tmp_path, long_clip):
     m = manager(tmp_path, max_streams=1, wait_for_slot=0.2)
 
     async def scenario():
-        first = m.get(m.open("a", source(long_clip)))
-        second = m.get(m.open("b", source(long_clip)))
-        await m.media_segment(first, 0)
+        first = m.get(await m.open("a", source(long_clip)))
+        second = m.get(await m.open("b", source(long_clip)))
+        await m.media_segment(first, V, 0)
         from reel.playback import StreamBusy
         with pytest.raises(StreamBusy):
-            await m.media_segment(second, 0)
+            await m.media_segment(second, V, 0)
         await m.shutdown()
 
     run(scenario())
@@ -178,11 +190,11 @@ def test_idle_sessions_are_removed(tmp_path, long_clip):
     m = manager(tmp_path)
 
     async def scenario():
-        s = m.get(m.open("vid", source(long_clip)))
-        await m.media_segment(s, 0)
+        s = m.get(await m.open("vid", source(long_clip)))
+        await m.media_segment(s, V, 0)
         folder = s.folder
         removed = await m.remove_idle(idle_seconds=0)
-        result = (removed, folder.exists(), m.get(s.sid), s.running())
+        result = (removed, folder.exists(), m.get(s.sid), bool(s.encoders()))
         await m.shutdown()
         return result
 
@@ -194,9 +206,9 @@ def test_shutdown_stops_encoders_and_clears_the_cache(tmp_path, long_clip):
     m = manager(tmp_path)
 
     async def scenario():
-        s = m.get(m.open("vid", source(long_clip)))
-        await m.media_segment(s, 0)
-        proc = s.proc
+        s = m.get(await m.open("vid", source(long_clip)))
+        await m.media_segment(s, V, 0)
+        proc = s.viewers[V].encoder.proc
         await m.shutdown()
         return proc
 
@@ -209,9 +221,9 @@ def test_out_of_range_segment(tmp_path):
     m = manager(tmp_path)
 
     async def scenario():
-        s = m.get(m.open("vid", source(Path("/nope.avi"))))
+        s = m.get(await m.open("vid", source(Path("/nope.avi"))))
         with pytest.raises(hls.HlsError):
-            await m.media_segment(s, 999)
+            await m.media_segment(s, V, 999)
 
     run(scenario())
 
@@ -236,7 +248,7 @@ def test_hls_through_the_api(client, media_root, long_clip, tmp_path):
 
     res = client.get(plan["url"])
     assert res.status_code == 200 and "mpegurl" in res.headers["content-type"]
-    uris = [line for line in res.text.splitlines() if line and not line.startswith("#")]
+    uris = segment_uris(res.text)
     duration = client.get(f"/api/items/{video}").json()["duration"]   # (this client's probe is a fake)
     assert len(uris) == segment_count(duration)
     base = f"/api/items/{video}/"
@@ -245,7 +257,8 @@ def test_hls_through_the_api(client, media_root, long_clip, tmp_path):
     (tmp_path / "seg.ts").write_bytes(seg.content)
     assert codecs(tmp_path / "seg.ts") == ["h264", "mp3"]   # MP3 copied as is
     assert first_pts(tmp_path / "seg.ts") == pytest.approx(12.0 + 1.4, abs=0.3)
-    assert client.get(base + "hls/nosuchsession/0.ts").status_code == 404
+    # An unknown session that can't be made again from the URL: the video changed.
+    assert client.get(base + f"hls/nosuchsession/{V}/0.ts?" + plan["url"].split("?")[1]).status_code == 410
 
 
 @requires_ffmpeg
@@ -266,7 +279,7 @@ def test_safari_gets_hls_even_for_copyable_video(client, media_root, clips):
     assert "re-encoded" in safari["note"] and chrome["note"] is None
     assert "hls_support=native" in safari["url"]
     playlist_text = client.get(safari["url"]).text
-    seg = client.get(f"/api/items/{video}/" + next(line for line in playlist_text.splitlines() if line.endswith(".ts")))
+    seg = client.get(f"/api/items/{video}/" + segment_uris(playlist_text)[0])
     assert seg.status_code == 200
 
 
@@ -291,7 +304,7 @@ def test_flac_audio_is_converted_for_hls(client, media_root, clips, tmp_path, mo
     assert client.get(f"/api/items/{video}/plan").json()["audio"] == "copy"          # progressive MP4
     plan = client.get(f"/api/items/{video}/plan", params={"hls_support": "mse"}).json()
     assert (plan["delivery"], plan["audio"]) == ("hls", "encode") and "FLAC" in plan["note"]
-    first = next(line for line in client.get(plan["url"]).text.splitlines() if line.endswith(".ts"))
+    first = segment_uris(client.get(plan["url"]).text)[0]
     seg = client.get(f"/api/items/{video}/" + first)
     assert seg.status_code == 200
     (tmp_path / "seg.ts").write_bytes(seg.content)
@@ -306,3 +319,250 @@ def test_playlist_refuses_a_video_that_isnt_hls(client, media_root):
     video = client.get(f"/api/libraries/{lib}/browse").json()["items"][0]["id"]
     # H.264 + AAC for hls.js: copied into the progressive stream, not HLS.
     assert client.get(f"/api/items/{video}/hls.m3u8", params={"hls_support": "mse"}).status_code == 409
+
+
+# ---- Failures, file changes, several viewers, the cache (real ffmpeg) ------------------------
+
+
+def slots_free(m) -> bool:
+    return m.streams.active == set() and m.streams._slots._value == m.streams.limits.max_streams
+
+
+@pytest.fixture
+def stuck(tmp_path):
+    """A named pipe nobody writes to: ffmpeg opens it and waits forever."""
+    import os
+    path = tmp_path / "stuck.avi"
+    os.mkfifo(path)
+    return path
+
+
+@requires_ffmpeg
+def test_encoder_that_makes_nothing_is_reaped_with_a_reason(tmp_path, stuck, monkeypatch):
+    monkeypatch.setattr(hls, "STARTUP_TIMEOUT", 1.0)
+    m = manager(tmp_path)
+
+    async def scenario():
+        s = m.get(await m.open("vid", source(stuck)))
+        with pytest.raises(hls.HlsError) as err:
+            await m.media_segment(s, V, 0)
+        result = (str(err.value), s.viewers[V].encoder.proc.returncode, slots_free(m))
+        await m.shutdown()
+        return result
+
+    message, returncode, free = run(scenario())
+    assert "no progress for 1 seconds" in message
+    assert returncode is not None and free
+
+
+@requires_ffmpeg
+def test_viewer_that_gives_up_stops_its_encoder(tmp_path, stuck, monkeypatch):
+    monkeypatch.setattr(hls, "SEGMENT_TIMEOUT", 0.5)
+    m = manager(tmp_path)
+
+    async def scenario():
+        s = m.get(await m.open("vid", source(stuck)))
+        with pytest.raises(hls.HlsError, match="Timed out"):
+            await m.media_segment(s, V, 0)
+        result = (s.viewers[V].encoder, s.viewers[V].last_failure, slots_free(m))
+        await m.shutdown()
+        return result
+
+    assert run(scenario()) == (None, "a viewer gave up waiting for it", True)
+
+
+@requires_ffmpeg
+def test_encoder_error_is_reported(tmp_path):
+    bad = tmp_path / "bad.avi"
+    bad.write_bytes(b"not a video at all" * 100)
+    m = manager(tmp_path)
+
+    async def scenario():
+        s = m.get(await m.open("vid", source(bad)))
+        with pytest.raises(hls.HlsError) as err:
+            await m.media_segment(s, V, 0)
+        result = (str(err.value), slots_free(m))
+        await m.shutdown()
+        return result
+
+    message, free = run(scenario())
+    assert message.startswith("ffmpeg couldn't produce") and "it stopped" not in message and free
+
+
+@pytest.fixture(scope="module")
+def two_minutes(tmp_path_factory):
+    """A small 2-minute video (20 segments), for viewers far apart."""
+    path = tmp_path_factory.mktemp("hls2") / "long.avi"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=160x120:rate=10:duration=120",
+                    "-f", "lavfi", "-i", "sine=duration=120", "-c:v", "mpeg4", "-c:a", "libmp3lame", "-shortest",
+                    str(path)], check=True)
+    return path
+
+
+@requires_ffmpeg
+def test_two_viewers_far_apart_dont_restart_each_other(tmp_path, two_minutes, monkeypatch):
+    monkeypatch.setattr(hls, "AHEAD_LIMIT", 3)
+    m = manager(tmp_path)
+
+    async def scenario():
+        s = m.get(await m.open("vid", Source(two_minutes, CONVERT, 120.0, False, 120, "mp3",
+                                             hls.revision(two_minutes))))
+        for n in range(3):
+            await m.media_segment(s, V, n)          # one tab near the start
+            await m.media_segment(s, V2, 12 + n)    # another further on
+        result = (s.viewers[V].encoder.start, s.viewers[V2].encoder.start)
+        await m.shutdown()
+        return result
+
+    near, far = run(scenario())
+    # Each tab kept its own encoder: the far one was never moved back to the start.
+    assert near < 12 and far == 12
+
+
+@requires_ffmpeg
+def test_viewers_are_capped_per_session(tmp_path, long_clip, monkeypatch):
+    monkeypatch.setattr(hls, "MAX_VIEWERS", 2)
+    m = manager(tmp_path)
+
+    async def scenario():
+        s = m.get(await m.open("vid", source(long_clip)))
+        for viewer in ("a" * 16, "b" * 16, "c" * 16):
+            await m.media_segment(s, viewer, 0)
+        viewers = sorted(s.viewers)
+        await m.shutdown()
+        return viewers
+
+    assert run(scenario()) == ["b" * 16, "c" * 16]
+
+
+@requires_ffmpeg
+def test_replaced_file_retires_the_old_session(tmp_path, long_clip):
+    import os
+    video = tmp_path / "v.avi"
+    video.write_bytes(long_clip.read_bytes())
+    m = manager(tmp_path)
+
+    async def scenario():
+        old = m.get(await m.open("vid", source(video)))
+        await m.media_segment(old, V, 0)
+        proc = old.viewers[V].encoder.proc
+        video.write_bytes(long_clip.read_bytes()[:-5000])       # a new version of the file
+        os.utime(video, ns=(1, 1))
+        new_sid = await m.open("vid", source(video))
+        result = (new_sid != old.sid, old.retired, old.folder.exists(), proc.returncode is not None,
+                  m.get(old.sid), slots_free(m))
+        await m.shutdown()
+        return result
+
+    changed, retired, folder, reaped, lookup, free = run(scenario())
+    assert changed and retired and not folder and reaped and lookup is None and free
+
+
+@requires_ffmpeg
+def test_file_replaced_during_a_session_is_noticed_when_encoding(tmp_path, long_clip):
+    import os
+    video = tmp_path / "v.avi"
+    video.write_bytes(long_clip.read_bytes())
+    m = manager(tmp_path)
+
+    async def scenario():
+        s = m.get(await m.open("vid", source(video)))
+        await m.media_segment(s, V, 0)
+        os.utime(video, ns=(1, 1))
+        with pytest.raises(hls.HlsGone):
+            await m.media_segment(s, V2, 6)          # needs a new encoder: checks the file
+        await asyncio.sleep(0.5)                     # retiring runs in the background
+        result = (s.retired, s.folder.exists(), slots_free(m))
+        await m.shutdown()
+        return result
+
+    assert run(scenario()) == (True, False, True)
+
+
+@requires_ffmpeg
+def test_moved_file_keeps_its_session(tmp_path, long_clip):
+    import os
+    video = tmp_path / "old-name.avi"
+    video.write_bytes(long_clip.read_bytes())
+    m = manager(tmp_path)
+
+    async def scenario():
+        s = m.get(await m.open("vid", source(video)))
+        await m.media_segment(s, V, 0)
+        moved = tmp_path / "new-name.avi"
+        os.rename(video, moved)
+        sid = await m.open("vid", source(moved))
+        seg = await m.media_segment(s, V, 5)         # encoded from the new path
+        result = (sid == s.sid, s.source.path == moved, seg.exists())
+        await m.shutdown()
+        return result
+
+    assert run(scenario()) == (True, True, True)
+
+
+@requires_ffmpeg
+def test_cache_limit_keeps_what_viewers_need(tmp_path, long_clip, monkeypatch):
+    m = manager(tmp_path)
+    m.cache_limit = 1                                # far too small: evict all it can
+
+    async def scenario():
+        s = m.get(await m.open("vid", source(long_clip)))
+        for n in range(7):
+            await m.media_segment(s, V, n)
+        await m._stop(s.viewers[V])
+        monkeypatch.setattr(hls, "AHEAD_LIMIT", 0)
+        monkeypatch.setattr(hls, "LOOKAHEAD", 0)
+        freed = m.enforce_cache_limit()              # the viewer is at 6: keeps 5 and 6
+        left = sorted(int(p.stem) for p in s.folder.glob("*.ts"))
+        await m.shutdown()
+        return freed, left
+
+    freed, left = run(scenario())
+    assert freed > 0 and left == [5, 6]
+
+
+@pytest.fixture
+def hls_video(client, media_root, long_clip):
+    folder = media_root / "Tapes"
+    folder.mkdir()
+    (folder / "old.avi").write_bytes(long_clip.read_bytes())
+    lib = client.post("/api/libraries", json={"name": "T", "path": str(folder)}).json()["id"]
+    client.post(f"/api/libraries/{lib}/scan")
+    client.scans.wait_idle()
+    video = client.get(f"/api/libraries/{lib}/browse").json()["items"][0]["id"]
+    plan = client.get(f"/api/items/{video}/plan", params={"hls_support": "mse"}).json()
+    uris = segment_uris(client.get(plan["url"]).text)
+    return video, folder / "old.avi", [f"/api/items/{video}/{u}" for u in uris]
+
+
+@requires_ffmpeg
+def test_expired_session_is_made_again_from_the_segment_url(client, hls_video):
+    """A long pause: the session was dropped, and the player just carries on."""
+    _, _, segments = hls_video
+    assert client.get(segments[0]).status_code == 200
+    manager = client.app.state.hls
+    assert client.portal.call(manager.remove_idle, 0) == 1 and not manager.sessions
+    assert client.get(segments[1]).status_code == 200
+    assert len(manager.sessions) == 1
+
+
+@requires_ffmpeg
+def test_file_replaced_while_playing_answers_gone(client, hls_video, long_clip):
+    import os
+    _, path, segments = hls_video
+    assert client.get(segments[0]).status_code == 200
+    path.write_bytes(long_clip.read_bytes()[:-5000])
+    os.utime(path, ns=(1, 1))
+    res = client.get(segments[6])                    # not encoded yet: the file is checked
+    assert res.status_code == 410 and "changed" in res.json()["detail"]
+    manager = client.app.state.hls
+    assert client.portal.call(manager.remove_idle, 0) >= 0
+    assert client.get(segments[6]).status_code == 410   # a dropped session of the old file: still gone
+
+
+@requires_ffmpeg
+def test_segment_for_a_bad_viewer_id_is_refused(client, hls_video):
+    _, _, segments = hls_video
+    parts = segments[0].split("/")
+    parts[-2] = "not-a-viewer"
+    assert client.get("/".join(parts)).status_code == 404

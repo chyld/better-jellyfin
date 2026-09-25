@@ -12,10 +12,11 @@ function fakeVideo({ canPlayHls = "" } = {}) {
     removeAttribute(name) { if (name === "src") this.src = ""; },
     load() {},
     addEventListener() {},
+    removeEventListener() {},
   };
 }
 
-const { makeSource } = await import("../../reel/static/sources.js");
+const { makeSource, shouldReload } = await import("../../reel/static/sources.js");
 
 test("file source: the browser seeks within the file", async () => {
   const video = fakeVideo();
@@ -70,4 +71,11 @@ test("hlsSupport(): native only for Apple's browsers, otherwise hls.js if MSE ex
   assert.equal(hlsSupport(), "mse");         // Chrome, Firefox
   set("", "", false);
   assert.equal(hlsSupport(), "none");
+});
+
+test("hls: a changed video (410) reloads the playlist, but not in a loop", () => {
+  assert.equal(shouldReload(410, 0, 60_000), true);
+  assert.equal(shouldReload(410, 55_000, 60_000), false); // reloaded 5 s ago: give up
+  assert.equal(shouldReload(404, 0, 60_000), false);
+  assert.equal(shouldReload(undefined, 0, 60_000), false);
 });

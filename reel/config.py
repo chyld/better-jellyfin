@@ -26,6 +26,8 @@ class Settings:
     image_urls: str = "internet"
     # How many remuxes/conversions may run at once.
     max_streams: int = 3
+    # How much disk the HLS segment cache may use, in MB.
+    hls_cache_mb: int = 2048
 
     @property
     def db_path(self) -> Path:
@@ -75,4 +77,5 @@ class Settings:
             missing_grace=timedelta(days=float(os.environ.get("REEL_MISSING_GRACE_DAYS", "7"))),
             image_urls=_choice("REEL_IMAGE_URLS", ("internet", "lan", "off"), "internet"),
             max_streams=max(1, int(os.environ.get("REEL_MAX_STREAMS", "3"))),
+            hls_cache_mb=max(100, int(os.environ.get("REEL_HLS_CACHE_MB", "2048"))),
         )
