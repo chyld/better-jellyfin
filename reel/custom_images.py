@@ -105,10 +105,13 @@ def set_folder_image(conn: sqlite3.Connection, images_dir: Path, library_id: int
     image_uid = existing["uid"] if existing else new_uid()
     version = _version()
     save_upload(data, folder_image_path(images_dir, image_uid, version))
+    # The uid and version are written together, so the row always names the file
+    # just saved, even if another first upload to this folder got in between (the
+    # loser's file is then an orphan, removed by prune()).
     conn.execute(
         """
         INSERT INTO folder_images (uid, library_id, rel_dir, version) VALUES (?, ?, ?, ?)
-        ON CONFLICT (library_id, rel_dir) DO UPDATE SET version = excluded.version
+        ON CONFLICT (library_id, rel_dir) DO UPDATE SET uid = excluded.uid, version = excluded.version
         """,
         (image_uid, library_id, rel_dir, version),
     )

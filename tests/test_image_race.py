@@ -105,3 +105,26 @@ def test_old_style_file_names_are_adopted(client, lib, picture, settings):
         conn.close()
     assert (folder / f"{video}-{version}.jpg").exists()
     assert client.get(f"/api/items/{video}/thumb").status_code == 200
+
+
+def test_two_first_uploads_to_a_folder_leave_a_working_picture(client, lib, picture, settings, monkeypatch):
+    """A second first-upload lands while the first is saving its file."""
+    real_save = custom_images.save_upload
+    lib_pk = connect(settings.db_path).execute("SELECT id FROM libraries").fetchone()[0]
+    raced = []
+
+    def save_then_race(data, out, **kwargs):
+        real_save(data, out, **kwargs)
+        if not raced:
+            raced.append(True)
+            other = connect(settings.db_path)
+            try:
+                custom_images.set_folder_image(other, settings.images_dir, lib_pk, "Tapes", data)
+            finally:
+                other.close()
+
+    monkeypatch.setattr(custom_images, "save_upload", save_then_race)
+    assert client.put(f"/api/libraries/{lib}/folder-image", params={"path": "Tapes"}, content=picture).status_code == 200
+    conn = connect(settings.db_path)
+    row = custom_images.custom_folder_image(conn, lib_pk, "Tapes")
+    assert custom_images.folder_image_path(settings.images_dir, row["uid"], row["version"]).is_file()
