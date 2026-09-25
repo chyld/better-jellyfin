@@ -1,10 +1,10 @@
 // Full-page video player.
 //
-// Direct files seek natively. Remuxed and transcoded videos arrive as a stream
-// that starts at `offset` seconds, so seeking loads a new stream from the new
-// time, and the player's clock is offset + the <video> element's own clock.
+// The server decides how each video is sent (plan.py); sources.js hides the
+// difference between a file, a progressive stream and HLS from the controls.
 import { api, formatDuration, h } from "./api.js";
-import { capabilities, capsQuery } from "./caps.js";
+import { capabilities, capsQuery, hlsSupport } from "./caps.js";
+import { makeSource } from "./sources.js";
 
 const HIDE_CONTROLS_AFTER = 3000;
 const BADGES = { remux: "Repackaging", audio: "Converting audio", transcode: "Converting" };
@@ -49,12 +49,11 @@ export async function renderPlayer(page, itemId) {
   const caps = await capabilities();
   const [item, plan] = await Promise.all([
     api("GET", `/api/items/${itemId}`),
-    api("GET", `/api/items/${itemId}/plan?${capsQuery(caps)}`),
+    api("GET", `/api/items/${itemId}/plan?${capsQuery(caps)}&hls_support=${hlsSupport()}`),
   ]);
   if (plan.mode === "unsupported" || item.missing) throw new Error("This video can't be played.");
 
   const streamed = plan.streamed;
-  let offset = 0;
   let dragTime = null; // while dragging the seek bar: where it would seek to
   let hideTimer = null;
 
@@ -115,20 +114,28 @@ export async function renderPlayer(page, itemId) {
   page.replaceChildren(player);
   document.body.classList.add("playing");
 
+  // How the video arrives (file, progressive stream or HLS): see sources.js.
+  const source = await makeSource(
+    video,
+    plan,
+    (text) => {
+      spinner.hidden = true;
+      message.hidden = false;
+      message.textContent = text;
+    },
+    { nativeHls: hlsSupport() === "native" },
+  );
   const duration = () =>
-    streamed || !Number.isFinite(video.duration) ? item.duration || 0 : video.duration;
-  const position = () => (streamed ? offset : 0) + video.currentTime;
+    plan.delivery === "progressive" || !Number.isFinite(video.duration) ? item.duration || 0 : video.duration;
+  const position = () => source.position();
 
   function load(start) {
-    offset = streamed ? start : 0;
-    video.src = streamed ? `${plan.url}&start=${start.toFixed(1)}` : `${plan.url}${start ? `#t=${start}` : ""}`;
+    source.load(start);
     video.play().catch(() => {}); // autoplay may be blocked until the user clicks
   }
 
   function seek(t) {
-    const target = clampSeek(t, duration());
-    if (streamed) load(target);
-    else video.currentTime = target;
+    source.seek(clampSeek(t, duration()));
     updateTime();
   }
 
@@ -144,9 +151,7 @@ export async function renderPlayer(page, itemId) {
     timeTotal.textContent = formatDuration(total) || "–";
     fillBar.style.width = pct(shown);
     knob.style.left = pct(shown);
-    if (video.buffered.length) {
-      buffered.style.width = pct((streamed ? offset : 0) + video.buffered.end(video.buffered.length - 1));
-    }
+    buffered.style.width = pct(source.bufferedEnd());
     seekBar.setAttribute("aria-valuemax", Math.round(total));
     seekBar.setAttribute("aria-valuenow", Math.round(shown));
     seekBar.setAttribute("aria-valuetext", timeNow.textContent);
@@ -299,8 +304,6 @@ export async function renderPlayer(page, itemId) {
     clearTimeout(hideTimer);
     if (document.fullscreenElement) document.exitFullscreen();
     // Dropping the source closes the connection, which stops ffmpeg on the server.
-    video.pause();
-    video.removeAttribute("src");
-    video.load();
+    source.destroy();
   };
 }

@@ -55,6 +55,17 @@ export function capabilities() {
   return cached;
 }
 
+/** How this browser can play HLS: "native" (Safari, iOS), "mse" (hls.js can run) or "none".
+ *  Only Apple's browsers count as native: others that claim it still get hls.js, and
+ *  Safari needs HLS for every streamed video (it can't play the progressive stream). */
+export function hlsSupport() {
+  const native = document.createElement("video").canPlayType("application/vnd.apple.mpegurl") !== "";
+  const apple = /Apple/.test(globalThis.navigator?.vendor || "");
+  if (native && apple) return "native";
+  if (globalThis.MediaSource || globalThis.ManagedMediaSource) return "mse";
+  return native ? "native" : "none";
+}
+
 /** "video=h264,vp9&audio=aac,opus" for /plan and /stream. */
 export function capsQuery(caps) {
   return `video=${encodeURIComponent(caps.video.join(","))}&audio=${encodeURIComponent(caps.audio.join(","))}`;

@@ -1,7 +1,7 @@
 // Home (library tiles), folder browsing and the video details page.
 import { api, artBox, encodePath, fill, formatDuration, formatSize, h, parseTags, plural, tagError } from "./api.js";
 import { openImageDialog } from "./imagedialog.js";
-import { capabilities, capsQuery } from "./caps.js";
+import { capabilities, capsQuery, hlsSupport } from "./caps.js";
 
 const SORT_KEY = "reel.sort";
 
@@ -410,7 +410,7 @@ export async function renderItem(view, itemId) {
   const caps = await capabilities();
   const [item, plan] = await Promise.all([
     api("GET", `/api/items/${itemId}`),
-    api("GET", `/api/items/${itemId}/plan?${capsQuery(caps)}`),
+    api("GET", `/api/items/${itemId}/plan?${capsQuery(caps)}&hls_support=${hlsSupport()}`),
   ]);
   // The mode for this browser (it may play more than a typical one, e.g. HEVC).
   item.play_mode = plan.mode;

@@ -42,6 +42,46 @@ def direct_content_type(path: str) -> str:
     return DIRECT_TYPES.get(Path(path).suffix.lower(), "application/octet-stream")
 
 
+def input_args(src: Path, start: float) -> list[str]:
+    cmd = ["ffmpeg", "-v", "error", "-nostdin"]
+    if start > 0:
+        # Before -i: a fast seek that jumps straight to the nearest keyframe.
+        cmd += ["-ss", f"{start:.3f}"]
+    # "V" (capital) skips cover art, which some files store as their first video stream.
+    return cmd + ["-i", str(src), "-map", "0:V:0", "-map", "0:a:0?", "-sn", "-dn"]
+
+
+def video_args(plan: Plan, *, interlaced: bool, height: int | None, keyframe_every: float) -> list[str]:
+    if plan.video == "copy":
+        return ["-c:v", "copy"]
+    filters = []
+    if interlaced:
+        filters.append("bwdif=mode=send_frame")
+    if height and height > 1080:
+        filters.append("scale=-2:1080")
+    # H.264 in 4:2:0 needs even dimensions; old codecs sometimes have odd ones.
+    filters.append("scale=trunc(iw/2)*2:trunc(ih/2)*2")
+    return [
+        "-vf", ",".join(filters),
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "21",
+        "-pix_fmt", "yuv420p", "-profile:v", "high",
+        # Regular keyframes: small fragments start fast, and HLS segments cut exactly.
+        "-force_key_frames", f"expr:gte(t,n_forced*{keyframe_every:g})",
+    ]
+
+
+def audio_args(plan: Plan, audio_codec: str | None) -> list[str]:
+    if plan.audio == "copy":
+        args = ["-c:a", "copy"]
+        if audio_codec == "aac":
+            # AAC from MPEG-TS files is in ADTS framing, which MP4 can't hold as-is.
+            args += ["-bsf:a", "aac_adtstoasc"]
+        return args
+    if plan.audio == "encode":
+        return ["-c:a", "aac", "-b:a", "160k", "-ac", "2"]
+    return []
+
+
 def stream_command(
     src: Path,
     plan: Plan,
@@ -55,43 +95,16 @@ def stream_command(
     the video and the audio are each copied untouched or converted."""
     if not plan.streamed:
         raise ValueError(f"a {plan.mode!r} plan isn't streamed")
-    cmd = ["ffmpeg", "-v", "error", "-nostdin"]
-    if start > 0:
-        # Before -i: a fast seek that jumps straight to the nearest keyframe.
-        cmd += ["-ss", f"{start:.3f}"]
-    # "V" (capital) skips cover art, which some files store as their first video stream.
-    cmd += ["-i", str(src), "-map", "0:V:0", "-map", "0:a:0?", "-sn", "-dn"]
-
-    if plan.video == "copy":
-        cmd += ["-c:v", "copy"]
-    else:
-        filters = []
-        if interlaced:
-            filters.append("bwdif=mode=send_frame")
-        if height and height > 1080:
-            filters.append("scale=-2:1080")
-        # H.264 in 4:2:0 needs even dimensions; old codecs sometimes have odd ones.
-        filters.append("scale=trunc(iw/2)*2:trunc(ih/2)*2")
-        cmd += [
-            "-vf", ",".join(filters),
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "21",
-            "-pix_fmt", "yuv420p", "-profile:v", "high",
-            # A keyframe every 2 seconds keeps fragments small, so playback starts fast.
-            "-force_key_frames", "expr:gte(t,n_forced*2)",
-        ]
-
     output = FMP4_OUTPUT
-    if plan.audio == "copy":
-        cmd += ["-c:a", "copy"]
-        if audio_codec == "aac":
-            # AAC from MPEG-TS files is in ADTS framing, which MP4 can't hold as-is.
-            cmd += ["-bsf:a", "aac_adtstoasc"]
-        if audio_codec in ("ac3", "eac3"):
-            # ffmpeg needs the first (E-)AC-3 packet before it can write the MP4 header.
-            output = [x + "+delay_moov" if x.startswith("frag_keyframe") else x for x in FMP4_OUTPUT]
-    elif plan.audio == "encode":
-        cmd += ["-c:a", "aac", "-b:a", "160k", "-ac", "2"]
-    return cmd + output
+    if plan.audio == "copy" and audio_codec in ("ac3", "eac3"):
+        # ffmpeg needs the first (E-)AC-3 packet before it can write the MP4 header.
+        output = [x + "+delay_moov" if x.startswith("frag_keyframe") else x for x in FMP4_OUTPUT]
+    return [
+        *input_args(src, start),
+        *video_args(plan, interlaced=interlaced, height=height, keyframe_every=2),
+        *audio_args(plan, audio_codec),
+        *output,
+    ]
 
 
 class StreamBusy(Exception):
@@ -128,25 +141,32 @@ class StreamManager:
         self._slots = asyncio.Semaphore(self.limits.max_streams)
         self.active: set[asyncio.subprocess.Process] = set()
 
-    async def stream(self, cmd: list[str]) -> AsyncIterator[bytes]:
-        """Yield ffmpeg's output as it's made. Raises StreamBusy or StreamFailed
-        before the first chunk if it can't start."""
+    async def acquire_slot(self) -> None:
+        """Take one of the `max_streams` slots (HLS encoders use these too)."""
         try:
             await asyncio.wait_for(self._slots.acquire(), self.limits.wait_for_slot)
         except TimeoutError:
             raise StreamBusy(
                 f"The server is already converting {self.limits.max_streams} videos. Try again in a moment."
             )
+
+    def release_slot(self) -> None:
+        self._slots.release()
+
+    async def stream(self, cmd: list[str]) -> AsyncIterator[bytes]:
+        """Yield ffmpeg's output as it's made. Raises StreamBusy or StreamFailed
+        before the first chunk if it can't start."""
+        await self.acquire_slot()
         proc = None
         errors: deque[str] = deque(maxlen=self.limits.error_lines)
-        drain = None
+        reader = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd, stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
             self.active.add(proc)
-            drain = asyncio.create_task(_drain(proc.stderr, errors))
+            reader = asyncio.create_task(drain(proc.stderr, errors))
 
             try:
                 first = await asyncio.wait_for(proc.stdout.read(CHUNK_SIZE), self.limits.startup_timeout)
@@ -154,7 +174,7 @@ class StreamManager:
                 raise StreamFailed(f"ffmpeg produced no video within {self.limits.startup_timeout:g} seconds.")
             if not first:
                 await proc.wait()
-                await drain
+                await reader
                 detail = errors[-1] if errors else f"exit code {proc.returncode}"
                 raise StreamFailed(f"ffmpeg couldn't play this video ({detail}).")
             yield first
@@ -180,13 +200,13 @@ class StreamManager:
                         await proc.wait()
                     # Only once it's really gone, so `active` never under-reports.
                     self.active.discard(proc)
-                if drain is not None:
-                    drain.cancel()
+                if reader is not None:
+                    reader.cancel()
                     try:
-                        await drain
+                        await reader
                     except (asyncio.CancelledError, Exception):
                         pass
-            self._slots.release()
+            self.release_slot()
 
     async def shutdown(self) -> None:
         """Stop every running stream (server shutdown)."""
@@ -201,7 +221,7 @@ class StreamManager:
 MAX_LINE = 500
 
 
-async def _drain(pipe: asyncio.StreamReader, keep: deque[str]) -> None:
+async def drain(pipe: asyncio.StreamReader, keep: deque[str]) -> None:
     """Read a pipe to the end, keeping its last lines (each capped in length).
 
     Reads in chunks rather than lines: readline() gives up on very long lines,

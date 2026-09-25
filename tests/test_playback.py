@@ -342,7 +342,7 @@ def test_hevc_depends_on_the_browser(client, items):
     assert typical["mode"] == "transcode" and typical["url"].startswith(f"/api/items/{items['hevc.mp4']}/stream?")
     capable = client.get(f"/api/items/{items['hevc.mp4']}/plan", params={"video": "h264,hevc"}).json()
     assert capable == {"mode": "direct", "video": None, "audio": None, "streamed": False,
-                       "url": f"/api/items/{items['hevc.mp4']}/file"}
+                       "delivery": "file", "url": f"/api/items/{items['hevc.mp4']}/file"}
 
 
 @requires_ffmpeg

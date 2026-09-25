@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import shutil
 import sqlite3
@@ -14,9 +15,9 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import browse, custom_images, fetch, libraries, playback, tags, users
+from . import browse, custom_images, fetch, hls, libraries, playback, tags, users
 from .paths import OutsideRoot, resolve_inside
-from .plan import Capabilities, plan as make_plan
+from .plan import Capabilities, Plan, plan as make_plan
 from .config import Settings
 from .db import connect, init_db
 from .images import MAX_UPLOAD_BYTES, Thumbnailer, ThumbnailError
@@ -74,6 +75,7 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
     )
     thumbs = Thumbnailer(settings.thumbs_dir)
     streams = playback.StreamManager(playback.StreamLimits(max_streams=settings.max_streams))
+    hls_sessions = hls.HlsManager(settings.hls_dir, streams)
     # Uploaded images whose video, folder or tag is gone are cleaned up at
     # startup and after every scan.
     custom_images.move_old_tag_images(settings.data_dir, settings.images_dir)
@@ -88,7 +90,10 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         scans.start()
+        housekeeping = asyncio.create_task(hls_sessions.run_housekeeping())
         yield
+        housekeeping.cancel()
+        await hls_sessions.shutdown()
         await streams.shutdown()
         scans.stop()
 
@@ -98,6 +103,7 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
     app.state.settings = settings
     app.state.scans = scans
     app.state.streams = streams
+    app.state.hls = hls_sessions
 
     def get_db() -> Iterator[sqlite3.Connection]:
         conn = connect(settings.db_path)
@@ -353,23 +359,70 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
 
     @app.get("/api/items/{item_uid}/plan")
     def get_item_plan(item_uid: str, video: str | None = None, audio: str | None = None,
-                      conn: sqlite3.Connection = Depends(get_db)):
-        """How this browser should play the video: `video`/`audio` list the codecs
-        it can decode (e.g. video=h264,hevc&audio=aac,ac3). Returns the mode and
-        the URL to load (streams take a `start` parameter on top)."""
+                      hls_support: str = "none", conn: sqlite3.Connection = Depends(get_db)):
+        """How this browser should play the video.
+
+        `video`/`audio` list the codecs it can decode (e.g. video=h264,hevc&audio=aac,ac3);
+        `hls_support` is native (Safari), mse (hls.js can run) or none. Returns the
+        mode, the delivery (file | progressive | hls) and the URL to load.
+        """
         row = conn.execute("SELECT * FROM media_items WHERE uid = ?", (item_uid,)).fetchone()
         if row is None:
             raise HTTPException(404, "Video not found.")
         caps = Capabilities.from_query(video, audio)
         p = make_plan(row, caps)
+        query = urlencode({"video": ",".join(sorted(caps.video)), "audio": ",".join(sorted(caps.audio))})
+        delivery, url = choose_delivery(item_uid, p, row["duration"], hls_support, query)
+        return {"mode": p.mode, "video": p.video, "audio": p.audio, "streamed": p.streamed,
+                "delivery": delivery, "url": url}
+
+    def choose_delivery(item_uid: str, p: Plan, duration: float | None, hls_support: str, query: str):
+        """file for direct play; HLS for converted video (exact segments, cheap seeking)
+        and for anything streamed to Safari (which can't play the progressive stream);
+        otherwise the progressive stream, which copies video untouched."""
         if p.mode == "unsupported":
-            url = None
-        elif p.streamed:
-            url = f"/api/items/{item_uid}/stream?" + urlencode({"video": ",".join(sorted(caps.video)),
-                                                                 "audio": ",".join(sorted(caps.audio))})
-        else:
-            url = f"/api/items/{item_uid}/file"
-        return {"mode": p.mode, "video": p.video, "audio": p.audio, "streamed": p.streamed, "url": url}
+            return None, None
+        if not p.streamed:
+            return "file", f"/api/items/{item_uid}/file"
+        wants_hls = hls_support == "native" or (hls_support == "mse" and p.mode == "transcode")
+        if wants_hls and duration:
+            return "hls", f"/api/items/{item_uid}/hls.m3u8?{query}"
+        return "progressive", f"/api/items/{item_uid}/stream?{query}"
+
+    # ---- HLS ----
+
+    @app.get("/api/items/{item_uid}/hls.m3u8")
+    async def get_hls_playlist(item_uid: str, video: str | None = None, audio: str | None = None):
+        """The whole video as an HLS playlist of 6-second segments (video converted)."""
+        row, path = await run_in_threadpool(stream_source, item_uid)
+        p = make_plan(row, Capabilities.from_query(video, audio))
+        if p.mode == "unsupported":
+            raise HTTPException(409, "This video can't be played.")
+        if not row["duration"]:
+            raise HTTPException(409, "This video's length is unknown, so it can't be split into segments.")
+        # HLS segments must cut at exact times, so the video is always encoded here.
+        source = hls.Source(path, Plan("transcode", "encode", p.audio), row["duration"],
+                            bool(row["interlaced"]), row["height"], row["audio_codec"])
+        sid = hls_sessions.open(item_uid, source)
+        return Response(hls.playlist(row["duration"], sid), media_type="application/vnd.apple.mpegurl",
+                        headers={"Cache-Control": "no-store"})
+
+    def hls_session(sid: str) -> hls.Session:
+        session = hls_sessions.get(sid)
+        if session is None:
+            raise HTTPException(404, "This playback session has expired. Reload the player.")
+        return session
+
+    @app.get("/api/items/{item_uid}/hls/{sid}/{number}.ts")
+    async def get_hls_segment(item_uid: str, sid: str, number: int):
+        session = hls_session(sid)
+        try:
+            path = await hls_sessions.media_segment(session, number)
+        except playback.StreamBusy as exc:
+            raise HTTPException(503, str(exc), headers={"Retry-After": "5"})
+        except hls.HlsError as exc:
+            raise HTTPException(502, str(exc))
+        return FileResponse(path, media_type="video/mp2t", headers={"Cache-Control": "no-cache"})
 
     @app.get("/api/items/{item_uid}/stream")
     async def get_item_stream(item_uid: str, start: float = 0, video: str | None = None, audio: str | None = None):

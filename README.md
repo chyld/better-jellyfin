@@ -272,6 +272,24 @@ conversion. **Video and audio are decided separately:**
 The video page shows the mode for your browser, and the player shows a **CONVERTING**,
 **CONVERTING AUDIO** or **REPACKAGING** badge.
 
+**Delivery** (how the bytes get to the player, `reel/static/sources.js`):
+
+| Delivery | Used for | Seeking |
+|---|---|---|
+| **file** | direct play | native (range requests) |
+| **HLS** | converted video; and everything streamed to Safari/iOS, which can't play the progressive stream | the player's own: jumping into already-encoded video is instant; a far jump restarts the encoder there |
+| **progressive** | repackaged and audio-only streams in other browsers (the video is copied, so it can't be cut into exact segments) | a new stream from the new time (~0.5 s) |
+
+HLS details: the playlist lists the **whole video** as 6-second MPEG-TS segments up front, so the
+length is known and any point can be sought. One ffmpeg per video encodes ahead of the viewer
+into a cache (`<data>/hls`, emptied at startup), with a keyframe forced on every segment
+boundary, and **pauses once it's 2 minutes ahead**. Segments far behind the viewer are deleted,
+and a session unused for 10 minutes is removed. Viewers of the same video share a session.
+Encoders use the same `REEL_MAX_STREAMS` slots. Safari plays HLS natively; other browsers use the
+bundled [hls.js](https://github.com/video-dev/hls.js) (light build, Apache-2.0). (Segments are
+MPEG-TS rather than fragmented MP4 because ffmpeg restarts fMP4 timestamps at zero on each run,
+which would misplace segments from a restarted encoder.)
+
 Details:
 - **HEVC** is converted unless the browser reports it can decode it (which depends on its
   hardware); then it's played or copied as is.
@@ -465,7 +483,9 @@ JSON over HTTP. Every ID is a UUID. There's no authentication yet (see
 | GET | `/api/items/{id}` | Details: codecs, size, path, breadcrumbs, tags. |
 | GET | `/api/items/{id}/thumb` | The video's picture (landscape JPEG). |
 | GET, HEAD | `/api/items/{id}/file` | The original file, with range requests (direct play). |
-| GET | `/api/items/{id}/plan?video=&audio=` | How this browser should play it: `video`/`audio` list the codecs it decodes (e.g. `video=h264,hevc&audio=aac,ac3`). Returns the mode, what happens to each track, and the URL to load. |
+| GET | `/api/items/{id}/plan?video=&audio=&hls_support=` | How this browser should play it: `video`/`audio` list the codecs it decodes (e.g. `video=h264,hevc&audio=aac,ac3`), `hls_support` is `native`, `mse` or `none`. Returns the mode, what happens to each track, the delivery (`file`, `progressive`, `hls`) and the URL to load. |
+| GET | `/api/items/{id}/hls.m3u8?video=&audio=` | The whole video as an HLS playlist of 6-second segments (video converted). |
+| GET | `/api/items/{id}/hls/{session}/{n}.ts` | Segment `n`, encoded on demand. |
 | GET | `/api/items/{id}/stream?start=&video=&audio=` | A fragmented MP4 from `start` seconds, each track copied or converted per the plan for those codecs. |
 | PUT | `/api/items/{id}/image` | Upload a picture (request body = the image). |
 | POST | `/api/items/{id}/image-url` | `{url}`: set a picture from a URL. |
@@ -514,8 +534,8 @@ changes how thumbnails are made.
 ### Tests
 
 ```sh
-uv run pytest              # backend: 417 tests
-node --test tests/js/      # frontend: 21 tests
+uv run pytest              # backend: 430 tests
+node --test tests/js/      # frontend: 26 tests
 scripts/docker-smoke.sh    # builds the image and checks it end to end (needs Docker)
 ```
 
@@ -551,6 +571,7 @@ reel/
   scan_manager.py    background scan queue with progress
   probe.py           ffprobe wrapper (facts only)
   plan.py            deciding how to play a video for a given browser
+  hls.py             HLS playlists and on-demand segment encoding
   playback.py        ffmpeg commands for remux/convert; streaming and killing ffmpeg
   images.py          shrinking/cropping thumbnails; processing uploads
   custom_images.py   uploaded images for folders and videos; clean-up
@@ -563,7 +584,9 @@ reel/
     api.js           fetch helper, h() element builder, formatting, tag rules
     browse.js        Home, folders, video page, tag page, tag editor
     player.js        the player
-    caps.js          what this browser can decode
+    caps.js          what this browser can decode (and whether it plays HLS)
+    sources.js       file / progressive / HLS delivery behind one interface
+    vendor/          hls.js (light build, Apache-2.0)
     manage.js        Libraries page, folder picker
     tags.js          Tags page
     imagedialog.js   the shared "photo or URL" dialog
@@ -586,9 +609,6 @@ Dockerfile, compose.yaml, .env.example
 - **One worker process.** Scans and streams are managed inside the process, so Reel runs with
   exactly one uvicorn worker (the Docker image does). More workers would each run their own
   scanner and stream limits.
-- **Safari** can't play remuxed or converted streams, because it requires range requests,
-  which a live stream can't offer. Directly playable files work everywhere. Chrome, Edge and
-  Firefox play everything.
 - **No subtitles** yet (neither external `.srt` nor embedded tracks).
 - **No hardware transcoding** yet. Conversion runs on the CPU, which is fine for this library.
   `compose.yaml` notes where a GPU would go.
@@ -602,12 +622,11 @@ Dockerfile, compose.yaml, .env.example
 
 Ideas and planned features, roughly in order:
 
-1. **Delivery strategies behind one player call,** then **HLS** for Safari/iOS and cheaper seeking.
-2. **Faster browsing for big libraries:** query only a folder's direct children, and paginate.
-3. **Sorting** for a tag's videos.
-4. **Subtitles:** external `.srt`/`.vtt` and embedded text tracks, as WebVTT.
-5. **Hardware transcoding** (VAAPI/QSV/NVENC).
-6. An optional background "optimize" pass that converts old formats once into cached MP4s,
+1. **Faster browsing for big libraries:** query only a folder's direct children, and paginate.
+2. **Sorting** for a tag's videos.
+3. **Subtitles:** external `.srt`/`.vtt` and embedded text tracks, as WebVTT.
+4. **Hardware transcoding** (VAAPI/QSV/NVENC).
+5. An optional background "optimize" pass that converts old formats once into cached MP4s,
    for perfect seeking and zero CPU on replay.
 
 Not planned: watch progress / resume (single-user setup).
@@ -615,4 +634,5 @@ Not planned: watch progress / resume (single-user setup).
 ---
 
 Fonts: [Inter](https://github.com/rsms/inter), © The Inter Project Authors, SIL Open Font
-License 1.1 (`reel/static/fonts/OFL.txt`).
+License 1.1 (`reel/static/fonts/OFL.txt`). HLS playback: [hls.js](https://github.com/video-dev/hls.js)
+1.7.3, © Dailymotion, Apache License 2.0 (`reel/static/vendor/hls.LICENSE`).

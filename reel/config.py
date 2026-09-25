@@ -36,6 +36,11 @@ class Settings:
         return self.data_dir / "thumbs"
 
     @property
+    def hls_dir(self) -> Path:
+        """HLS segments being served (a cache: emptied at startup)."""
+        return self.data_dir / "hls"
+
+    @property
     def images_dir(self) -> Path:
         """Uploaded images: images/tags, images/videos and images/folders."""
         return self.data_dir / "images"
