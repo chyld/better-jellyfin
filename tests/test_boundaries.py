@@ -83,3 +83,42 @@ def test_file_swapped_for_a_symlink_after_scanning_is_not_served(client, media_r
     assert client.get(f"/api/items/{ids['a']}/file").status_code == 404
     assert client.get(f"/api/items/{ids['b']}/stream").status_code == 404
     assert client.get(f"/api/items/{ids['a']}/thumb").status_code == 404
+
+
+def test_a_library_folder_swapped_for_a_link_outside_is_not_scanned(conn, media_root, tmp_path, fake_probe):
+    """Checked at add time, and again at every scan (as playback does)."""
+    from reel.scanner import ScanError
+
+    make_files(media_root, "Tapes/a.mpg")
+    lib = create_library(conn, media_root, "Tapes", str(media_root / "Tapes"))
+    scan_library(conn, lib, probe_fn=fake_probe, media_root=media_root)
+    before = conn.execute("SELECT rel_path, missing_since FROM media_items").fetchall()
+    outside = tmp_path / "elsewhere"
+    make_files(outside, "secret.mp4")
+    import shutil
+    shutil.rmtree(media_root / "Tapes")
+    (media_root / "Tapes").symlink_to(outside)                   # now leads outside the media root
+    with pytest.raises(ScanError, match="leads outside"):
+        scan_library(conn, lib, probe_fn=fake_probe, media_root=media_root)
+    assert conn.execute("SELECT rel_path, missing_since FROM media_items").fetchall() == before
+    assert all("secret" not in str(p) for p in fake_probe.calls)
+
+
+def test_the_app_scans_with_that_check(settings, media_root, tmp_path):
+    import shutil
+
+    from fastapi.testclient import TestClient
+
+    from reel.main import create_app
+
+    make_files(media_root, "Tapes/a.mpg")
+    with TestClient(create_app(settings)) as c:
+        lib = c.post("/api/libraries", json={"name": "Tapes", "path": str(media_root / "Tapes")}).json()["id"]
+        make_files(tmp_path / "elsewhere", "secret.mp4")
+        shutil.rmtree(media_root / "Tapes")
+        (media_root / "Tapes").symlink_to(tmp_path / "elsewhere")
+        c.post(f"/api/libraries/{lib}/scan")
+        c.app.state.scans.wait_idle()
+        body = c.get("/api/libraries").json()[0]
+    assert body["scan"]["state"] == "error" and "leads outside" in body["last_scan_error"]
+    assert body["item_count"] == 0

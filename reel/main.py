@@ -76,7 +76,8 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
     settings = settings or Settings.from_env()
     settings.check_data_dir()
     scans = scan_manager or ScanManager(
-        settings.db_path, workers=settings.probe_workers, missing_grace=settings.missing_grace
+        settings.db_path, workers=settings.probe_workers, missing_grace=settings.missing_grace,
+        media_root=settings.media_root,
     )
     thumbs = Thumbnailer(settings.thumbs_dir)
     streams = playback.StreamManager(playback.StreamLimits(max_streams=settings.max_streams))

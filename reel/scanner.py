@@ -247,6 +247,7 @@ def scan_library(
     on_progress: ProgressFn | None = None,
     missing_grace: timedelta = MISSING_GRACE,
     cancel: threading.Event | None = None,
+    media_root: Path | None = None,
 ) -> dict:
     """Bring the catalog for one library in line with what's on disk.
 
@@ -260,6 +261,9 @@ def scan_library(
 
     Setting `cancel` stops the scan soon (between folders, or between files),
     raising ScanCancelled; videos already recorded stay recorded.
+
+    With `media_root`, the library folder is re-checked now, as playback does: if
+    it has since been replaced by a link leading outside, nothing is read.
     """
     lib = conn.execute("SELECT path FROM libraries WHERE id = ?", (library_id,)).fetchone()
     if lib is None:
@@ -268,6 +272,11 @@ def scan_library(
     # If the NAS isn't mounted, stop here rather than "deleting" every video.
     if not root.is_dir():
         raise ScanError(f"Library folder is missing: {root}")
+    if media_root is not None and not is_inside(media_root, root):
+        raise ScanError(
+            f"The library folder {root} now leads outside {media_root} (was it replaced by a link?). "
+            "Nothing was changed."
+        )
 
     walk = walk_library(root, cancel)
     videos = walk.videos
