@@ -1,0 +1,13 @@
+# Keep the build context small: only pyproject.toml, uv.lock and reel/ are used.
+.git
+.venv
+data
+tests
+**/__pycache__
+.pytest_cache
+*.md
+compose.yaml
+.env
+.env.*
+scripts/*
+!scripts/fetch-ffmpeg.sh

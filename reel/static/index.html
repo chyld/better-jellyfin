@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Reel</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="player.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#/">
+      <span class="logo" aria-hidden="true">
+        <svg viewBox="0 0 24 24"><path d="M6 4.5v15a1 1 0 0 0 1.5.86l12.6-7.5a1 1 0 0 0 0-1.72L7.5 3.64A1 1 0 0 0 6 4.5z" fill="#061220"/></svg>
+      </span>
+      <span>Reel</span>
+    </a>
+    <nav class="nav">
+      <a href="#/">Home</a>
+      <a href="#/tags">Tags</a>
+      <a href="#/manage">Libraries</a>
+    </nav>
+  </header>
+
+  <main id="view"></main>
+
+  <!-- Add library -->
+  <dialog id="add-dialog">
+    <form id="add-form" method="dialog">
+      <h3>Add library</h3>
+      <label class="field">
+        <span>Name</span>
+        <input id="add-name" name="name" required maxlength="100" autocomplete="off" placeholder="e.g. Home Videos">
+      </label>
+      <div class="field">
+        <span>Folder</span>
+        <div class="picker">
+          <div class="picker-path">
+            <button type="button" id="picker-up" class="btn small" title="Up one folder">↑</button>
+            <code id="picker-current"></code>
+          </div>
+          <ul id="picker-list" class="picker-list"></ul>
+        </div>
+      </div>
+      <p id="add-error" class="error" hidden></p>
+      <div class="dialog-actions">
+        <button type="button" class="btn" data-close>Cancel</button>
+        <button type="submit" class="btn primary">Add library</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Rename -->
+  <dialog id="rename-dialog">
+    <form id="rename-form" method="dialog">
+      <h3>Rename library</h3>
+      <label class="field">
+        <span>Name</span>
+        <input id="rename-name" required maxlength="100" autocomplete="off">
+      </label>
+      <p id="rename-error" class="error" hidden></p>
+      <div class="dialog-actions">
+        <button type="button" class="btn" data-close>Cancel</button>
+        <button type="submit" class="btn primary">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Remove -->
+  <dialog id="remove-dialog">
+    <form id="remove-form" method="dialog">
+      <h3>Remove library?</h3>
+      <p>“<span id="remove-name"></span>” will be removed from Reel. Your video files are not touched.</p>
+      <p id="remove-error" class="error" hidden></p>
+      <div class="dialog-actions">
+        <button type="button" class="btn" data-close>Cancel</button>
+        <button type="submit" class="btn danger">Remove</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

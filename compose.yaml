@@ -1,0 +1,48 @@
+# Reel with Docker Compose.
+#
+#   cp .env.example .env      # then edit MEDIA_PATH, PUID/PGID, port
+#   docker compose up -d --build
+#   open http://<this machine>:8000  ->  Libraries -> Add library -> Scan
+#
+# Inside the container your media is at /media, so libraries are picked from
+# there (e.g. /media/Personal/Tapes).
+
+name: reel
+
+services:
+  reel:
+    build:
+      context: .
+      args:
+        # "auto" = newest ffmpeg release; or pin a series like "9.0".
+        FFMPEG_SERIES: "${FFMPEG_SERIES:-auto}"
+    image: reel:latest
+    container_name: reel
+    restart: unless-stopped
+    # Run as your user so the media share is readable and ./data is writable.
+    user: "${PUID:-1000}:${PGID:-1000}"
+    ports:
+      - "${REEL_PORT:-8000}:8000"
+    environment:
+      REEL_PROBE_WORKERS: "${REEL_PROBE_WORKERS:-4}"
+    volumes:
+      # Your videos, read-only: Reel never writes to them.
+      - "${MEDIA_PATH:-/mnt/nas/videos}:/media:ro"
+      # Database, thumbnails and uploaded images. Back this folder up.
+      - "${DATA_PATH:-./data}:/data"
+    # Intel/AMD GPU for future hardware transcoding (not used yet):
+    # devices:
+    #   - /dev/dri:/dev/dri
+
+# Alternative: let Docker mount the NAS's SMB share itself, instead of
+# mounting it on the host. Replace the MEDIA_PATH line above with
+#   - media:/media:ro
+# and uncomment:
+#
+# volumes:
+#   media:
+#     driver: local
+#     driver_opts:
+#       type: cifs
+#       device: "//nas.local/videos"
+#       o: "ro,vers=3.0,username=${SMB_USER},password=${SMB_PASSWORD},uid=${PUID:-1000},gid=${PGID:-1000}"

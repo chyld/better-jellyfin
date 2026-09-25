@@ -1,0 +1,544 @@
+# Reel
+
+A small, self-hosted video server for a homelab, in the spirit of Jellyfin. Point it at a
+folder of videos (for example a NAS share), click **Scan**, and browse and watch everything
+in a web browser, including old formats like AVI, WMV, VHS captures in MPEG-2, and MKV, which
+ffmpeg converts on the fly.
+
+- **Backend:** Python 3.12+ with FastAPI and SQLite. ffmpeg and ffprobe do all media work.
+- **Frontend:** plain HTML, CSS and JavaScript modules, with no build step and no framework.
+- **Deployment:** Docker Compose, with the newest ffmpeg release built into the image.
+
+---
+
+## Contents
+
+- [Features](#features)
+- [Quick start (Docker)](#quick-start-docker)
+- [Mounting the NAS](#mounting-the-nas)
+- [Configuration](#configuration)
+- [Using Reel](#using-reel)
+- [How it works](#how-it-works)
+  - [Scanning](#scanning)
+  - [Titles](#titles)
+  - [Pictures](#pictures)
+  - [Playback](#playback)
+  - [Tags](#tags)
+  - [Uploaded images](#uploaded-images)
+  - [IDs and URLs](#ids-and-urls)
+- [The data folder](#the-data-folder)
+- [ffmpeg](#ffmpeg)
+- [API](#api)
+- [Development](#development)
+- [Project layout](#project-layout)
+- [Limitations](#limitations)
+- [Roadmap](#roadmap)
+
+---
+
+## Features
+
+- **Libraries.** Add any folder under the media root as a library, using a folder picker, then
+  scan it. Rescans only re-read new or changed files.
+- **Browsing.** Libraries and folders appear as movie-poster cards and videos as landscape
+  cards. Numbers sort naturally (`clip2` before `clip10`), and videos can be sorted by name or year.
+- **Playback of everything.** Browser-ready files play directly. Others are repackaged or
+  converted live by ffmpeg, starting in about half a second.
+- **A modern player.** A frosted-glass control dock, a gradient seek bar with a time preview,
+  ±1 minute jumps, a go-to-beginning button, keyboard shortcuts and full screen.
+- **Pictures from your files.** `movie.png` beside `movie.mp4` and `folder.png` in a folder are
+  picked up automatically, then shrunk and cached.
+- **Your own pictures.** Folders and videos without one can get an image from your device or a
+  URL. The image is stored by Reel, never on the NAS.
+- **Tags.** Put any number of tags on a video, browse by tag from Home, rename, merge or delete
+  tags, and give each tag a picture.
+- **Read-only media.** Reel never writes to your video folders.
+- **Docker.** Runs as your user, keeps all its state in one folder, and includes a health check.
+
+---
+
+## Quick start (Docker)
+
+```sh
+cp .env.example .env     # set MEDIA_PATH (your videos) and PUID/PGID (see `id`)
+mkdir -p data            # create it yourself, or Docker makes it owned by root
+docker compose up -d --build
+```
+
+Open `http://<server>:8000`, then:
+
+1. Go to **Libraries**, click **Add library**, and pick a folder. Inside the container your
+   videos are at `/media`, so for example pick `/media/Personal`.
+2. Click **Scan** (or **Scan all**). The first scan of about 500 videos over SMB takes 2–3 minutes.
+3. Go **Home** and browse.
+
+Useful commands:
+
+```sh
+docker compose logs -f                        # follow the logs
+curl localhost:8000/api/health                # {"ok": true, "ffmpeg": "n9.0.2-..."}
+git pull && docker compose up -d --build      # update Reel (keeps your data)
+docker compose build --no-cache && docker compose up -d   # also pull the newest ffmpeg
+scripts/docker-smoke.sh                       # build and test the image end to end
+```
+
+If you're not in the `docker` group, prefix Docker commands with `sudo`, or add yourself with
+`sudo usermod -aG docker $USER` and log in again.
+
+---
+
+## Mounting the NAS
+
+Docker needs a real mount on the host. A desktop GVFS mount (`/run/user/1000/gvfs/...`) is
+**not** visible to Docker.
+
+**Option 1: mount on the host (recommended).** Add the share to `/etc/fstab`:
+
+```
+//nas.local/videos  /mnt/nas/videos  cifs  ro,credentials=/etc/nas.cred,uid=1000,gid=1000,vers=3.0,iocharset=utf8,_netdev,nofail,x-systemd.automount  0 0
+```
+
+- `ro`: read-only; Reel never needs to write to your videos.
+- `uid`/`gid`: match `PUID`/`PGID` in `.env`, so the container can read the files.
+- `iocharset=utf8`: shows file names with accents or other non-English characters correctly.
+- `x-systemd.automount`: mounts on first use, so boot doesn't hang if the NAS is down.
+
+Create the mount point and a root-only credentials file, then mount it. `cifs-utils` must be
+installed (`mount.cifs`).
+
+```sh
+sudo mkdir -p /mnt/nas/videos
+sudo install -m 600 /dev/null /etc/nas.cred
+read -rp 'SMB user: ' u; read -rsp 'SMB password: ' p; echo
+printf 'username=%s\npassword=%s\n' "$u" "$p" | sudo tee /etc/nas.cred >/dev/null; unset u p
+sudo systemctl daemon-reload
+sudo mount /mnt/nas/videos
+findmnt /mnt/nas/videos
+```
+
+**Option 2: let Docker mount the share itself.** `compose.yaml` contains a commented-out
+`cifs` volume. Set `SMB_USER`/`SMB_PASSWORD` in `.env` and swap the media volume line as
+described there.
+
+---
+
+## Configuration
+
+All settings are environment variables. With Docker, put them in `.env`; `.env.example`
+documents each one.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `MEDIA_PATH` | `/mnt/nas/videos` | *(compose)* Where your videos are on the host. Mounted read-only at `/media`. |
+| `DATA_PATH` | `./data` | *(compose)* Where Reel keeps its database, thumbnails and uploads. Back this up. |
+| `PUID` / `PGID` | `1000` | *(compose)* The user and group the container runs as. It must be able to read the media and write the data folder. |
+| `REEL_PORT` | `8000` | *(compose)* Port on the host. |
+| `FFMPEG_SERIES` | `auto` | *(build)* ffmpeg release series to build in: `auto` means the newest; or pin one, e.g. `9.0`. |
+| `REEL_MEDIA_ROOT` | `/media` | Libraries must be inside this folder, and the folder picker can't leave it. |
+| `REEL_DATA_DIR` | `./data` (`/data` in Docker) | The data folder. |
+| `REEL_PROBE_WORKERS` | `4` | How many ffprobe processes run at once during a scan. |
+
+If the data folder isn't writable, Reel stops at startup with a message saying how to fix the
+permissions. The usual cause is a `./data` that Docker created owned by root.
+
+---
+
+## Using Reel
+
+### Pages
+
+| Page | URL | What's there |
+|---|---|---|
+| Home | `#/` | Library tiles, and a card for every tag. |
+| Library / folder | `#/library/<library-uuid>/<folder path>` | Subfolders as posters, then videos. Breadcrumbs and a Name/Year sort. |
+| Video | `#/item/<video-uuid>` | Picture, title, pills (year, length, resolution, play mode), **Play**, tags and file details. |
+| Player | `#/play/<video-uuid>` | Full-window player. |
+| Tags | `#/tags` | Every tag: set its image, rename or merge, delete. |
+| Tag | `#/tag/<tag-uuid>` | The videos with that tag. |
+| Libraries | `#/manage` | Add, rename, remove and scan libraries, with live progress. |
+
+Going **Back** returns you to the same scroll position in long grids.
+
+### Player controls
+
+| Action | Mouse | Keyboard |
+|---|---|---|
+| Play / pause | ▶ button, or click the video | **Space** or **K** |
+| Back / forward 10 seconds | | **←** / **→** |
+| Back / forward 1 minute | **↺1m** / **↻1m** buttons | **Shift + ←** / **Shift + →** |
+| Go to beginning | **⏮** button | **Home** |
+| Seek | Click or drag the seek bar; hovering shows the time | |
+| Mute / volume | Speaker button; the slider appears on hover | **M** |
+| Full screen | ⛶ button, or double-click the video | **F** |
+
+The controls fade out after 3 seconds without mouse movement while playing. Converted videos
+show a pulsing **CONVERTING** badge, and repackaged ones show **REPACKAGING**.
+
+---
+
+## How it works
+
+### Scanning
+
+A scan walks the library folder and records every video in SQLite. Pages are then built from
+the database, so **browsing never touches the NAS**.
+
+- **Videos** are recognised by extension: `mp4 m4v mov mkv webm avi wmv asf mpg mpeg m2ts mts
+  ts vob flv 3gp ogv divx`. Hidden files and folders (`.zfs`, `.Trash`, …) are skipped.
+- Each new or changed file is read with **ffprobe**: container, video and audio codecs, pixel
+  format, resolution, length, and whether it's interlaced. From that, Reel works out its
+  [play mode](#playback).
+- **Rescans are incremental.** A file is re-probed only if its size or modification time
+  changed, or its last probe failed. Titles and pictures are refreshed for every file, which is
+  cheap, so a poster added later or a title-rule change is picked up without re-probing.
+  Deleted files are removed from the catalog.
+- **Safety:** if the library folder is missing (for example the NAS is offline), the scan
+  fails with an error instead of wiping the catalog. A single unreadable subfolder doesn't
+  abort the scan.
+- Scans run one at a time on a background thread, and the Libraries page shows progress
+  ("Scanning: 71 / 312"). Each file is committed as it's done, so a long scan never blocks
+  other actions.
+- A file ffprobe can't read is kept, marked *unsupported* with the error, and retried on the
+  next scan.
+- After every scan, uploaded images whose video or folder no longer exists are deleted.
+
+**Library rules:**
+- A library's folder must be inside the media root and readable.
+- Two libraries can't overlap: neither the same folder, nor one inside another.
+- Library names are required, at most 100 characters, and unique regardless of capitalisation.
+- Removing a library only removes it from Reel. Your files are never touched.
+
+### Titles
+
+| File | Title | Year | Rule |
+|---|---|---|---|
+| `Tapes/1992.zoo-trip.mpg` | zoo-trip | 1992 | A leading year followed by `.`, `_`, `-` or a space becomes the year. |
+| `Classics/0360/movie.mp4` | 0360 | | Generic names (`movie`, `video`, `film`, `main`, `feature`) use the folder name. |
+| `Drama/0902/rough-cut.mp4` | 0902 | | The only video in a folder **with no subfolders** uses the folder name. |
+| `Personal/loose.mp4` | loose | | …but a lone video beside other folders keeps its own name. |
+| `Camcorder/clip01.avi` | clip01 | | Otherwise, the file name without its extension. |
+
+### Pictures
+
+| Shows | Shape | Picture comes from |
+|---|---|---|
+| Video cards and the video page | 16:9 landscape (thumbnail up to 640×360) | the image beside the video **with the same name** (`zombie.mp4` → `zombie.png`), else an [uploaded image](#uploaded-images), else a film-strip placeholder |
+| Folder cards and library tiles | 2:3 poster (up to 480×720) | `folder.<ext>` **in that folder**, else an uploaded image, else a folder placeholder |
+| Tag cards | 2:3 poster | the tag's uploaded image, else a tag placeholder |
+
+- Image extensions: `jpg`, `jpeg`, `png`, `webp`, in any capitalisation.
+- `folder.<ext>` is only ever a folder's picture, never a video's.
+- NAS images can be several megabytes (up to 65 MB in practice), so the server shrinks each
+  one with ffmpeg into a small cached JPEG, **cropped to the shape it's shown in**. It's
+  roughly 20–80 KB, never enlarged, and made on first view in about 0.2–0.6 s, then served from
+  cache in about 2 ms.
+- Cards load their pictures lazily as they scroll into view.
+- Placeholders are drawn in the browser, so a missing picture costs no request. A picture that
+  fails to load (for example with the NAS offline) also turns into its placeholder.
+
+### Playback
+
+When a video is scanned, it gets one of four play modes:
+
+| Mode | When | How it's sent |
+|---|---|---|
+| **direct** | MP4/MOV/M4V with H.264 (8-bit 4:2:0), VP9 or AV1 video, AAC/MP3/Opus/Vorbis/FLAC or no audio, not interlaced; or WebM with VP8/VP9/AV1 | The original file, with HTTP range requests, so the browser seeks natively. |
+| **remux** | Browser-ready codecs in the wrong container, e.g. MKV, or MPEG-TS saved as `.mp4` | ffmpeg copies the streams unchanged into a fragmented MP4, streamed as it's made. No quality loss, very little CPU. |
+| **transcode** | Anything else: Xvid/DivX, MPEG-1/2, WMV/VC-1, MJPEG, Cinepak, Sorenson, HEVC, 10-bit H.264, AC-3/DTS/ADPCM/WMA audio, interlaced video | ffmpeg converts to H.264 (veryfast, CRF 21) and AAC stereo 160 kb/s in a fragmented MP4, streamed as it's made. |
+| **unsupported** | ffprobe couldn't read it, or there's no video stream | Not playable; the Play button is disabled. |
+
+Details:
+- **HEVC is always converted.** Whether a browser can play it depends on the viewer's
+  hardware, so Reel doesn't risk it.
+- **Converting** deinterlaces when the file is flagged interlaced (`bwdif`), scales anything
+  taller than 1080p down to 1080p, and rounds odd frame sizes to even. A keyframe every 2
+  seconds keeps start-up fast.
+- **Remuxing** AAC applies `aac_adtstoasc`, because AAC from MPEG-TS uses ADTS framing, which
+  MP4 can't hold as-is.
+- **Cover art** stored as a video stream (as in some WMV files) is skipped (`-map 0:V:0`), so
+  the real video plays.
+- **Seeking** in remuxed and converted videos: a live stream has no byte ranges, so seeking
+  requests a new stream with `?start=<seconds>` and ffmpeg starts again from there, in about
+  half a second. The player shows its own clock and seek bar, based on the length recorded at
+  scan time.
+- **Clean-up:** when the browser drops a stream (a seek, leaving the player, closing the tab),
+  the server kills that ffmpeg process at once, so no encoders are left running.
+- **Speed:** on a typical machine, conversion runs 4–54× faster than real time depending on
+  the format. Streams start in under 0.6 s.
+- **Errors:** if ffmpeg can't read a file, the stream request fails with a clear error instead
+  of an empty video. A file missing from the NAS gives "The video file is missing. Is the NAS
+  connected?"
+
+### Tags
+
+- A video can have **any number of tags**.
+- **Tag names:** lowercase `a-z`, `0-9` and `-` only, no spaces, at most 50 characters, for
+  example `family`, `1990s`, `road-trip`.
+- **Breaking the rule is an error, never silently fixed.** While you type, the box turns red
+  and names each bad tag, and pressing Enter adds nothing until every tag is valid. Capitals are
+  an error too. The server enforces the same rule.
+- In the add box, **spaces and commas separate tags**: `family 1990s road-trip` adds three.
+  Existing tags are suggested as you type.
+- On Home, tags are listed alphabetically. A tag's videos show **in the order they were
+  tagged** (not sorted).
+- **Tags page:**
+  - **Rename** checks the rule as you type.
+  - Renaming onto an existing tag **merges** the two (after a warning); a video that had both
+    keeps one.
+  - **Delete** removes the tag from every video, after confirmation. The videos aren't affected.
+- Removing a tag's last video deletes the tag.
+- Tags survive rescans, and go away when their video is removed from the catalog.
+- **Tag pictures:** each tag can have an uploaded image, shown on its card on Home. When
+  merging, the surviving tag keeps its own image, or takes the other tag's if it had none.
+
+### Uploaded images
+
+Tags, and any folder or video without a picture on the NAS, can be given one: hover the card (on
+touch screens, tap the round image icon), or use **Set image** on the Tags page. The dialog
+offers:
+
+- **Choose a photo from this device**, or
+- **Image URL**, which the server downloads.
+
+Rules:
+- Formats: JPG, PNG, WebP, GIF, BMP, up to **20 MB**. The format is checked from the file's
+  contents, not its name. Uploads are stored as a JPEG at most 800 px wide.
+- **NAS pictures always win.** Uploading is refused (409) when the folder or video already has
+  one, and a NAS picture added later takes over. The uploaded image stays stored but unused.
+- A failed upload leaves the previous image in place.
+- Once an image is set, the button reads **Change image**, and the dialog also offers
+  **Remove image**.
+- **URL safety:** only `http://` and `https://`, a 15-second timeout, at most 5 redirects, and
+  the result must really be an image. The server refuses to fetch from **itself** (localhost)
+  and from **link-local addresses** such as `169.254.169.254` (cloud metadata), including via
+  redirects. Other machines on your network are allowed.
+- Uploads are stored in the data folder, never on the NAS (see below).
+
+### IDs and URLs
+
+Libraries, videos and tags are addressed by **random UUIDs** in URLs and the API, so URLs don't
+reveal the library's size and can't be walked by counting. The database also has integer keys,
+used only internally.
+
+A video keeps its UUID, tags and uploaded image **as long as the file stays at the same path**,
+even when its contents change. A moved or renamed file is treated as a new video.
+
+---
+
+## The data folder
+
+Everything Reel stores is in the data folder: `./data` with Docker, or `REEL_DATA_DIR`.
+
+```
+data/
+├── reel.db             SQLite database: libraries, videos, tags, image records
+├── thumbs/             cached thumbnails of NAS pictures (safe to delete; they're remade)
+│   └── ab/abcdef….jpg
+└── images/             pictures you uploaded
+    ├── tags/<tag uuid>.jpg
+    ├── videos/<video uuid>.jpg
+    └── folders/<uuid>.jpg
+```
+
+- **Back up** `reel.db` and `images/`. `thumbs/` is only a cache.
+- Uploaded images whose tag, video, folder or library is gone are cleaned up at startup, after
+  every scan, and when a library is removed.
+- Databases from older versions of Reel are upgraded automatically at startup (new columns,
+  UUIDs), so there's no need to rescan after an update.
+
+---
+
+## ffmpeg
+
+ffmpeg matters a lot here, so the Docker image carries **the newest ffmpeg release** (currently
+n9.0.2), not the distribution's older package:
+
+- `scripts/fetch-ffmpeg.sh` reads the build list at
+  [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds) (the static Linux builds linked
+  from ffmpeg.org) and picks the **newest release series**. That's the `n<series>` build, which
+  follows the release branch, so it includes the latest point release and fixes. When a new
+  major version is released, a rebuild picks it up.
+- It downloads the GPL build with shared libraries for amd64 or arm64, **verifies its SHA-256**,
+  and installs `ffmpeg`, `ffprobe` and their libraries into `/opt/ffmpeg`, about 190 MB. That's
+  roughly 130 MB less than two static binaries.
+- Builds with an unknown series or architecture **fail loudly**, rather than producing an image
+  without ffmpeg.
+- Docker caches this step. To get a newer build: `docker compose build --no-cache`. To pin a
+  series: `FFMPEG_SERIES=9.0` in `.env`.
+- Check what's running: `curl localhost:8000/api/health`.
+
+The whole test suite passes with this build. Outside Docker, Reel uses whatever `ffmpeg` and
+`ffprobe` are on `PATH`.
+
+---
+
+## API
+
+JSON over HTTP. Every ID is a UUID. There's no authentication yet (see
+[Limitations](#limitations)).
+
+**Libraries**
+
+| Method | Path | |
+|---|---|---|
+| GET | `/api/libraries` | All libraries, with video count, scan status and picture info. |
+| POST | `/api/libraries` | `{name, path}`: add a library (not scanned yet). |
+| PATCH | `/api/libraries/{id}` | `{name}`: rename. |
+| DELETE | `/api/libraries/{id}` | Remove from Reel (409 while scanning). Files untouched. |
+| POST | `/api/libraries/{id}/scan` | Queue a scan (202). |
+| POST | `/api/libraries/scan` | Queue a scan of every library. |
+| GET | `/api/libraries/{id}/browse?path=&sort=name\|year` | Subfolders and videos in a folder. |
+| GET | `/api/libraries/{id}/folder-art?path=` | A folder's picture (NAS `folder.<ext>`, else uploaded). |
+| PUT | `/api/libraries/{id}/folder-image?path=` | Upload a folder picture (request body = the image). |
+| POST | `/api/libraries/{id}/folder-image-url?path=` | `{url}`: set a folder picture from a URL. |
+| DELETE | `/api/libraries/{id}/folder-image?path=` | Remove an uploaded folder picture. |
+| GET | `/api/folders?path=` | Folder picker: subfolders under the media root. |
+
+**Videos**
+
+| Method | Path | |
+|---|---|---|
+| GET | `/api/items/{id}` | Details: codecs, size, path, breadcrumbs, tags. |
+| GET | `/api/items/{id}/thumb` | The video's picture (landscape JPEG). |
+| GET, HEAD | `/api/items/{id}/file` | The original file, with range requests (direct play). |
+| GET | `/api/items/{id}/stream?start=` | A remuxed or converted fragmented MP4 from `start` seconds. |
+| PUT | `/api/items/{id}/image` | Upload a picture (request body = the image). |
+| POST | `/api/items/{id}/image-url` | `{url}`: set a picture from a URL. |
+| DELETE | `/api/items/{id}/image` | Remove the uploaded picture. |
+| POST | `/api/items/{id}/tags` | `{name}`: tag the video. Returns its tags. |
+| DELETE | `/api/items/{id}/tags/{tag}` | Untag. Returns its remaining tags. |
+
+**Tags**
+
+| Method | Path | |
+|---|---|---|
+| GET | `/api/tags` | Tags on at least one video, with counts. |
+| GET | `/api/tags/{id}` | A tag and its videos (in tagging order). |
+| PATCH | `/api/tags/{id}` | `{name}`: rename; merges into an existing tag of that name. |
+| DELETE | `/api/tags/{id}` | Delete the tag from every video. |
+| GET, PUT, DELETE | `/api/tags/{id}/image` | The tag's picture: fetch, upload, remove. |
+| POST | `/api/tags/{id}/image-url` | `{url}`: set the tag picture from a URL. |
+
+**Other:** `GET /api/health` returns `{"ok": true, "ffmpeg": "<version>"}`. It's used by the
+Docker health check and kept out of the access log.
+
+Errors are JSON `{"detail": "…"}` with a message meant for people: 400 for invalid input, 404
+for not found, 409 for conflicts, 413 for an upload over 20 MB, 416 for a start time outside
+the video, and 502 when ffmpeg can't read a file.
+
+---
+
+## Development
+
+Needs Python 3.12+, [uv](https://docs.astral.sh/uv/), ffmpeg/ffprobe, and Node (for the
+frontend tests).
+
+```sh
+uv sync
+REEL_MEDIA_ROOT=/mnt/nas/videos REEL_DATA_DIR=./data \
+  uv run uvicorn --factory reel.main:app --host 0.0.0.0 --port 8000 --reload
+```
+
+The frontend is served as-is from `reel/static/`, so edit and reload. Browsers re-check the
+app's files on every load (`Cache-Control: no-cache`), so updates show up without a hard
+refresh. Thumbnail URLs carry a version (`THUMBS` in `browse.js`); bump it when the server
+changes how thumbnails are made.
+
+### Tests
+
+```sh
+uv run pytest              # backend: 320 tests
+node --test tests/js/      # frontend helpers: 18 tests
+scripts/docker-smoke.sh    # builds the image and checks it end to end (needs Docker)
+```
+
+- The backend tests use temporary folders shaped like the real library. Tests marked `ffmpeg`
+  generate tiny real clips (H.264, HEVC, 10-bit, VP9/Opus, Xvid, WMV, interlaced MPEG-2, MPEG-TS
+  named `.mp4`, a file with cover art first, a corrupt file) and check probing, play modes,
+  thumbnails, remuxing and conversion with the real ffprobe and ffmpeg. They're skipped if ffmpeg
+  isn't installed.
+- URL downloads are tested against a local test web server.
+- The smoke test generates clips, builds the image, and checks the ffmpeg version, scanning,
+  thumbnails, direct play with range requests, live conversion, the data volume and the health
+  check.
+
+### Conventions
+
+- Every change is committed with a descriptive message once the tests pass.
+- User-facing errors are plain sentences that say what to do.
+- NAS media is only ever read.
+
+---
+
+## Project layout
+
+```
+reel/
+  main.py            FastAPI app: routes, error handling, startup clean-up
+  config.py          settings from environment variables; data-folder check
+  db.py              SQLite schema and automatic upgrades of older databases
+  libraries.py       adding/renaming/removing libraries; folder picker
+  scanner.py         walking folders; titles; matching pictures; incremental scans
+  scan_manager.py    background scan queue with progress
+  probe.py           ffprobe wrapper; deciding the play mode
+  playback.py        ffmpeg commands for remux/convert; streaming and killing ffmpeg
+  images.py          shrinking/cropping thumbnails; processing uploads
+  custom_images.py   uploaded images for folders and videos; clean-up
+  tags.py            tags: add/remove, rename/merge, delete, images
+  fetch.py           safe image downloads from URLs
+  browse.py          read-only views: folders, video details
+  static/
+    index.html       page shell and dialogs
+    app.js           router (hash URLs), scroll restore
+    api.js           fetch helper, h() element builder, formatting, tag rules
+    browse.js        Home, folders, video page, tag page, tag editor
+    player.js        the player
+    manage.js        Libraries page, folder picker
+    tags.js          Tags page
+    imagedialog.js   the shared "photo or URL" dialog
+    style.css        app styles;  player.css  player styles
+    fonts/           Inter (SIL Open Font License)
+    favicon.svg
+scripts/
+  fetch-ffmpeg.sh    download and verify the newest ffmpeg build
+  docker-smoke.sh    build and test the Docker image end to end
+tests/               pytest suite, plus tests/js for the frontend
+Dockerfile, compose.yaml, .env.example
+```
+
+---
+
+## Limitations
+
+- **No login.** Anyone who can reach the port can browse, play, and change libraries, tags and
+  images. Keep it on your home network or behind a reverse proxy with authentication.
+- **Safari** can't play remuxed or converted streams, because it requires range requests,
+  which a live stream can't offer. Directly playable files work everywhere. Chrome, Edge and
+  Firefox play everything.
+- **Moving or renaming a file** makes it a new video: its tags and uploaded picture are lost.
+- **No subtitles** yet (neither external `.srt` nor embedded tracks).
+- **No hardware transcoding** yet. Conversion runs on the CPU, which is fine for this library.
+  `compose.yaml` notes where a GPU would go.
+- **HEVC** is always converted, even when the viewer's browser could play it.
+- **Tags** are limited to lowercase ASCII letters, digits and dashes, by design.
+- A tag's videos are listed in tagging order, with no sort options yet.
+
+---
+
+## Roadmap
+
+Ideas and planned features, roughly in order:
+
+1. **Watch progress:** remember where you stopped, offer to resume, and a "Continue watching"
+   row on Home.
+2. **Login**, and optionally a hidden library that must be unlocked.
+3. **Sorting** for a tag's videos.
+4. **Subtitles:** external `.srt`/`.vtt` and embedded text tracks, as WebVTT.
+5. **Hardware transcoding** (VAAPI/QSV/NVENC).
+6. An optional background "optimize" pass that converts old formats once into cached MP4s,
+   for perfect seeking and zero CPU on replay.
+
+---
+
+Fonts: [Inter](https://github.com/rsms/inter), © The Inter Project Authors, SIL Open Font
+License 1.1 (`reel/static/fonts/OFL.txt`).
