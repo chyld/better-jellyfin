@@ -5,6 +5,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 PROBE_TIMEOUT = 120  # seconds; files live on a NAS, so be generous
+# Bump when what's probed or how it's classified changes: rows made by an older
+# version are re-probed on the next scan, even if the file itself hasn't changed.
+PROBE_VERSION = 1
 
 
 @dataclass

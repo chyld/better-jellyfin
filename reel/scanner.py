@@ -1,4 +1,5 @@
 """Walk a library folder and record every video in the database."""
+import hashlib
 import os
 import re
 import sqlite3
@@ -10,7 +11,7 @@ from pathlib import Path
 
 from .db import new_uid
 from .paths import is_inside
-from .probe import ProbeError, ProbeResult, classify, probe as ffprobe
+from .probe import PROBE_VERSION, ProbeError, ProbeResult, classify, probe as ffprobe
 
 VIDEO_EXTENSIONS = {
     "mp4", "m4v", "mov", "mkv", "webm", "avi", "wmv", "asf", "mpg", "mpeg",
@@ -23,6 +24,7 @@ YEAR_PREFIX = re.compile(r"^((?:19|20)\d{2})[.\s_-]+(.+)$")
 # How long a video that's no longer found stays in the catalog (hidden, with its
 # tags and images) before it's removed. Covers a NAS that was briefly unmounted.
 MISSING_GRACE = timedelta(days=7)
+FINGERPRINT_CHUNK = 64 * 1024
 
 ProgressFn = Callable[[int, int], None]
 ProbeFn = Callable[[Path], ProbeResult]
@@ -90,6 +92,7 @@ class Walk:
     unreadable_folders: list[str]   # folders that couldn't be listed (relative)
     unreadable_files: set[str]      # videos listed but not readable (relative)
     outside_library: int = 0        # symlinks leading out of the library, skipped
+    folders: set[str] = None        # every folder that was listed ('' is the root)
 
     def protects(self, rel_path: str) -> bool:
         """Was this path hidden from the walk by something it couldn't read?
@@ -108,6 +111,7 @@ def walk_library(root: Path) -> Walk:
     unreadable_folders: list[str] = []
     unreadable_files: set[str] = set()
     outside = 0
+    folders: set[str] = set()
 
     def on_error(err: OSError) -> None:
         if Path(err.filename) == root:
@@ -119,6 +123,7 @@ def walk_library(root: Path) -> Walk:
         # Skip hidden folders (.zfs snapshots, .Trash, etc.).
         dirnames[:] = sorted(d for d in dirnames if not d.startswith("."))
         rel_dir = Path(dirpath).relative_to(root)
+        folders.add(rel_dir.as_posix() if rel_dir.parts else "")
         # Symlinks leading out of the library are ignored, videos and pictures alike.
         escaping = {f for f in filenames if os.path.islink(os.path.join(dirpath, f)) and not is_inside(root, rel_dir / f)}
         outside += sum(1 for f in escaping if is_video(f))
@@ -152,7 +157,65 @@ def walk_library(root: Path) -> Walk:
                 size=st.st_size,
                 mtime=st.st_mtime,
             ))
-    return Walk(videos, folder_art, sorted(unreadable_folders), unreadable_files, outside)
+    return Walk(videos, folder_art, sorted(unreadable_folders), unreadable_files, outside, folders)
+
+
+def fingerprint(path: Path, size: int) -> str | None:
+    """A cheap identity for a file's contents: its size plus hashes of its first
+    and last 64 KB. Survives renames and moves; changes if the file does."""
+    digest = hashlib.sha256(str(size).encode())
+    try:
+        with open(path, "rb") as f:
+            digest.update(f.read(FINGERPRINT_CHUNK))
+            if size > 2 * FINGERPRINT_CHUNK:
+                f.seek(-FINGERPRINT_CHUNK, os.SEEK_END)
+                digest.update(f.read(FINGERPRINT_CHUNK))
+    except OSError:
+        return None
+    return digest.hexdigest()[:32]
+
+
+def _match_moves(new_videos: list[FoundVideo], new_prints: dict[str, str | None], gone: list[dict]) -> list[tuple[dict, FoundVideo]]:
+    """Pair new files with vanished catalog rows that are clearly the same file.
+
+    Conservative: only a unique match on both sides counts (same fingerprint,
+    same extension, not empty). Anything ambiguous is left as new + missing.
+    """
+    def key(fp: str | None, rel_path: str, size: int):
+        return (fp, Path(rel_path).suffix.lower()) if fp and size > 0 else None
+
+    new_by_key: dict = {}
+    for video in new_videos:
+        k = key(new_prints.get(video.rel_path), video.rel_path, video.size)
+        if k:
+            new_by_key.setdefault(k, []).append(video)
+    gone_by_key: dict = {}
+    for row in gone:
+        k = key(row["fingerprint"], row["rel_path"], row["size"])
+        if k:
+            gone_by_key.setdefault(k, []).append(row)
+    return [
+        (rows[0], new_by_key[k][0])
+        for k, rows in gone_by_key.items()
+        if len(rows) == 1 and len(new_by_key.get(k, [])) == 1
+    ]
+
+
+def _renamed_folders(moves: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """From file moves, the folder renames they imply.
+
+    Tapes/1990s/a.mpg -> Home Tapes/1990s/a.mpg implies Tapes -> Home Tapes: the
+    paths share their tail (1990s/a.mpg), and what's left is the rename.
+    """
+    renames = []
+    for old, new in moves:
+        o, n = old.split("/"), new.split("/")
+        k = 0
+        while k < min(len(o), len(n)) and o[-1 - k] == n[-1 - k]:
+            k += 1
+        if k and o[:-k] != n[:-k]:
+            renames.append(("/".join(o[:-k]), "/".join(n[:-k])))
+    return renames
 
 
 def _safe_probe(probe_fn: ProbeFn, path: Path) -> ProbeResult:
@@ -192,9 +255,12 @@ def scan_library(
     walk = walk_library(root)
     videos = walk.videos
     existing = {
-        row["rel_path"]: row
+        row["rel_path"]: dict(row)
         for row in conn.execute(
-            "SELECT id, rel_path, size, mtime, probe_error, missing_since FROM media_items WHERE library_id = ?",
+            """
+            SELECT id, rel_path, size, mtime, probe_error, missing_since, fingerprint, probe_version
+            FROM media_items WHERE library_id = ?
+            """,
             (library_id,),
         )
     }
@@ -208,10 +274,42 @@ def scan_library(
             "(If you really deleted everything, remove the library instead.)"
         )
 
+    pool = ThreadPoolExecutor(max_workers=max(1, workers))
+    seen = {v.rel_path for v in videos}
+
+    # Moved or renamed files: a new path whose contents match a vanished row
+    # takes over that row, keeping its id, tags, pictures (and later, progress).
+    new_videos = [v for v in videos if v.rel_path not in existing]
+    gone = [row for path, row in existing.items() if path not in seen and not walk.protects(path)]
+    prints: dict[str, str | None] = {}
+    if new_videos and any(row["fingerprint"] for row in gone):
+        prints = dict(zip(
+            (v.rel_path for v in new_videos),
+            pool.map(lambda v: fingerprint(root / v.rel_path, v.size), new_videos),
+        ))
+    moves = _match_moves(new_videos, prints, gone)
+    for row, video in moves:
+        conn.execute(
+            """
+            UPDATE media_items SET rel_path = ?, title = ?, year = ?, poster_path = ?,
+                size = ?, mtime = ?, missing_since = NULL
+            WHERE id = ?
+            """,
+            (video.rel_path, video.title, video.year, video.poster_path, video.size, video.mtime, row["id"]),
+        )
+        del existing[row["rel_path"]]
+        existing[video.rel_path] = {**row, "rel_path": video.rel_path, "size": video.size,
+                                    "mtime": video.mtime, "missing_since": None}
+    folder_renames = _renamed_folders([(row["rel_path"], video.rel_path) for row, video in moves])
+    conn.commit()
+
     unchanged, to_probe = [], []
     for video in videos:
         row = existing.get(video.rel_path)
-        if row and row["size"] == video.size and row["mtime"] == video.mtime and not row["probe_error"]:
+        if (
+            row and row["size"] == video.size and row["mtime"] == video.mtime
+            and not row["probe_error"] and row["probe_version"] >= PROBE_VERSION
+        ):
             unchanged.append(video)
         else:
             to_probe.append(video)
@@ -220,6 +318,15 @@ def scan_library(
     done = len(unchanged)
     if on_progress:
         on_progress(done, total)
+
+    # Rows from before fingerprints get one (a quick read, not a re-probe), so a
+    # later move can be recognised.
+    backfill = [v for v in unchanged if not existing[v.rel_path]["fingerprint"]]
+    conn.executemany(
+        "UPDATE media_items SET fingerprint = ? WHERE library_id = ? AND rel_path = ?",
+        [(fp, library_id, v.rel_path) for v, fp in zip(backfill, pool.map(
+            lambda v: fingerprint(root / v.rel_path, v.size), backfill))],
+    )
 
     # Titles and posters are cheap to recompute, so refresh them for unchanged files
     # too; that picks up a poster added next to an existing video.
@@ -232,18 +339,21 @@ def scan_library(
     )
     conn.commit()
 
+    def examine(video: FoundVideo):
+        fp = prints.get(video.rel_path) or fingerprint(root / video.rel_path, video.size)
+        return video, _safe_probe(probe_fn, root / video.rel_path), fp
+
     added = updated = failed = 0
-    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-        results = pool.map(lambda v: (v, _safe_probe(probe_fn, root / v.rel_path)), to_probe)
-        for video, result in results:
+    with pool:
+        for video, result, fp in pool.map(examine, to_probe):
             mode = classify(result, Path(video.rel_path).suffix)
             conn.execute(
                 """
                 INSERT INTO media_items (
                     uid, library_id, rel_path, title, year, poster_path, size, mtime,
                     container, video_codec, audio_codec, pix_fmt, width, height,
-                    duration, interlaced, play_mode, probe_error, scanned_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                    duration, interlaced, play_mode, probe_error, fingerprint, probe_version, scanned_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
                 ON CONFLICT (library_id, rel_path) DO UPDATE SET
                     title = excluded.title, year = excluded.year,
                     poster_path = excluded.poster_path, size = excluded.size,
@@ -253,6 +363,7 @@ def scan_library(
                     height = excluded.height, duration = excluded.duration,
                     interlaced = excluded.interlaced, play_mode = excluded.play_mode,
                     probe_error = excluded.probe_error, scanned_at = excluded.scanned_at,
+                    fingerprint = excluded.fingerprint, probe_version = excluded.probe_version,
                     missing_since = NULL
                 """,
                 (
@@ -260,6 +371,7 @@ def scan_library(
                     video.size, video.mtime, result.container, result.video_codec,
                     result.audio_codec, result.pix_fmt, result.width, result.height,
                     result.duration, int(result.interlaced), mode, result.error,
+                    fp, PROBE_VERSION,
                 ),
             )
             # Commit per file so a long scan never holds the database write lock.
@@ -276,7 +388,6 @@ def scan_library(
 
     # Videos the walk didn't see: missing first, removed after the grace period.
     # Anything hidden by an unreadable folder or file is left exactly as it is.
-    seen = {v.rel_path for v in videos}
     newly_missing, to_remove = [], []
     grace = f"-{int(missing_grace.total_seconds())} seconds"
     for path, row in existing.items():
@@ -296,6 +407,21 @@ def scan_library(
         if expired:
             to_remove.append(row["id"])
     conn.executemany("DELETE FROM media_items WHERE id = ?", [(i,) for i in to_remove])
+
+    # Uploaded folder pictures follow a renamed folder, when the moved files say
+    # clearly where it went and nothing is already there.
+    for row in conn.execute("SELECT uid, rel_dir FROM folder_images WHERE library_id = ?", (library_id,)).fetchall():
+        old = row["rel_dir"]
+        if not old or old in walk.folders or walk.protects(old):
+            continue
+        targets = {new + old[len(src):] for src, new in folder_renames if old == src or old.startswith(src + "/")}
+        if len(targets) == 1:
+            (target,) = targets
+            taken = conn.execute(
+                "SELECT 1 FROM folder_images WHERE library_id = ? AND rel_dir = ?", (library_id, target)
+            ).fetchone()
+            if target in walk.folders and not taken:
+                conn.execute("UPDATE folder_images SET rel_dir = ? WHERE uid = ?", (target, row["uid"]))
 
     # Folder art is rebuilt from the walk, except under folders it couldn't read.
     for row in conn.execute("SELECT rel_dir FROM folder_art WHERE library_id = ?", (library_id,)).fetchall():
@@ -327,6 +453,7 @@ def scan_library(
         "total": total,
         "added": added,
         "updated": updated,
+        "moved": len(moves),
         "unchanged": len(unchanged),
         "failed": failed,
         "missing": len(newly_missing) - len([i for i in to_remove if i in newly_missing]),

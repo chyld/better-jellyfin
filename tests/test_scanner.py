@@ -56,7 +56,7 @@ def test_scan_finds_every_video(conn, library, fake_probe):
         "Films/Collection/Classics/0360/movie.mp4", "Films/Collection/Classics/0305/movie.mp4",
         "Films/Collection/Classics/0370/movie.mkv", "Films/Collection/Drama/0902/rough-cut.mp4",
     }
-    assert result == {"total": 13, "added": 13, "updated": 0, "unchanged": 0, "failed": 0, "missing": 0, "removed": 0, "unreadable_folders": [], "unreadable_files": 0, "outside_library": 0}
+    assert result == {"total": 13, "added": 13, "updated": 0, "moved": 0, "unchanged": 0, "failed": 0, "missing": 0, "removed": 0, "unreadable_folders": [], "unreadable_files": 0, "outside_library": 0}
 
 
 def test_scan_titles_and_posters(conn, library, fake_probe):
@@ -103,7 +103,7 @@ def test_rescan_without_changes_probes_nothing(conn, library, fake_probe):
     fake_probe.calls.clear()
     result = scan_library(conn, library, probe_fn=fake_probe)
     assert fake_probe.calls == []
-    assert result == {"total": 13, "added": 0, "updated": 0, "unchanged": 13, "failed": 0, "missing": 0, "removed": 0, "unreadable_folders": [], "unreadable_files": 0, "outside_library": 0}
+    assert result == {"total": 13, "added": 0, "updated": 0, "moved": 0, "unchanged": 13, "failed": 0, "missing": 0, "removed": 0, "unreadable_folders": [], "unreadable_files": 0, "outside_library": 0}
 
 
 def test_rescan_picks_up_added_changed_and_deleted_files(conn, library, fake_probe, media_root):
@@ -118,7 +118,7 @@ def test_rescan_picks_up_added_changed_and_deleted_files(conn, library, fake_pro
     result = scan_library(conn, library, probe_fn=fake_probe)
     assert sorted(p.name for p in fake_probe.calls) == ["1998.hiking.mpg", "clip01.avi"]
     assert result == {
-        "total": 12, "added": 1, "updated": 1, "unchanged": 10, "failed": 0,
+        "total": 12, "added": 1, "updated": 1, "moved": 0, "unchanged": 10, "failed": 0,
         "missing": 2, "removed": 0, "unreadable_folders": [], "unreadable_files": 0,
         "outside_library": 0,
     }

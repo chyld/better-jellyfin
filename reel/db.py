@@ -123,8 +123,18 @@ def connect(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
-# (version, what it does, function). Append only.
-MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = []
+def _v2_identity(conn: sqlite3.Connection) -> None:
+    # fingerprint: size + hashes of the first and last 64 KB, to recognise a moved file.
+    # probe_version: which version of the probe/classifier produced this row.
+    conn.execute("ALTER TABLE media_items ADD COLUMN fingerprint TEXT")
+    conn.execute("ALTER TABLE media_items ADD COLUMN probe_version INTEGER NOT NULL DEFAULT 0")
+    conn.execute("CREATE INDEX media_items_fingerprint ON media_items (library_id, fingerprint)")
+
+
+# (version, what it does, function). Append only; functions must not commit.
+MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
+    (2, "fingerprints and probe versions for media items", _v2_identity),
+]
 
 
 def latest_version() -> int:

@@ -33,6 +33,7 @@ function statusLine(lib) {
   if (scan?.state === "done") {
     const r = scan.result;
     const parts = [`${r.added} added`, `${r.updated} updated`];
+    if (r.moved) parts.push(`${r.moved} moved`);
     if (r.missing) parts.push(`${r.missing} missing`);
     if (r.removed) parts.push(`${r.removed} removed`);
     if (r.failed) parts.push(`${r.failed} unplayable`);
