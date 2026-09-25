@@ -1,5 +1,17 @@
+"""The database: schema, numbered migrations and connections.
+
+The schema version lives in SQLite's own `PRAGMA user_version`:
+
+    0   made before versioning (or brand new): brought up to version 1
+    1   the baseline schema below
+    2+  each entry in MIGRATIONS, applied once, in order, in a transaction
+
+To change the schema, add a migration at the end of MIGRATIONS. Never edit an
+existing one: databases out there have already run it.
+"""
 import sqlite3
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 
 SCHEMA = """
@@ -74,8 +86,9 @@ CREATE TABLE IF NOT EXISTS folder_art (
 """
 
 
-def _migrate(conn: sqlite3.Connection) -> None:
-    """Bring databases made by older versions up to date."""
+def _upgrade_unversioned(conn: sqlite3.Connection) -> None:
+    """Version 0 -> 1: create the baseline, and patch databases from before versioning."""
+    conn.executescript(SCHEMA)
     # Libraries and videos used to be addressed by their integer id; give each a UUID.
     for table in ("libraries", "media_items"):
         columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
@@ -110,11 +123,45 @@ def connect(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
+# (version, what it does, function). Append only.
+MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = []
+
+
+def latest_version() -> int:
+    return MIGRATIONS[-1][0] if MIGRATIONS else 1
+
+
+def schema_version(conn: sqlite3.Connection) -> int:
+    return conn.execute("PRAGMA user_version").fetchone()[0]
+
+
 def init_db(db_path: Path) -> None:
+    """Create the database, or bring an existing one up to the latest version."""
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = connect(db_path)
     try:
-        conn.executescript(SCHEMA)
-        _migrate(conn)
+        version = schema_version(conn)
+        if version > latest_version():
+            raise SystemExit(
+                f"The database {db_path} is from a newer version of Reel (schema {version}); "
+                f"this one understands up to schema {latest_version()}. Update Reel."
+            )
+        if version == 0:
+            _upgrade_unversioned(conn)
+            conn.execute("PRAGMA user_version = 1")
+            version = 1
+        for number, _description, migrate in MIGRATIONS:
+            if number <= version:
+                continue
+            # All or nothing: a failed migration leaves the database as it was.
+            conn.execute("BEGIN")
+            try:
+                migrate(conn)
+                conn.execute(f"PRAGMA user_version = {number}")
+                conn.commit()
+            except BaseException:
+                conn.rollback()
+                raise
+            version = number
     finally:
         conn.close()
