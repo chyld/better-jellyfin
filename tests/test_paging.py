@@ -4,7 +4,8 @@ import os
 import pytest
 
 from reel import db
-from reel.browse import MAX_PAGE_SIZE, browse
+from reel.browse import browse
+from reel.catalog import MAX_PAGE_SIZE
 from reel.db import connect, init_db
 from reel.libraries import create_library
 from reel.scanner import scan_library

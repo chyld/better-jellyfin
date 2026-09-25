@@ -17,12 +17,12 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import browse, custom_images, fetch, hls, libraries, playback, tags, users
+from . import browse, catalog, fetch, hls, libraries, pictures, playback, tags, users
 from .paths import OutsideRoot, resolve_inside
 from .plan import HLS_SUPPORT, Capabilities, Plan, plan as make_plan
 from .config import DataLock, Settings
 from .db import connect, init_db
-from .images import MAX_UPLOAD_BYTES, Thumbnailer, ThumbnailError
+from .images import MAX_UPLOAD_BYTES, Thumbnailer, ThumbnailError, save_frame
 from .scan_manager import ScanManager
 from .scanner import scan_library
 
@@ -83,7 +83,7 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
     hls_sessions = hls.HlsManager(settings.hls_dir, streams, cache_limit=settings.hls_cache_mb * 1024**2)
     # Uploaded images whose video, folder or tag is gone are cleaned up at
     # startup and after every scan.
-    scans.after_scan = lambda conn: custom_images.prune(conn, settings.images_dir)
+    scans.after_scan = lambda conn: pictures.prune(conn, settings.images_dir)
     tools: dict[str, str | None] = {}   # ffmpeg/ffprobe versions, checked at startup
 
     def startup() -> DataLock:
@@ -91,11 +91,11 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
         lock = settings.lock_data_dir()
         try:
             init_db(settings.db_path)
-            custom_images.move_old_tag_images(settings.data_dir, settings.images_dir)
+            pictures.move_old_tag_images(settings.data_dir, settings.images_dir)
             conn = connect(settings.db_path)
             try:
-                custom_images.adopt_unversioned_files(conn, settings.images_dir)
-                custom_images.prune(conn, settings.images_dir)
+                pictures.adopt_unversioned_files(conn, settings.images_dir)
+                pictures.prune(conn, settings.images_dir)
             finally:
                 conn.close()
             hls_sessions.start()
@@ -171,8 +171,8 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
     async def bad_image(request: Request, exc: ThumbnailError):
         return JSONResponse({"detail": str(exc)}, status_code=400)
 
-    @app.exception_handler(browse.NotFound)
-    async def not_found(request: Request, exc: browse.NotFound):
+    @app.exception_handler(catalog.NotFound)
+    async def not_found(request: Request, exc: catalog.NotFound):
         return JSONResponse({"detail": str(exc)}, status_code=404)
 
     async def read_upload(request: Request) -> bytes:
@@ -195,7 +195,7 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
     def library_root(conn: sqlite3.Connection, library_id: int) -> Path:
         lib = libraries.get_library(conn, library_id)
         if lib is None:
-            raise browse.NotFound("Library not found.")
+            raise catalog.NotFound("Library not found.")
         return Path(lib["path"])
 
     def library_file(conn: sqlite3.Connection, library_id: int, rel_path: str) -> Path:
@@ -226,10 +226,9 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
         ).fetchone()
         if row is None:
             raise HTTPException(404, "Video not found.")
-        if row["custom_image"]:
-            uploaded = custom_images.video_image_path(settings.images_dir, row["uid"], row["custom_image"])
-            if uploaded.is_file():
-                return FileResponse(uploaded, media_type="image/jpeg", headers=THUMB_HEADERS)
+        uploaded = pictures.picture_file(conn, settings.images_dir, pictures.VideoPicture(row["uid"]))
+        if uploaded:
+            return FileResponse(uploaded, media_type="image/jpeg", headers=THUMB_HEADERS)
         if row["poster_path"]:
             try:
                 poster = library_file(conn, row["library_id"], row["poster_path"])
@@ -240,11 +239,9 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
 
     def folder_art(conn: sqlite3.Connection, library_id: int, rel_dir: str) -> FileResponse:
         """A folder's picture: one you uploaded, else its folder.<ext> on the NAS."""
-        custom = custom_images.custom_folder_image(conn, library_id, rel_dir)
-        if custom:
-            uploaded = custom_images.folder_image_path(settings.images_dir, custom["uid"], custom["version"])
-            if uploaded.is_file():
-                return FileResponse(uploaded, media_type="image/jpeg", headers=THUMB_HEADERS)
+        uploaded = pictures.picture_file(conn, settings.images_dir, pictures.FolderPicture(library_id, rel_dir))
+        if uploaded:
+            return FileResponse(uploaded, media_type="image/jpeg", headers=THUMB_HEADERS)
         row = conn.execute(
             "SELECT art_path FROM folder_art WHERE library_id = ? AND rel_dir = ?", (library_id, rel_dir)
         ).fetchone()
@@ -264,7 +261,7 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
 
     @app.get("/api/libraries/{library_uid}/folder-art")
     def get_folder_art(library_uid: str, path: str = "", conn: sqlite3.Connection = Db):
-        return folder_art(conn, library_pk(conn, library_uid), browse.clean_dir(path))
+        return folder_art(conn, library_pk(conn, library_uid), catalog.clean_dir(path))
 
     @app.get("/api/items/{item_uid}")
     def get_item(item_uid: str, conn: sqlite3.Connection = Db):
@@ -292,50 +289,58 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
     @app.patch("/api/tags/{tag_uid}")
     def rename_tag(tag_uid: str, body: TagRename, conn: sqlite3.Connection = Db):
         """Rename a tag; renaming it to an existing tag merges the two."""
-        return tags.rename_tag(conn, tag_uid, body.name, settings.tag_images_dir)
+        return tags.rename_tag(conn, tag_uid, body.name, settings.images_dir)
 
     @app.delete("/api/tags/{tag_uid}", status_code=204)
     def delete_tag(tag_uid: str, conn: sqlite3.Connection = Db):
         """Delete a tag from every video."""
-        tags.delete_tag(conn, tag_uid, settings.tag_images_dir)
+        tags.delete_tag(conn, tag_uid, settings.images_dir)
         return Response(status_code=204)
-
-    @app.put("/api/tags/{tag_uid}/image")
-    async def upload_tag_image(tag_uid: str, request: Request, conn: sqlite3.Connection = Db):
-        """Set a tag's image. The request body is the image file itself."""
-        data = await read_upload(request)
-        return await run_in_threadpool(tags.set_image, conn, settings.tag_images_dir, tag_uid, data)
-
-    @app.post("/api/tags/{tag_uid}/image-url")
-    def tag_image_from_url(tag_uid: str, body: ImageUrl, conn: sqlite3.Connection = Db):
-        """Set a tag's image from a picture on the web: the server downloads it."""
-        tags.find_tag(conn, tag_uid)  # 404 before downloading anything
-        return tags.set_image(conn, settings.tag_images_dir, tag_uid, download(body.url))
-
-    @app.delete("/api/tags/{tag_uid}/image")
-    def delete_tag_image(tag_uid: str, conn: sqlite3.Connection = Db):
-        return tags.remove_image(conn, settings.tag_images_dir, tag_uid)
 
     @app.get("/api/tags/{tag_uid}/image")
     def get_tag_image(tag_uid: str, conn: sqlite3.Connection = Db):
-        path = tags.tag_image_file(conn, settings.tag_images_dir, tag_uid)
+        path = pictures.picture_file(conn, settings.images_dir, pictures.TagPicture(tag_uid))
+        if path is None:
+            raise HTTPException(404, "This tag has no image.")
         return FileResponse(path, media_type="image/jpeg", headers=THUMB_HEADERS)
 
     @app.get("/api/items/{item_uid}/thumb")
     def get_item_thumb(item_uid: str, conn: sqlite3.Connection = Db):
         return item_thumb(conn, item_uid)
 
-    # ---- Your images for videos and folders (they win over images on the NAS) ----
+    # ---- Your pictures for tags, videos and folders (they win over NAS pictures) ----
 
-    @app.put("/api/items/{item_uid}/image")
-    async def upload_video_image(item_uid: str, request: Request, conn: sqlite3.Connection = Db):
-        data = await read_upload(request)
-        return await run_in_threadpool(custom_images.set_video_image, conn, settings.images_dir, item_uid, data)
+    def picture_routes(path: str, owner_of, answer) -> None:
+        """Upload (PUT, the body is the image), from a URL (POST <path>-url) and
+        remove (DELETE) a picture. `owner_of` finds whose it is from the request;
+        `answer(conn, owner, version)` is the response."""
 
-    @app.post("/api/items/{item_uid}/image-url")
-    def video_image_from_url(item_uid: str, body: ImageUrl, conn: sqlite3.Connection = Db):
-        browse.item_detail(conn, item_uid)  # 404 before downloading anything
-        return custom_images.set_video_image(conn, settings.images_dir, item_uid, download(body.url))
+        @app.put(path)
+        async def upload_picture(request: Request, owner=Depends(owner_of), conn: sqlite3.Connection = Db):
+            data = await read_upload(request)
+            version = await run_in_threadpool(pictures.set_uploaded, conn, settings.images_dir, owner, data)
+            return answer(conn, owner, version)
+
+        @app.post(path + "-url")
+        def picture_from_url(body: ImageUrl, owner=Depends(owner_of), conn: sqlite3.Connection = Db):
+            owner.check(conn)  # 404 before downloading anything
+            version = pictures.set_uploaded(conn, settings.images_dir, owner, download(body.url))
+            return answer(conn, owner, version)
+
+        @app.delete(path)
+        def remove_picture(owner=Depends(owner_of), conn: sqlite3.Connection = Db):
+            pictures.remove_picture(conn, settings.images_dir, owner)
+            return answer(conn, owner, None)
+
+    def folder_owner(library_uid: str, path: str = "", conn: sqlite3.Connection = Db) -> pictures.FolderPicture:
+        return pictures.FolderPicture(library_pk(conn, library_uid), path)
+
+    picture_routes("/api/tags/{tag_uid}/image", lambda tag_uid: pictures.TagPicture(tag_uid),
+                   lambda conn, owner, version: tags.tag_summary(conn, owner.uid))
+    picture_routes("/api/items/{item_uid}/image", lambda item_uid: pictures.VideoPicture(item_uid),
+                   lambda conn, owner, version: {"custom_image": version})
+    picture_routes("/api/libraries/{library_uid}/folder-image", folder_owner,
+                   lambda conn, owner, version: {"custom_art": version})
 
     @app.post("/api/items/{item_uid}/snapshot")
     def video_image_from_frame(item_uid: str, body: Snapshot, conn: sqlite3.Connection = Db):
@@ -343,38 +348,13 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
         row, path = media_file(conn, item_uid)
         # The very last moment may have no frame to decode: stay a little before it.
         at = min(body.time, max(0.0, row["duration"] - 0.5)) if row["duration"] else body.time
+        interlaced = bool(row["interlaced"])
         try:
-            return custom_images.set_video_frame(conn, settings.images_dir, item_uid, path, at,
-                                                 interlaced=bool(row["interlaced"]))
+            version = pictures.set_picture(conn, settings.images_dir, pictures.VideoPicture(item_uid),
+                                           lambda out: save_frame(path, at, out, interlaced=interlaced))
         except ThumbnailError as exc:
             raise HTTPException(502, f"Couldn't take a picture from the video ({exc}).")
-
-    @app.delete("/api/items/{item_uid}/image")
-    def delete_video_image(item_uid: str, conn: sqlite3.Connection = Db):
-        return custom_images.remove_video_image(conn, settings.images_dir, item_uid)
-
-    @app.put("/api/libraries/{library_uid}/folder-image")
-    async def upload_folder_image(
-        library_uid: str, request: Request, path: str = "", conn: sqlite3.Connection = Db
-    ):
-        library_id = library_pk(conn, library_uid)
-        data = await read_upload(request)
-        return await run_in_threadpool(
-            custom_images.set_folder_image, conn, settings.images_dir, library_id, path, data
-        )
-
-    @app.post("/api/libraries/{library_uid}/folder-image-url")
-    def folder_image_from_url(
-        library_uid: str, body: ImageUrl, path: str = "", conn: sqlite3.Connection = Db
-    ):
-        library_id = library_pk(conn, library_uid)
-        browse.browse(conn, library_id, path)  # 404 for an unknown folder before downloading
-        return custom_images.set_folder_image(conn, settings.images_dir, library_id, path, download(body.url))
-
-    @app.delete("/api/libraries/{library_uid}/folder-image")
-    def delete_folder_image(library_uid: str, path: str = "", conn: sqlite3.Connection = Db):
-        library_id = library_pk(conn, library_uid)
-        return custom_images.remove_folder_image(conn, settings.images_dir, library_id, path)
+        return {"custom_image": version}
 
     def media_file(conn: sqlite3.Connection, item_uid: str) -> tuple[sqlite3.Row, Path]:
         row = conn.execute("SELECT * FROM media_items WHERE uid = ?", (item_uid,)).fetchone()
@@ -385,7 +365,8 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
             raise HTTPException(404, "The video file is missing. Is the NAS connected?")
         return row, path
 
-    @app.api_route("/api/items/{item_uid}/file", methods=["GET", "HEAD"])
+    @app.get("/api/items/{item_uid}/file", operation_id="get_item_file")
+    @app.head("/api/items/{item_uid}/file", operation_id="head_item_file")
     def get_item_file(item_uid: str, conn: sqlite3.Connection = Db):
         """The original file, with range requests so the browser can seek."""
         row, path = media_file(conn, item_uid)
@@ -576,7 +557,7 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
             raise HTTPException(409, "Wait for the scan to finish before removing this library.")
         libraries.delete_library(conn, library_id)
         scans.forget(library_id)
-        custom_images.prune(conn, settings.images_dir)
+        pictures.prune(conn, settings.images_dir)
         return Response(status_code=204)
 
     @app.post("/api/libraries/scan", status_code=202)

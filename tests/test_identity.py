@@ -172,7 +172,7 @@ def test_renamed_folder_picture_survives_a_scan_stopped_after_the_moves(conn, li
     the next (complete) scan keeps it, though it no longer sees any move."""
     import threading
 
-    from reel import custom_images
+    from reel import pictures
     from reel.scanner import ScanCancelled
 
     set_folder_image(conn, lib, "Tapes", "img-1")
@@ -186,7 +186,7 @@ def test_renamed_folder_picture_survives_a_scan_stopped_after_the_moves(conn, li
     assert folder_image(conn, lib, "Home Tapes")["uid"] == "img-1"  # ...and the picture with them
 
     assert scan_library(conn, lib, probe_fn=fake_probe)["moved"] == 0
-    custom_images.prune(conn, media_root.parent / "images")
+    pictures.prune(conn, media_root.parent / "images")
     assert folder_image(conn, lib, "Home Tapes")["uid"] == "img-1"
 
 

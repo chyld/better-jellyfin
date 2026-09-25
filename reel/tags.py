@@ -4,9 +4,10 @@ import re
 import sqlite3
 from pathlib import Path
 
-from .browse import NotFound, item_out, page_bounds
+from .browse import item_out
+from .catalog import NotFound, page_bounds
 from .db import NOW_MS, new_uid, write_transaction
-from .images import ThumbnailError, save_upload, upload_name
+from .pictures import picture_path
 
 MAX_TAG_LENGTH = 50
 # Tags are lowercase letters, digits and dashes only: "family", "1990s", "road-trip".
@@ -163,44 +164,13 @@ def delete_tag(conn: sqlite3.Connection, tag_uid: str, images_dir: Path) -> None
 
 
 def image_path(images_dir: Path, tag_uid: str, version: str) -> Path:
-    return images_dir / upload_name(tag_uid, version)
+    """A tag's picture file (images_dir is the pictures folder, see pictures.py)."""
+    return picture_path(images_dir, "tags", tag_uid, version)
 
 
-def set_image(conn: sqlite3.Connection, images_dir: Path, tag_uid: str, data: bytes) -> dict:
-    """Give a tag an uploaded image (stored as a JPEG), replacing any old one.
-
-    Write the new file, record it, then delete the old one (see images.py).
-    """
-    tag = find_tag(conn, tag_uid)
-    version = new_uid()[:8]
-    try:
-        save_upload(data, image_path(images_dir, tag["uid"], version))
-    except ThumbnailError as exc:
-        raise TagError(str(exc))
-    conn.execute("UPDATE tags SET image_version = ? WHERE id = ?", (version, tag["id"]))
-    conn.commit()
-    if tag["image_version"]:
-        image_path(images_dir, tag["uid"], tag["image_version"]).unlink(missing_ok=True)
-    return _tag_with_count(conn, tag["id"])
-
-
-def remove_image(conn: sqlite3.Connection, images_dir: Path, tag_uid: str) -> dict:
-    tag = find_tag(conn, tag_uid)
-    conn.execute("UPDATE tags SET image_version = NULL WHERE id = ?", (tag["id"],))
-    conn.commit()
-    if tag["image_version"]:
-        image_path(images_dir, tag["uid"], tag["image_version"]).unlink(missing_ok=True)
-    return _tag_with_count(conn, tag["id"])
-
-
-def tag_image_file(conn: sqlite3.Connection, images_dir: Path, tag_uid: str) -> Path:
-    tag = find_tag(conn, tag_uid)
-    if not tag["image_version"]:
-        raise NotFound("This tag has no image.")
-    path = image_path(images_dir, tag["uid"], tag["image_version"])
-    if not path.is_file():
-        raise NotFound("This tag has no image.")
-    return path
+def tag_summary(conn: sqlite3.Connection, tag_uid: str) -> dict:
+    """The tag with its image version and video count."""
+    return _tag_with_count(conn, find_tag(conn, tag_uid)["id"])
 
 
 def list_tags(conn: sqlite3.Connection) -> list[dict]:

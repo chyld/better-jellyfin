@@ -5,7 +5,7 @@ import time
 
 import pytest
 
-from reel import custom_images, tags
+from reel import pictures
 from reel.db import connect
 
 from conftest import make_files, requires_ffmpeg
@@ -37,18 +37,17 @@ def video_id(client, lib):
 
 def cleanup_during_upload(monkeypatch, settings):
     """Run the clean-up right after an upload writes its file, before it's recorded."""
-    real_save = custom_images.save_upload
+    real_save = pictures.save_upload
 
     def save_then_cleanup(data, out, **kwargs):
         real_save(data, out, **kwargs)
         conn = connect(settings.db_path)
         try:
-            custom_images.prune(conn, settings.images_dir)
+            pictures.prune(conn, settings.images_dir)
         finally:
             conn.close()
 
-    monkeypatch.setattr(custom_images, "save_upload", save_then_cleanup)
-    monkeypatch.setattr(tags, "save_upload", save_then_cleanup)
+    monkeypatch.setattr(pictures, "save_upload", save_then_cleanup)
 
 
 def test_cleanup_during_a_video_upload_keeps_the_new_picture(client, lib, picture, settings, monkeypatch):
@@ -88,7 +87,7 @@ def test_cleanup_waits_for_the_grace_period(settings, conn, picture):
     stale.write_bytes(picture)
     old = time.time() - 7200
     os.utime(stale, (old, old))
-    assert custom_images.prune(conn, settings.images_dir) == 1
+    assert pictures.prune(conn, settings.images_dir) == 1
     assert fresh.exists() and not stale.exists()
 
 
@@ -100,7 +99,7 @@ def test_old_style_file_names_are_adopted(client, lib, picture, settings):
     (folder / f"{video}-{version}.jpg").rename(folder / f"{video}.jpg")  # as an older Reel stored it
     conn = connect(settings.db_path)
     try:
-        custom_images.adopt_unversioned_files(conn, settings.images_dir)
+        pictures.adopt_unversioned_files(conn, settings.images_dir)
     finally:
         conn.close()
     assert (folder / f"{video}-{version}.jpg").exists()
@@ -109,7 +108,7 @@ def test_old_style_file_names_are_adopted(client, lib, picture, settings):
 
 def test_two_first_uploads_to_a_folder_leave_a_working_picture(client, lib, picture, settings, monkeypatch):
     """A second first-upload lands while the first is saving its file."""
-    real_save = custom_images.save_upload
+    real_save = pictures.save_upload
     lib_pk = connect(settings.db_path).execute("SELECT id FROM libraries").fetchone()[0]
     raced = []
 
@@ -119,12 +118,11 @@ def test_two_first_uploads_to_a_folder_leave_a_working_picture(client, lib, pict
             raced.append(True)
             other = connect(settings.db_path)
             try:
-                custom_images.set_folder_image(other, settings.images_dir, lib_pk, "Tapes", data)
+                pictures.set_uploaded(other, settings.images_dir, pictures.FolderPicture(lib_pk, "Tapes"), data)
             finally:
                 other.close()
 
-    monkeypatch.setattr(custom_images, "save_upload", save_then_race)
+    monkeypatch.setattr(pictures, "save_upload", save_then_race)
     assert client.put(f"/api/libraries/{lib}/folder-image", params={"path": "Tapes"}, content=picture).status_code == 200
     conn = connect(settings.db_path)
-    row = custom_images.custom_folder_image(conn, lib_pk, "Tapes")
-    assert custom_images.folder_image_path(settings.images_dir, row["uid"], row["version"]).is_file()
+    assert pictures.picture_file(conn, settings.images_dir, pictures.FolderPicture(lib_pk, "Tapes")) is not None

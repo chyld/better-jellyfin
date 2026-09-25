@@ -5,23 +5,10 @@ Everything here comes from the database, so browsing never touches the NAS.
 import sqlite3
 from pathlib import PurePosixPath
 
+from .catalog import NotFound, clean_dir, descendants, page_bounds
 from .sorting import natural_text
 
 SORTS = ("name", "year")
-PAGE_SIZE = 200      # videos per page when the caller doesn't say
-MAX_PAGE_SIZE = 500
-
-
-class NotFound(LookupError):
-    pass
-
-
-def clean_dir(rel_dir: str | None) -> str:
-    """Normalise a folder path from the URL; reject anything that climbs out."""
-    parts = [p for p in (rel_dir or "").split("/") if p not in ("", ".")]
-    if ".." in parts:
-        raise NotFound("Folder not found.")
-    return "/".join(parts)
 
 
 def item_out(row: sqlite3.Row) -> dict:
@@ -44,28 +31,12 @@ ORDER_BY = {
 }
 
 
-def page_bounds(limit: int | None, offset: int | None) -> tuple[int, int]:
-    limit = PAGE_SIZE if limit is None else max(1, min(int(limit), MAX_PAGE_SIZE))
-    return limit, max(0, int(offset or 0))
-
-
 def breadcrumbs(library_name: str, rel_dir: str) -> list[dict]:
     crumbs = [{"name": library_name, "path": ""}]
     parts = rel_dir.split("/") if rel_dir else []
     for i, part in enumerate(parts):
         crumbs.append({"name": part, "path": "/".join(parts[: i + 1])})
     return crumbs
-
-
-def descendants(rel_dir: str) -> tuple[str, str | None]:
-    """The index range of parent_dir values at or below a folder (not the folder itself).
-
-    Everything under "Show 07" sorts between "Show 07/" and "Show 070", because
-    "/" comes just before "0".
-    """
-    if not rel_dir:
-        return "\x01", None          # any non-empty parent_dir: every subfolder
-    return rel_dir + "/", rel_dir + "0"
 
 
 def browse(

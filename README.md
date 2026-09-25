@@ -681,10 +681,11 @@ reel/
   hls.py             HLS playlists and on-demand segment encoding
   playback.py        ffmpeg commands for remux/convert; streaming and killing ffmpeg
   images.py          shrinking/cropping thumbnails; processing uploads
-  custom_images.py   uploaded images for folders and videos; clean-up
-  tags.py            tags: add/remove, rename/merge, delete, images
+  pictures.py        your pictures for tags, videos and folders: one way to set, remove and clean up
+  tags.py            tags: add/remove, rename/merge, delete
   fetch.py           safe image downloads from URLs
   browse.py          read-only views: folders (indexed, paged), video details
+  catalog.py         shared by reads and writes: NotFound, folder paths, paging
   sorting.py         natural sort keys stored for SQL ordering
   static/
     index.html       page shell and dialogs
