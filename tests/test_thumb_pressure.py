@@ -51,7 +51,7 @@ def test_waiting_thumbnails_dont_hold_up_other_requests(slow, settings, media_ro
         monkeypatch.setattr(main, "resolve_inside", slow_resolve)
     init_db(settings.db_path)
     app = create_app(settings, ScanManager(settings.db_path, scan_fn=partial(scan_library, probe_fn=fake_probe)))
-    app.state.scans.after_done = None      # no thumbnails made after the scan: all 60 are requested cold
+    app.state.scans.after_batch = None      # no thumbnails made after the scan: all 60 are requested cold
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
@@ -119,7 +119,7 @@ def test_thumbnails_are_made_one_at_a_time_while_something_plays(playing, most, 
     monkeypatch.setattr(Thumbnailer, "make", counting_make)
     init_db(settings.db_path)
     app = create_app(settings, ScanManager(settings.db_path, scan_fn=partial(scan_library, probe_fn=fake_probe)))
-    app.state.scans.after_done = None
+    app.state.scans.after_batch = None
     with TestClient(app) as c:
         lib = c.post("/api/libraries", json={"name": "Tapes", "path": str(media_root / "Tapes")}).json()["id"]
         c.post(f"/api/libraries/{lib}/scan")

@@ -130,14 +130,15 @@ class Walk:
         return any(rel_path == d or rel_path.startswith(d + "/") for d in self.unreadable_folders)
 
 
-def _as_finished(pool, fn, items, *, window: int):
-    """fn(item) for each item on the pool, at most `window` at a time, yielded as
-    each finishes (not in input order). Stopping early leaves the rest unsubmitted."""
+def _as_finished(pool, fn, items, *, window: int, busy: Callable[[], bool] | None = None):
+    """fn(item) for each item on the pool, at most `window` at a time (one while
+    `busy()`), yielded as each finishes (not in input order). Stopping early leaves
+    the rest unsubmitted."""
     items = iter(items)
     pending = set()
 
     def fill() -> None:
-        while len(pending) < window:
+        while len(pending) < (1 if busy and busy() else window):
             item = next(items, _END)
             if item is _END:
                 return
@@ -292,6 +293,7 @@ def scan_library(
     missing_grace: timedelta = MISSING_GRACE,
     cancel: threading.Event | None = None,
     media_root: Path | None = None,
+    busy: Callable[[], bool] | None = None,
 ) -> dict:
     """Bring the catalog for one library in line with what's on disk.
 
@@ -307,7 +309,8 @@ def scan_library(
     raising ScanCancelled; videos already recorded stay recorded.
 
     With `media_root`, the library folder is re-checked now, as playback does: if
-    it has since been replaced by a link leading outside, nothing is read.
+    it has since been replaced by a link leading outside, nothing is read. While
+    `busy()` (someone is watching), new probes are started one at a time.
     """
     began = time.monotonic()
     lib = conn.execute("SELECT path FROM libraries WHERE id = ?", (library_id,)).fetchone()
@@ -457,7 +460,7 @@ def scan_library(
         added = updated = failed = 0
         # A few probes at a time, recorded as each finishes: one slow file doesn't
         # hold back the ones done after it (or the progress shown).
-        for video, result, fp in _as_finished(pool, examine, to_probe, window=2 * max(1, workers)):
+        for video, result, fp in _as_finished(pool, examine, to_probe, window=2 * max(1, workers), busy=busy):
             _check(cancel)
             conn.execute(
                 """

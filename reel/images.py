@@ -31,6 +31,18 @@ class Thumbnailer:
         self.cache_dir = cache_dir
         # Limit how many ffmpeg processes a page full of new thumbnails can start.
         self._slots = threading.Semaphore(max_concurrent)
+        # The ffmpeg processes running now, so stopping Reel can end them (a
+        # thumbnail of a huge picture on a slow NAS can take a while).
+        self._running: set[subprocess.Popen] = set()
+        self._lock = threading.Lock()
+        self._stopped = False
+
+    def stop(self) -> None:
+        """Kill the thumbnails being made and refuse new ones (Reel is stopping)."""
+        with self._lock:
+            self._stopped = True
+            for proc in self._running:
+                proc.kill()
 
     def path_for(self, key_src: str, rev: str, shape: str) -> Path:
         """Where the thumbnail of a picture at version `rev` (its size and time, see
@@ -56,14 +68,25 @@ class Thumbnailer:
         with self._slots:
             if out.exists():  # another request made it while we waited
                 return out
+            with self._lock:
+                if self._stopped:
+                    raise ThumbnailError("Reel is stopping")
+                proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                        stderr=subprocess.PIPE, text=True)
+                self._running.add(proc)
             try:
-                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=FFMPEG_TIMEOUT)
+                _, stderr = proc.communicate(timeout=FFMPEG_TIMEOUT)
             except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.communicate()
                 tmp.unlink(missing_ok=True)
                 raise ThumbnailError("ffmpeg timed out")
+            finally:
+                with self._lock:
+                    self._running.discard(proc)
         if proc.returncode != 0 or not tmp.exists() or tmp.stat().st_size == 0:
             tmp.unlink(missing_ok=True)
-            raise ThumbnailError(proc.stderr.strip() or "ffmpeg made no image")
+            raise ThumbnailError(stderr.strip() or "ffmpeg made no image")
         os.replace(tmp, out)
         return out
 

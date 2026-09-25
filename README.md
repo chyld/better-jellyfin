@@ -229,6 +229,8 @@ the database, so **browsing never touches the NAS**.
 - **Symlinks** that lead out of the library are ignored, videos and pictures alike, and the
   scan reports how many. Symlinks that stay inside the library are fine. Symlinked folders
   aren't followed.
+- While someone watches (as above), a scan starts new ffprobes one at a time, leaving the NAS
+  to the video; otherwise a few run at once.
 - Scans run one at a time on a background thread, and the Libraries page shows progress
   ("Scanning: 71 / 312"). Each file is committed as it's done, so a long scan never blocks
   other actions.
@@ -283,11 +285,15 @@ the database, so **browsing never touches the NAS**.
   (its size and modification time), and thumbnails are cached under it, so showing a cached
   one needs no trip to the NAS. The version is also in the picture's URL, so the browser keeps
   it for good. A picture replaced on the NAS shows up after the next scan.
-- **After a scan, missing thumbnails are made** one at a time, so the first look at a folder
-  doesn't wait for ffmpeg. That stops as soon as a video plays; the rest are made on first view.
-- **While a video plays, thumbnails are made one at a time** (otherwise up to 4 at once), so a
-  new folder doesn't take the CPU or the NAS from playback. Thumbnails of old picture versions
-  are deleted after each scan.
+- **Once the scan queue is empty, missing thumbnails are made** one at a time, so the first
+  look at a folder doesn't wait for ffmpeg. Scans always go first ("Scan all" scans every
+  library before making any), and it gives way as soon as another scan is queued, someone starts
+  watching, or Reel stops (a thumbnail being made is ended); the rest are made on first view or
+  after the next scan. Thumbnails of old picture versions are deleted then too.
+- **While someone watches, thumbnails are made one at a time** (otherwise up to 4 at once), so a
+  new folder doesn't take the CPU or the NAS from playback. "Watching" means a stream is running
+  or any video bytes (direct play, a stream, an HLS segment) were asked for in the last 30
+  seconds.
 - Cards load their pictures lazily as they scroll into view.
 - Placeholders are drawn in the browser, so a missing picture costs no request. A picture that
   fails to load (for example with the NAS offline) also turns into its placeholder.
@@ -650,7 +656,7 @@ version); bump `THUMBS` when the server changes how thumbnails are made.
 ### Tests
 
 ```sh
-uv run pytest              # backend: 538 tests
+uv run pytest              # backend: 544 tests
 node --test tests/js/      # frontend: 30 tests
 uv run pytest -m browser   # browser: 15 tests (about 2 minutes; needs Chromium and ffmpeg)
 scripts/docker-smoke.sh    # builds the image and checks it end to end (needs Docker)
@@ -701,6 +707,7 @@ reel/
   playback.py        ffmpeg commands for remux/convert; streaming and killing ffmpeg
   images.py          shrinking/cropping thumbnails; processing uploads
   pictures.py        your pictures for tags, videos and folders: one way to set, remove and clean up
+  thumbnails.py      pictures on cards: finding, thumbnailing (limited), and after-scan warming/cleanup
   tags.py            tags: add/remove, rename/merge, delete
   fetch.py           safe image downloads from URLs
   browse.py          read-only views: folders (indexed, paged), video details

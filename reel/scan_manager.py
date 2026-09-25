@@ -32,10 +32,13 @@ class ScanManager:
         self._cancel = threading.Event()
         # Called with the scan's connection after each successful scan.
         self.after_scan: Callable[[object], None] | None = None
-        # Called after a scan is done (and shown as done), before the next one
-        # starts: optional extra work, e.g. making missing thumbnails. It gets
-        # the library and the stop flag, and should stop when that's set.
-        self.after_done: Callable[[int, threading.Event], None] | None = None
+        # Called when the queue has run dry after one or more scans: background work
+        # for the libraries scanned (e.g. thumbnails). It gets them and a
+        # should_stop() that turns true when a scan is queued or Reel stops, and
+        # returns whether it finished; unfinished libraries are offered again after
+        # the next batch. Scans always go first.
+        self.after_batch: Callable[[list[int], Callable[[], bool]], bool] | None = None
+        self._scanned: list[int] = []
 
     def start(self) -> None:
         self._cancel.clear()
@@ -134,12 +137,26 @@ class ScanManager:
                 if library_id is None:
                     return
                 self._scan_one(library_id)
+                if self._queue.empty():
+                    self._batch_done()
             except Exception:
                 # Whatever went wrong with this job, the next one still runs.
                 log.exception("scanning library %s failed unexpectedly", library_id)
                 self._update(library_id, state="error", error="The scan failed unexpectedly; see the log.")
             finally:
                 self._queue.task_done()
+
+    def _batch_done(self) -> None:
+        """The queue is empty: do the background work for what was scanned, giving
+        way as soon as another scan is queued or Reel stops."""
+        if not self.after_batch or not self._scanned:
+            return
+        should_stop = lambda: self._cancel.is_set() or not self._queue.empty()  # noqa: E731
+        try:
+            if self.after_batch(list(self._scanned), should_stop):
+                self._scanned.clear()
+        except Exception:
+            log.exception("background work after scanning failed")
 
     def _scan_one(self, library_id: int) -> None:
         with self._lock:
@@ -166,11 +183,8 @@ class ScanManager:
                     log.exception("clean-up after scanning library %s failed", library_id)
                     conn.rollback()
             self._update(library_id, state="done", result=result)
-            if self.after_done:
-                try:
-                    self.after_done(library_id, self._cancel)
-                except Exception:
-                    log.exception("follow-up work after scanning library %s failed", library_id)
+            if library_id not in self._scanned:
+                self._scanned.append(library_id)
         except ScanCancelled:
             log.info("scan of library %s stopped", library_id)
             self._update(library_id, state="cancelled")

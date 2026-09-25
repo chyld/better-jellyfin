@@ -7,7 +7,6 @@ import sqlite3
 import subprocess
 from collections.abc import Iterator
 from contextlib import asynccontextmanager
-from functools import partial
 from urllib.parse import urlencode
 from pathlib import Path
 
@@ -24,7 +23,7 @@ from .config import DataLock, Settings
 from .db import connect, init_db
 from .images import MAX_UPLOAD_BYTES, Thumbnailer, ThumbnailError, save_frame
 from .scan_manager import ScanManager
-from .scanner import scan_library
+from .thumbnails import THUMB_HEADERS, Thumbnails
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -41,10 +40,6 @@ class AppFiles(StaticFiles):
         response.headers["Cache-Control"] = "no-cache"
         return response
 
-# Thumbnails change only when their source does (the cache key includes its mtime).
-THUMB_HEADERS = {"Cache-Control": "private, max-age=3600"}
-IMMUTABLE_HEADERS = {"Cache-Control": "private, max-age=31536000, immutable"}
-THUMB_SLOTS = 4  # NAS pictures thumbnailed at once
 
 
 class LibraryCreate(BaseModel):
@@ -77,19 +72,26 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
     server starts (see startup()), once this process holds the data-folder lock."""
     settings = settings or Settings.from_env()
     settings.check_data_dir()
+    streams = playback.StreamManager(playback.StreamLimits(max_streams=settings.max_streams))
+    watching = playback.Watching(streams)   # background work gives way while someone watches
     scans = scan_manager or ScanManager(
         settings.db_path, workers=settings.probe_workers, missing_grace=settings.missing_grace,
-        media_root=settings.media_root,
+        media_root=settings.media_root, busy=watching,
     )
     thumbs = Thumbnailer(settings.thumbs_dir)
-    streams = playback.StreamManager(playback.StreamLimits(max_streams=settings.max_streams))
+    thumbnails = Thumbnails(settings.db_path, settings.media_root, settings.images_dir, thumbs, watching)
     hls_sessions = hls.HlsManager(settings.hls_dir, streams, cache_limit=settings.hls_cache_mb * 1024**2)
-    # Pictures whose video, folder or tag is gone, and thumbnails of old picture
-    # versions, are cleaned up after every scan (pictures at startup too); then
-    # missing thumbnails are made (see warm_thumbnails).
-    scans.after_scan = lambda conn: (pictures.prune(conn, settings.images_dir),
-                                     thumbs.prune(thumbnails_in_use(conn)))
-    scans.after_done = lambda library_id, cancel: warm_thumbnails(library_id, cancel)
+    # Pictures whose video, folder or tag is gone are cleaned up after every scan
+    # (and at startup). Once the scan queue runs dry, thumbnails of old picture
+    # versions are deleted and missing ones made, giving way to new scans, to
+    # anyone watching, and to shutdown.
+    scans.after_scan = lambda conn: pictures.prune(conn, settings.images_dir)
+
+    def after_batch(library_ids: list[int], should_stop) -> bool:
+        thumbnails.prune()
+        return thumbnails.warm(library_ids, lambda: should_stop() or watching())
+
+    scans.after_batch = after_batch
     tools: dict[str, str | None] = {}   # ffmpeg/ffprobe versions, checked at startup
 
     def startup() -> DataLock:
@@ -127,6 +129,7 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
                 await housekeeping
             await hls_sessions.shutdown()
             await streams.shutdown()
+            thumbs.stop()   # a thumbnail being made after a scan ends now too
             # A scan stops between files; wait for it off the event loop.
             await run_in_threadpool(scans.stop)
             lock.release()
@@ -138,6 +141,7 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
     app.state.scans = scans
     app.state.streams = streams
     app.state.hls = hls_sessions
+    app.state.watching = watching
 
     def get_db() -> Iterator[sqlite3.Connection]:
         conn = connect(settings.db_path)
@@ -211,137 +215,12 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
         """A file in a library, re-checked now: it and its library must still be
         inside the media root, even if something was swapped for a symlink since
         the scan. Anything else is reported as not found."""
-        return media_path(library_root(conn, library_id), rel_path)
-
-    def media_path(root: Path, rel_path: str) -> Path:
+        root = library_root(conn, library_id)
         try:
             resolve_inside(settings.media_root, root)
             return resolve_inside(root, rel_path)
         except (OutsideRoot, OSError):
             raise HTTPException(404, "The video file is missing. Is the NAS connected?")
-
-    # Thumbnails of NAS pictures: at most THUMB_SLOTS made at once, and one at a
-    # time while anything plays (the video keeps the machine). A request waits for
-    # a slot here, before it takes a request thread, so a folder of new cards
-    # can't tie up the threads the rest of the API needs. A thumbnail already
-    # made is found by the picture's recorded version, without the NAS.
-    thumb_slots = asyncio.Semaphore(THUMB_SLOTS)
-    while_playing = asyncio.Semaphore(1)
-
-    def item_picture(item_uid: str) -> dict:
-        """The video's picture, from the catalog only (a short connection):
-        {"file", "version"} for one you uploaded or snapped, else {"root", "rel",
-        "rev", "shape"} for its image on the NAS (zombie.png beside zombie.mp4).
-        Videos with neither get a placeholder in the browser, so this is a 404."""
-        conn = connect(settings.db_path)
-        try:
-            row = conn.execute(
-                "SELECT uid, library_id, poster_path, poster_rev FROM media_items WHERE uid = ?", (item_uid,)
-            ).fetchone()
-            if row is None:
-                raise HTTPException(404, "Video not found.")
-            owner = pictures.VideoPicture(row["uid"])
-            uploaded = pictures.picture_file(conn, settings.images_dir, owner)
-            if uploaded:
-                return {"file": uploaded, "version": owner.current(conn)[1]}
-            if row["poster_path"]:
-                return {"root": library_root(conn, row["library_id"]), "rel": row["poster_path"],
-                        "rev": row["poster_rev"], "shape": "landscape"}
-            raise HTTPException(404, "No image.")
-        finally:
-            conn.close()
-
-    def folder_picture(library_uid: str, rel_dir: str) -> dict:
-        """A folder's picture, as above: yours, else its folder.<ext> on the NAS."""
-        conn = connect(settings.db_path)
-        try:
-            library_id = library_pk(conn, library_uid)
-            owner = pictures.FolderPicture(library_id, rel_dir)
-            uploaded = pictures.picture_file(conn, settings.images_dir, owner)
-            if uploaded:
-                return {"file": uploaded, "version": owner.current(conn)[1]}
-            row = conn.execute(
-                "SELECT art_path, art_rev FROM folder_art WHERE library_id = ? AND rel_dir = ?",
-                (library_id, owner.rel_dir),
-            ).fetchone()
-            if row is not None:
-                return {"root": library_root(conn, library_id), "rel": row["art_path"],
-                        "rev": row["art_rev"], "shape": "poster"}
-            raise HTTPException(404, "No folder art.")
-        finally:
-            conn.close()
-
-    def make_thumbnail(found: dict) -> Path:
-        """In a worker thread: check the NAS picture is still inside the library
-        (it may have been swapped for a link since the scan), then thumbnail it."""
-        try:
-            src = media_path(found["root"], found["rel"])
-        except HTTPException:
-            raise ThumbnailError("The picture is missing.")
-        return thumbs.make(src, found["shape"], key_src=str(found["root"] / found["rel"]), rev=found["rev"])
-
-    def nas_pictures(conn: sqlite3.Connection, library_id: int | None = None) -> list[dict]:
-        """Every NAS picture with a recorded version (of one library, or all)."""
-        where, args = ("AND l.id = ?", (library_id,)) if library_id is not None else ("", ())
-        rows = conn.execute(
-            f"""
-            SELECT l.path AS root, m.poster_path AS rel, m.poster_rev AS rev, 'landscape' AS shape
-              FROM media_items m JOIN libraries l ON l.id = m.library_id
-             WHERE m.poster_rev IS NOT NULL AND m.missing_since IS NULL {where}
-            UNION ALL
-            SELECT l.path, a.art_path, a.art_rev, 'poster'
-              FROM folder_art a JOIN libraries l ON l.id = a.library_id
-             WHERE a.art_rev IS NOT NULL {where}
-            """,
-            args * 2,
-        ).fetchall()
-        return [{"root": Path(r["root"]), "rel": r["rel"], "rev": r["rev"], "shape": r["shape"]} for r in rows]
-
-    def thumbnails_in_use(conn: sqlite3.Connection) -> set[Path]:
-        return {thumbs.path_for(str(p["root"] / p["rel"]), p["rev"], p["shape"]) for p in nas_pictures(conn)}
-
-    def warm_thumbnails(library_id: int, cancel) -> int:
-        """After a scan (on the scan thread): make the library's missing thumbnails,
-        one at a time, so the first look at a folder doesn't wait for ffmpeg. Stops
-        as soon as anything plays (the video keeps the machine) or Reel stops; the
-        rest are made when first viewed. Returns how many were made."""
-        conn = connect(settings.db_path)
-        try:
-            todo = [p for p in nas_pictures(conn, library_id)
-                    if thumbs.cached(str(p["root"] / p["rel"]), p["rev"], p["shape"]) is None]
-        finally:
-            conn.close()
-        made = 0
-        for found in todo:
-            if cancel.is_set() or streams.active:
-                break
-            try:
-                make_thumbnail(found)
-                made += 1
-            except ThumbnailError:
-                pass  # a broken picture: the browser shows the placeholder
-        return made
-
-    async def picture_response(found: dict, requested: str | None) -> FileResponse:
-        if "file" in found:
-            path, current = found["file"], found["version"]
-        else:
-            current = found["rev"]
-            key_src = str(found["root"] / found["rel"])
-            path = thumbs.cached(key_src, current, found["shape"]) if current else None
-            if path is None:
-                try:
-                    async with thumb_slots:
-                        if streams.active:
-                            async with while_playing:
-                                path = await run_in_threadpool(make_thumbnail, found)
-                        else:
-                            path = await run_in_threadpool(make_thumbnail, found)
-                except ThumbnailError:
-                    raise HTTPException(404, "No image.")
-        # The URL names the version: while it's current, the browser may keep it for good.
-        headers = IMMUTABLE_HEADERS if requested and requested == current else THUMB_HEADERS
-        return FileResponse(path, media_type="image/jpeg", headers=headers)
 
     @app.get("/api/libraries/{library_uid}/browse")
     def browse_folder(library_uid: str, path: str = "", sort: str = "name", limit: int | None = None,
@@ -352,7 +231,7 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
     @app.get("/api/libraries/{library_uid}/folder-art")
     async def get_folder_art(library_uid: str, path: str = "", v: str | None = None):
         """`v` is the picture's version (see the listing): it makes the answer cacheable for good."""
-        return await picture_response(await run_in_threadpool(folder_picture, library_uid, path), v)
+        return await thumbnails.response(await run_in_threadpool(thumbnails.folder_picture, library_uid, path), v)
 
     @app.get("/api/items/{item_uid}")
     def get_item(item_uid: str, conn: sqlite3.Connection = Db):
@@ -398,7 +277,7 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
     @app.get("/api/items/{item_uid}/thumb")
     async def get_item_thumb(item_uid: str, v: str | None = None):
         """`v` is the picture's version (custom_image or poster_rev): as above."""
-        return await picture_response(await run_in_threadpool(item_picture, item_uid), v)
+        return await thumbnails.response(await run_in_threadpool(thumbnails.item_picture, item_uid), v)
 
     # ---- Your pictures for tags, videos and folders (they win over NAS pictures) ----
 
@@ -462,6 +341,7 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
     def get_item_file(item_uid: str, conn: sqlite3.Connection = Db):
         """The original file, with range requests so the browser can seek."""
         row, path = media_file(conn, item_uid)
+        watching.saw_playback()
         return FileResponse(path, media_type=playback.direct_content_type(row["rel_path"]))
 
     def stream_source(item_uid: str) -> tuple[sqlite3.Row, Path]:
@@ -544,6 +424,7 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
             if fresh != sid:
                 raise HTTPException(410, "The video has changed. Reload the player.")
             session = hls_sessions.get(sid)
+        watching.saw_playback()
         try:
             path = await hls_sessions.media_segment(session, viewer, number)
         except playback.StreamBusy as exc:
@@ -560,6 +441,7 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
         `audio` are the browser's codecs (as for /plan); each track is copied if
         the browser can play it, and converted otherwise."""
         # The database and the NAS can be slow: keep them off the event loop.
+        watching.saw_playback()
         row, path = await run_in_threadpool(stream_source, item_uid)
         p = make_plan(row, Capabilities.from_query(video, audio))
         if p.mode == "unsupported":

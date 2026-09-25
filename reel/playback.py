@@ -9,6 +9,7 @@ at the chosen time (`start`); the player keeps track of the offset.
 """
 import asyncio
 import logging
+import time
 from collections import deque
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -238,3 +239,27 @@ async def drain(pipe: asyncio.StreamReader, keep: deque[str]) -> None:
             pending = b""
     if pending:
         keep.append(pending.decode(errors="replace").rstrip()[:MAX_LINE])
+
+
+class Watching:
+    """Whether someone is watching right now, so background work (thumbnails,
+    scan probes) can give the machine and the NAS back to the video.
+
+    A running ffmpeg isn't enough: direct play has none, and an HLS encoder
+    pauses once it's ahead. So every request for video bytes (the file, a
+    stream, a segment) is noted, and "watching" means one of those in the last
+    RECENT seconds, or a stream running now. Read from other threads: it only
+    looks at a number and a set's size, which is safe.
+    """
+
+    RECENT = 30.0
+
+    def __init__(self, streams: "StreamManager"):
+        self._streams = streams
+        self._last = float("-inf")
+
+    def saw_playback(self) -> None:
+        self._last = time.monotonic()
+
+    def __call__(self) -> bool:
+        return bool(self._streams.active) or time.monotonic() - self._last < self.RECENT

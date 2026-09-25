@@ -287,3 +287,122 @@ def test_a_dead_scanner_is_restarted_and_reported(settings, media_root):
         c.app.state.scans.wait_idle()
         assert c.get("/api/libraries").json()[0]["scan"]["state"] == "done"
         assert c.get("/api/health").status_code == 200
+
+
+# ---- Background work after scans: scans first ----------------------------------------------
+
+
+def test_background_work_waits_for_the_whole_queue_and_gives_way_to_new_scans(settings):
+    """Scan all: every library is scanned before any thumbnail work, and a scan
+    queued during that work stops it; unfinished libraries are offered again."""
+    events = []
+
+    def scan(conn, library_id, **kwargs):
+        events.append(("scan", library_id))
+        return {}
+
+    init_db(settings.db_path)
+    manager = ScanManager(settings.db_path, scan_fn=scan)
+    queued_during_work = threading.Event()
+
+    def after_batch(library_ids, should_stop):
+        events.append(("work", tuple(library_ids)))
+        if len([e for e in events if e[0] == "work"]) == 1:
+            with manager._lock:
+                manager._status[3] = {"state": "queued"}
+            manager._queue.put(3)                       # someone asks for another scan now
+            queued_during_work.set()
+            for _ in range(200):
+                if should_stop():
+                    return False                          # gives way, unfinished
+                time.sleep(0.01)
+            raise AssertionError("should_stop never turned true")
+        return True
+
+    manager.after_batch = after_batch
+    manager.start()
+    for library_id in (1, 2):
+        manager._status[library_id] = {"state": "queued"}
+        manager._queue.put(library_id)
+    manager.wait_idle()
+    manager.stop()
+    assert events == [("scan", 1), ("scan", 2), ("work", (1, 2)), ("scan", 3), ("work", (1, 2, 3))]
+
+
+def test_stopping_ends_a_thumbnail_being_made(tmp_path):
+    import os
+
+    from reel.images import Thumbnailer, ThumbnailError
+
+    stuck = tmp_path / "stuck.png"
+    os.mkfifo(stuck)                                     # ffmpeg waits on it forever
+    thumbs = Thumbnailer(tmp_path / "cache")
+    outcome = {}
+
+    def make():
+        try:
+            thumbs.make(stuck, rev="1-1")
+        except ThumbnailError as exc:
+            outcome["error"] = str(exc)
+
+    worker = threading.Thread(target=make)
+    worker.start()
+    for _ in range(50):
+        if thumbs._running:
+            break
+        time.sleep(0.05)
+    began = time.monotonic()
+    thumbs.stop()
+    worker.join(5)
+    assert not worker.is_alive() and time.monotonic() - began < 2 and "error" in outcome
+    with pytest.raises(ThumbnailError, match="stopping"):
+        thumbs.make(tmp_path / "other.png", rev="1-1")
+
+
+def test_watching_means_a_stream_or_recent_video_requests(monkeypatch):
+    from reel.playback import StreamManager, Watching
+
+    streams = StreamManager()
+    watching = Watching(streams)
+    assert not watching()
+    watching.saw_playback()
+    assert watching()
+    monkeypatch.setattr(Watching, "RECENT", 0.0)
+    assert not watching()
+    streams.active.add(object())
+    assert watching()
+
+
+def test_playing_a_file_counts_as_watching(client, media_root):
+    make_files(media_root, "Tapes/a.mpg")
+    lib = client.post("/api/libraries", json={"name": "Tapes", "path": str(media_root / "Tapes")}).json()["id"]
+    client.post(f"/api/libraries/{lib}/scan")
+    client.scans.wait_idle()
+    video = client.get(f"/api/libraries/{lib}/browse").json()["items"][0]["id"]
+    assert not client.app.state.watching()
+    client.get(f"/api/items/{video}/file")
+    assert client.app.state.watching()
+
+
+@pytest.mark.parametrize("watching, most", [(True, 1), (False, 4)])
+def test_scans_probe_one_file_at_a_time_while_someone_watches(watching, most, conn, media_root):
+    from reel.libraries import create_library
+    from reel.scanner import scan_library
+
+    make_files(media_root, *[f"Tapes/v{i}.mpg" for i in range(10)])
+    lib = create_library(conn, media_root, "Media", str(media_root))
+    lock = threading.Lock()
+    running, peak = [0], [0]
+
+    def probe(path):
+        from conftest import FakeProbe
+        with lock:
+            running[0] += 1
+            peak[0] = max(peak[0], running[0])
+        time.sleep(0.05)
+        with lock:
+            running[0] -= 1
+        return FakeProbe.PROFILES[".mpg"]
+
+    scan_library(conn, lib, probe_fn=probe, workers=4, busy=lambda: watching)
+    assert peak[0] == most
