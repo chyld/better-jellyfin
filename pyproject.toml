@@ -20,4 +20,8 @@ build-backend = "hatchling.build"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["ffmpeg: needs ffmpeg/ffprobe installed"]
+markers = [
+    "ffmpeg: needs ffmpeg/ffprobe installed",
+    "browser: real server + headless Chromium (slow; run with -m browser)",
+]
+addopts = "-m 'not browser'"

@@ -572,6 +572,7 @@ changes how thumbnails are made.
 ```sh
 uv run pytest              # backend: 476 tests
 node --test tests/js/      # frontend: 27 tests
+uv run pytest -m browser   # browser: 11 tests (about 2 minutes; needs Chromium and ffmpeg)
 scripts/docker-smoke.sh    # builds the image and checks it end to end (needs Docker)
 ```
 
@@ -581,6 +582,14 @@ scripts/docker-smoke.sh    # builds the image and checks it end to end (needs Do
   thumbnails, remuxing and conversion with the real ffprobe and ffmpeg. They're skipped if ffmpeg
   isn't installed.
 - URL downloads are tested against a local test web server.
+- The **browser tests** (`tests/browser`) start a real Reel on a free port, scan generated clips
+  with the real ffprobe, and drive headless Chromium over the DevTools protocol. They check that
+  each delivery (file, progressive, HLS with converted FLAC audio, progressive conversion for a
+  browser without HLS) really plays **with audio**; repeated seeking in HLS and progressive
+  streams; that leaving the player stops ffmpeg; two tabs at different points of one video;
+  playing on after the HLS session expired; a file replaced mid-play (the player reloads and
+  carries on); and simultaneous first uploads of a folder picture. They're skipped by a plain
+  `uv run pytest` because they're slow.
 - The smoke test generates clips, builds the image, and checks the ffmpeg version, scanning,
   thumbnails, direct play with range requests, live conversion, the data volume and the health
   check.
@@ -633,7 +642,7 @@ reel/
 scripts/
   fetch-ffmpeg.sh    download and verify the newest ffmpeg build
   docker-smoke.sh    build and test the Docker image end to end
-tests/               pytest suite, plus tests/js for the frontend
+tests/               pytest suite, plus tests/js for the frontend and tests/browser (real Chromium)
 Dockerfile, compose.yaml, .env.example
 ```
 
