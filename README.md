@@ -655,8 +655,8 @@ Dockerfile, compose.yaml, .env.example
 - **One worker process.** Scans and streams are managed inside the process, so Reel runs with
   exactly one uvicorn worker (the Docker image does). More workers would each run their own
   scanner and stream limits.
-- **No subtitles** yet (neither external `.srt` nor embedded tracks).
-- **No hardware transcoding** yet. Conversion runs on the CPU, which is fine for this library.
+- **No subtitles** (neither external `.srt` nor embedded tracks).
+- **No hardware transcoding.** Conversion runs on the CPU, which is fine for this library.
   `compose.yaml` notes where a GPU would go.
 - **Tags** are limited to lowercase ASCII letters, digits and dashes, by design.
 - A tag's videos are listed in tagging order (kept explicitly, so it survives a database
@@ -666,15 +666,13 @@ Dockerfile, compose.yaml, .env.example
 
 ## Roadmap
 
-Ideas and planned features, roughly in order:
+Ideas and planned features:
 
-1. **Sorting** for a tag's videos.
-2. **Subtitles:** external `.srt`/`.vtt` and embedded text tracks, as WebVTT.
-3. **Hardware transcoding** (VAAPI/QSV/NVENC).
-4. An optional background "optimize" pass that converts old formats once into cached MP4s,
+1. An optional background "optimize" pass that converts old formats once into cached MP4s,
    for perfect seeking and zero CPU on replay.
 
-Not planned: watch progress / resume (single-user setup).
+Not planned: watch progress / resume (single-user setup), sorting a tag's videos (they stay in
+tagging order), subtitles, and hardware transcoding.
 
 ---
 
