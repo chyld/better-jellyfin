@@ -28,18 +28,31 @@ class ProbeError(Exception):
     pass
 
 
-# The ffprobe processes running now, so a scan being stopped can end them.
+# The ffprobe processes running now, so a scan being stopped can end them. Starting
+# and registering a probe happens under the same lock as stopping them, and once
+# stopped no new probe starts, so none can slip past a shutdown.
 _running: set[subprocess.Popen] = set()
 _running_lock = threading.Lock()
+_stopped = False
 
 
 def stop_running_probes() -> int:
-    """Kill every ffprobe running now (Reel is shutting down). Returns how many."""
+    """Kill every ffprobe running now, and refuse new ones until allow_probes()
+    (Reel is shutting down). Returns how many were killed."""
+    global _stopped
     with _running_lock:
+        _stopped = True
         procs = list(_running)
-    for proc in procs:
-        proc.kill()
+        for proc in procs:
+            proc.kill()
     return len(procs)
+
+
+def allow_probes() -> None:
+    """Let probes run again (scans are starting)."""
+    global _stopped
+    with _running_lock:
+        _stopped = False
 
 
 def probe(path: Path) -> ProbeResult:
@@ -48,8 +61,11 @@ def probe(path: Path) -> ProbeResult:
         "ffprobe", "-v", "error", "-print_format", "json",
         "-show_format", "-show_streams", str(path),
     ]
-    proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     with _running_lock:
+        if _stopped:
+            raise ProbeError("ffprobe was stopped")
+        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True)
         _running.add(proc)
     try:
         try:

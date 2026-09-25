@@ -70,7 +70,7 @@ def test_a_running_ffprobe_can_be_stopped(tmp_path):
     import threading
     import time
 
-    from reel.probe import ProbeError, probe, stop_running_probes
+    from reel.probe import ProbeError, allow_probes, probe, stop_running_probes
 
     stuck = tmp_path / "stuck.mkv"
     os.mkfifo(stuck)                                   # ffprobe waits on it forever
@@ -84,9 +84,32 @@ def test_a_running_ffprobe_can_be_stopped(tmp_path):
 
     thread = threading.Thread(target=run)
     thread.start()
-    for _ in range(50):
-        if stop_running_probes():
-            break
-        time.sleep(0.1)
-    thread.join(5)
+    try:
+        for _ in range(50):
+            if stop_running_probes():
+                break
+            time.sleep(0.1)
+        thread.join(5)
+    finally:
+        allow_probes()
     assert not thread.is_alive() and outcome == {"error": "ffprobe was stopped"}
+
+
+def test_no_probe_starts_once_stopped(clips, monkeypatch):
+    """A probe asked for just after the stop (say, right after a fingerprint) never starts."""
+    import subprocess
+
+    from reel import probe as probe_module
+    from reel.probe import ProbeError, allow_probes, probe, stop_running_probes
+
+    started = []
+    real_popen = subprocess.Popen
+    monkeypatch.setattr(probe_module.subprocess, "Popen", lambda *a, **k: started.append(a) or real_popen(*a, **k))
+    stop_running_probes()
+    try:
+        with pytest.raises(ProbeError, match="stopped"):
+            probe(clips / "h264_aac.mp4")
+        assert started == []
+    finally:
+        allow_probes()
+    assert probe(clips / "h264_aac.mp4").video_codec == "h264" and len(started) == 1

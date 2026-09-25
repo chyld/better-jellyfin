@@ -363,10 +363,15 @@ def scan_library(
         )
         conn.commit()
 
+        def stopped() -> bool:
+            return cancel is not None and cancel.is_set()
+
         def examine(video: FoundVideo):
-            if cancel is not None and cancel.is_set():
+            if stopped():
                 return video, None, None  # skipped; the loop below stops
             fp = prints.get(video.rel_path) or fingerprint(root / video.rel_path, video.size)
+            if stopped():                 # asked to stop while fingerprinting: don't start ffprobe
+                return video, None, None
             return video, _safe_probe(probe_fn, root / video.rel_path), fp
 
         added = updated = failed = 0

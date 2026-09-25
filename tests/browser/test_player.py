@@ -140,17 +140,15 @@ def test_playing_on_after_the_session_expired(server, page):
 # ---- A file replaced while it plays ---------------------------------------------------------
 
 
-def test_file_replaced_while_playing_reloads_and_carries_on(server, page, clips, monkeypatch):
-    monkeypatch.setattr(hls, "AHEAD_LIMIT", 2)     # keep most of the video unencoded
+def test_file_replaced_while_playing_reloads_and_carries_on(server, page, clips):
     page.play(server, "long.avi")
     page.playing_past(2)
     (old,) = server.hls.sessions.values()
+    server.call("POST", "/_test/forget-hls?start=30")   # from 3:00 on, nothing is encoded
     path = server.media / "Videos/long.avi"
     shutil.copy(clips / "long.avi", path)          # a new copy of the file: a new version
     os.utime(path, ns=(1_000_000_000, 1_000_000_000))
-    # To about 4:00: past anything encoded so far (a tiny test video encodes
-    # dozens of segments before the encoder first checks how far ahead it is).
-    for _ in range(4):
+    for _ in range(4):                             # to about 4:00: needs a new encoder
         page.key("ArrowRight", shift=True)
         time.sleep(0.2)
     page.playing_past(241, timeout=40)

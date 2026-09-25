@@ -67,6 +67,15 @@ def conn(settings):
     c.close()
 
 
+@pytest.fixture(autouse=True)
+def probes_allowed():
+    """Every test server's shutdown stops ffprobe for the whole process (as a real
+    shutdown does); each test starts with probing allowed again."""
+    from reel.probe import allow_probes
+    allow_probes()
+    yield
+
+
 @pytest.fixture
 def fake_probe() -> FakeProbe:
     return FakeProbe()

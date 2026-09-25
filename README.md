@@ -228,11 +228,14 @@ the database, so **browsing never touches the NAS**.
   at its next folder or file. Videos it already recorded stay recorded. It stops *before* the
   step that marks unseen videos missing, so a half-finished walk never hides anything. The next
   scan picks up where it left off, since unchanged files aren't probed again.
-  - Running ffprobes are killed, and the scan checks for the stop between folders, between
-    files, and while fingerprinting files to spot moved ones.
+  - Running ffprobes are killed, and no new one starts once stopping has begun. The scan checks
+    for the stop between folders, between files, and around fingerprinting (including the
+    fingerprints that spot moved files).
   - One thing can't be interrupted: a file-system call stuck on a hung NAS mount. It finishes
-    when the operating system returns it. The scan writes nothing after that point, and Reel
-    waits at most 10 seconds for it before exiting anyway.
+    when the operating system returns it, and the scan writes nothing after it. Reel stops
+    *waiting* for the scan after 10 seconds, but the process can't fully exit until that call
+    returns, because Python waits for the scan's worker threads on exit. With a healthy NAS
+    this takes a moment; with a hung mount, as long as the mount takes to time out.
 - A file ffprobe can't read is kept, marked *unsupported* with the error, and retried on the
   next scan.
 - After every scan, uploaded pictures whose video or folder no longer exists are deleted (see
@@ -597,7 +600,7 @@ changes how thumbnails are made.
 ### Tests
 
 ```sh
-uv run pytest              # backend: 495 tests
+uv run pytest              # backend: 497 tests
 node --test tests/js/      # frontend: 27 tests
 uv run pytest -m browser   # browser: 12 tests (about 2 minutes; needs Chromium and ffmpeg)
 scripts/docker-smoke.sh    # builds the image and checks it end to end (needs Docker)

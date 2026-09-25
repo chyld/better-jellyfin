@@ -95,6 +95,16 @@ def segment_uris(text: str) -> list[str]:
     return [line for line in text.splitlines() if line and not line.startswith("#")]
 
 
+async def forget_from(m, session, n):
+    """Stop every encoder of the session and delete segments from n on, so segment n
+    must be encoded again (a tiny test clip is often encoded whole in a moment)."""
+    for viewer in list(session.viewers.values()):
+        await m._stop(viewer)               # waits until it's reaped and has published
+    for path in session.folder.glob("*.ts"):
+        if int(path.stem) >= n:
+            path.unlink()
+
+
 def manager(tmp_path, **limits):
     return HlsManager(tmp_path / "hls", StreamManager(StreamLimits(**limits)))
 
@@ -477,6 +487,8 @@ def test_file_replaced_during_a_session_is_noticed_when_encoding(tmp_path, long_
     async def scenario():
         s = m.get(await m.open("vid", source(video)))
         await m.media_segment(s, V, 0)
+        await forget_from(m, s, 6)
+        assert not s.segment(6).exists() and not s.encoders()
         os.utime(video, ns=(1, 1))
         with pytest.raises(hls.HlsGone):
             await m.media_segment(s, V2, 6)          # needs a new encoder: checks the file
@@ -559,11 +571,13 @@ def test_file_replaced_while_playing_answers_gone(client, hls_video, long_clip):
     import os
     _, path, segments = hls_video
     assert client.get(segments[0]).status_code == 200
+    manager = client.app.state.hls
+    (session,) = manager.sessions.values()
+    client.portal.call(forget_from, manager, session, 6)
     path.write_bytes(long_clip.read_bytes()[:-5000])
     os.utime(path, ns=(1, 1))
     res = client.get(segments[6])                    # not encoded yet: the file is checked
     assert res.status_code == 410 and "changed" in res.json()["detail"]
-    manager = client.app.state.hls
     assert client.portal.call(manager.remove_idle, 0) >= 0
     assert client.get(segments[6]).status_code == 410   # a dropped session of the old file: still gone
 

@@ -261,3 +261,26 @@ def test_stopped_while_matching_moves_changes_nothing(conn, media_root, fake_pro
     with pytest.raises(ScanCancelled):
         scan_library(conn, lib, probe_fn=fake_probe, workers=1, cancel=cancel)
     assert rows(conn, lib) == before                   # nothing moved, nothing marked missing
+
+
+def test_stopped_while_fingerprinting_starts_no_probe(conn, media_root, fake_probe, monkeypatch):
+    """The stop comes while a new file is being fingerprinted: its ffprobe never starts."""
+    import threading
+
+    from reel import scanner
+    from reel.scanner import ScanCancelled
+
+    make_files(media_root, "New/a.mpg", "New/b.mpg")
+    lib = create_library(conn, media_root, "Media", str(media_root))
+    cancel = threading.Event()
+    real = scanner.fingerprint
+
+    def fingerprint_then_stop(path, size):
+        result = real(path, size)
+        cancel.set()                                   # Reel is asked to stop right now
+        return result
+
+    monkeypatch.setattr(scanner, "fingerprint", fingerprint_then_stop)
+    with pytest.raises(ScanCancelled):
+        scan_library(conn, lib, probe_fn=fake_probe, workers=1, cancel=cancel)
+    assert fake_probe.calls == [] and rows(conn, lib) == {}

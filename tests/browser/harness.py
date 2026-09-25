@@ -105,8 +105,21 @@ def server(tmp_path, clips):
         """Test hook: drop every HLS viewer and session, as after a long pause."""
         return {"removed": await app.state.hls.remove_idle(0)}
 
+    async def forget_hls(start: int):
+        """Test hook: stop every HLS encoder and delete segments from `start` on, so
+        playing there needs a new encoder (a small test clip encodes in a moment)."""
+        for session in app.state.hls.sessions.values():
+            for viewer in list(session.viewers.values()):
+                await app.state.hls._stop(viewer)
+            for path in session.folder.glob("*.ts"):
+                if int(path.stem) >= start:
+                    path.unlink()
+        return {}
+
     app.add_api_route("/_test/expire-hls", expire_hls, methods=["POST"])
-    app.router.routes.insert(0, app.router.routes.pop())   # ahead of the static files at "/"
+    app.add_api_route("/_test/forget-hls", forget_hls, methods=["POST"])
+    for _ in range(2):
+        app.router.routes.insert(0, app.router.routes.pop())   # ahead of the static files at "/"
 
     port = free_port()
     uv = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))

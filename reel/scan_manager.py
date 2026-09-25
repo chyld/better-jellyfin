@@ -6,7 +6,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from .db import connect
-from .probe import stop_running_probes
+from .probe import allow_probes, stop_running_probes
 from .scanner import ScanCancelled, scan_library
 
 log = logging.getLogger(__name__)
@@ -28,6 +28,8 @@ class ScanManager:
         self.after_scan: Callable[[object], None] | None = None
 
     def start(self) -> None:
+        self._cancel.clear()
+        allow_probes()
         self._thread = threading.Thread(target=self._run, name="scanner", daemon=True)
         self._thread.start()
 
@@ -37,8 +39,9 @@ class ScanManager:
         recorded). Blocks until it has, so call it from a thread, not the event loop.
 
         A file-system call stuck on a hung NAS can't be interrupted: it finishes
-        when the OS returns it. The scan writes nothing after that; if it takes
-        longer than `timeout`, the process just exits without waiting for it."""
+        when the OS returns it, and the scan writes nothing after it. This stops
+        waiting after `timeout`, but the process can't exit before that call
+        returns: Python waits for the scan's worker threads when it exits."""
         self._cancel.set()
         stop_running_probes()
         while True:
