@@ -118,15 +118,22 @@ def library_pk(conn: sqlite3.Connection, uid: str) -> int | None:
     return row["id"] if row else None
 
 
+_LIBRARY_FIELDS = """
+    SELECT l.*,
+        (SELECT COUNT(*) FROM media_items m WHERE m.library_id = l.id AND m.missing_since IS NULL) AS item_count,
+        EXISTS (SELECT 1 FROM folder_art a WHERE a.library_id = l.id AND a.rel_dir = '') AS has_art,
+        (SELECT art_rev FROM folder_art a WHERE a.library_id = l.id AND a.rel_dir = '') AS art_rev,
+        (SELECT version FROM folder_images f WHERE f.library_id = l.id AND f.rel_dir = '') AS custom_art
+    FROM libraries l
+"""
+
+
 def list_libraries(conn: sqlite3.Connection) -> list[dict]:
-    rows = conn.execute(
-        """
-        SELECT l.*, COUNT(m.id) AS item_count,
-            EXISTS (SELECT 1 FROM folder_art a WHERE a.library_id = l.id AND a.rel_dir = '') AS has_art,
-            (SELECT art_rev FROM folder_art a WHERE a.library_id = l.id AND a.rel_dir = '') AS art_rev,
-            (SELECT version FROM folder_images f WHERE f.library_id = l.id AND f.rel_dir = '') AS custom_art
-        FROM libraries l LEFT JOIN media_items m ON m.library_id = l.id AND m.missing_since IS NULL
-        GROUP BY l.id ORDER BY l.name COLLATE NOCASE
-        """
-    ).fetchall()
+    rows = conn.execute(_LIBRARY_FIELDS + " ORDER BY l.name COLLATE NOCASE").fetchall()
     return [{**dict(r), "has_art": bool(r["has_art"])} for r in rows]
+
+
+def library_summary(conn: sqlite3.Connection, library_id: int) -> dict | None:
+    """One library, as list_libraries shows it (without counting the others)."""
+    row = conn.execute(_LIBRARY_FIELDS + " WHERE l.id = ?", (library_id,)).fetchone()
+    return {**dict(row), "has_art": bool(row["has_art"])} if row else None

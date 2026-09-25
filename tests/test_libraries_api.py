@@ -299,6 +299,26 @@ def test_a_library_removed_mid_request_is_not_found(client, media_root, monkeypa
 
     make_files(media_root, "Tapes/a.mpg")
     lib = client.post("/api/libraries", json={"name": "Tapes", "path": str(media_root / "Tapes")}).json()["id"]
-    monkeypatch.setattr(libraries, "list_libraries", lambda conn: [])   # gone by the time it's listed
+    monkeypatch.setattr(libraries, "library_summary", lambda conn, library_id: None)   # gone by then
     res = client.patch(f"/api/libraries/{lib}", json={"name": "Old tapes"})
     assert res.status_code == 404
+
+
+def test_one_library_is_answered_without_listing_them_all(client, media_root, monkeypatch):
+    from reel import libraries
+
+    make_files(media_root, "Tapes/a.mpg", "Tapes/b.mpg", "Films/c.mp4")
+    tapes = client.post("/api/libraries", json={"name": "Tapes", "path": str(media_root / "Tapes")}).json()["id"]
+    client.post("/api/libraries", json={"name": "Films", "path": str(media_root / "Films")})
+    client.post("/api/libraries/scan")
+    client.scans.wait_idle()
+    listed = {lib["name"]: lib for lib in client.get("/api/libraries").json()}
+
+    def no_listing(conn):
+        raise AssertionError("listed every library to answer for one")
+
+    monkeypatch.setattr(libraries, "list_libraries", no_listing)
+    renamed = client.patch(f"/api/libraries/{tapes}", json={"name": "Home tapes"}).json()
+    assert renamed["name"] == "Home tapes" and renamed["item_count"] == 2
+    assert {k: v for k, v in renamed.items() if k not in ("name", "scan")} == \
+           {k: v for k, v in listed["Tapes"].items() if k not in ("name", "scan")}
