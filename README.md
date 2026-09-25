@@ -600,9 +600,9 @@ changes how thumbnails are made.
 ### Tests
 
 ```sh
-uv run pytest              # backend: 497 tests
-node --test tests/js/      # frontend: 27 tests
-uv run pytest -m browser   # browser: 12 tests (about 2 minutes; needs Chromium and ffmpeg)
+uv run pytest              # backend: 501 tests
+node --test tests/js/      # frontend: 30 tests
+uv run pytest -m browser   # browser: 13 tests (about 2 minutes; needs Chromium and ffmpeg)
 scripts/docker-smoke.sh    # builds the image and checks it end to end (needs Docker)
 ```
 
@@ -657,7 +657,8 @@ reel/
   sorting.py         natural sort keys stored for SQL ordering
   static/
     index.html       page shell and dialogs
-    app.js           router (hash URLs), scroll restore
+    app.js           wires the pages to the router; scroll restore
+    router.js        hash routing; each visit owns its page and cleans up (even A → B → A)
     api.js           fetch helper, h() element builder, formatting, tag rules
     browse.js        Home, folders, video page, tag page, tag editor
     player.js        the player

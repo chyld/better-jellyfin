@@ -2,9 +2,9 @@
 import { api, fill, h, plural } from "./api.js";
 
 const $ = (sel) => document.querySelector(sel);
-let libraries = [];
-let pollTimer = null;
-let listEl = null;
+// The Libraries page open now, if any. Its state lives in the page itself; the
+// dialogs (shared, in index.html) just ask this one to refresh.
+let activePage = null;
 
 function showError(el, message) {
   el.textContent = message || "";
@@ -76,20 +76,7 @@ function libraryRow(lib) {
   );
 }
 
-function render() {
-  if (!listEl) return;
-  $("#empty").hidden = libraries.length > 0;
-  $("#scan-all").disabled = libraries.length === 0 || libraries.every(isBusy);
-  listEl.replaceChildren(...libraries.map(libraryRow));
-}
-
-async function refresh() {
-  libraries = await api("GET", "/api/libraries");
-  render();
-  // Keep polling while any scan is queued or running (and this page is open).
-  clearTimeout(pollTimer);
-  if (listEl && libraries.some(isBusy)) pollTimer = setTimeout(refresh, 1000);
-}
+const refresh = () => activePage?.refresh();
 
 const actions = {
   async scan(lib) {
@@ -113,26 +100,40 @@ const actions = {
 };
 
 export function renderManage(view) {
-  listEl = h("ul", { class: "library-list" });
-  fill(view, 
+  const listEl = h("ul", { class: "library-list" });
+  const scanAllBtn = h("button", { class: "btn", disabled: true, onclick: scanAll }, "Scan all");
+  const empty = h("p", { class: "empty", hidden: true }, "No libraries yet. Add a folder of videos to get started.");
+  fill(view,
     h(
       "div",
       { class: "page-head" },
       h("h2", { class: "page-title" }, "Libraries"),
-      h(
-        "div",
-        { class: "actions" },
-        h("button", { id: "scan-all", class: "btn", disabled: true, onclick: scanAll }, "Scan all"),
-        h("button", { class: "btn primary", onclick: openAddDialog }, "Add library"),
-      ),
+      h("div", { class: "actions" }, scanAllBtn, h("button", { class: "btn primary", onclick: openAddDialog }, "Add library")),
     ),
-    h("p", { id: "empty", class: "empty", hidden: true }, "No libraries yet. Add a folder of videos to get started."),
+    empty,
     listEl,
   );
-  refresh();
+
+  let pollTimer = null;
+  let closed = false;
+  const page = {
+    async refresh() {
+      const libraries = await api("GET", "/api/libraries");
+      if (closed) return; // the page was left while this was loading
+      empty.hidden = libraries.length > 0;
+      scanAllBtn.disabled = libraries.length === 0 || libraries.every(isBusy);
+      listEl.replaceChildren(...libraries.map(libraryRow));
+      // Keep polling while any scan is queued or running.
+      clearTimeout(pollTimer);
+      if (libraries.some(isBusy)) pollTimer = setTimeout(() => page.refresh(), 1000);
+    },
+  };
+  activePage = page;
+  page.refresh();
   return () => {
-    listEl = null;
+    closed = true;
     clearTimeout(pollTimer);
+    if (activePage === page) activePage = null;
   };
 }
 

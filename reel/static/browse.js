@@ -398,7 +398,10 @@ export async function renderBrowse(view, libraryId, path) {
 
   const itemsHolder = h("div");
   let grid = null;
+  let closed = false;
+  let sortRequests = 0; // only the newest sort's answer is shown
   const showItems = () => {
+    if (closed) return;
     grid?.stop();
     grid = pagedVideoGrid(data, async (offset) => api("GET", url(offset)));
     itemsHolder.replaceChildren(grid.element);
@@ -411,7 +414,10 @@ export async function renderBrowse(view, libraryId, path) {
       "aria-label": "Sort videos",
       onchange: async (e) => {
         setSort(e.target.value);
-        data = await api("GET", url());
+        const request = ++sortRequests;
+        const answer = await api("GET", url());
+        if (request !== sortRequests) return; // a newer sort was chosen meanwhile
+        data = answer;
         showItems();
       },
     },
@@ -437,7 +443,10 @@ export async function renderBrowse(view, libraryId, path) {
       h("ul", { class: "grid folders" }, data.folders.map((f) => folderCard(libraryId, f))),
     data.total_items > 0 && itemsHolder,
   );
-  return () => grid?.stop();
+  return () => {
+    closed = true;
+    grid?.stop();
+  };
 }
 
 // ---- Video details ----------------------------------------------------------
