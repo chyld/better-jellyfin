@@ -135,10 +135,15 @@ def new_uid() -> str:
 def write_transaction(conn: sqlite3.Connection) -> Iterator[None]:
     """Checks and writes as one step: takes SQLite's write lock up front (BEGIN
     IMMEDIATE), so no other writer can change what was checked before the write.
-    Commits at the end, rolls back on any error. Keep slow work (the disk, ffmpeg)
-    outside: other writers wait while this runs."""
+    Commits at the end, rolls back on any error.
+
+    It owns the whole transaction: called with unsaved changes already on the
+    connection, it refuses (saving them here would make them impossible to roll
+    back). Keep slow work (the disk, ffmpeg) before or after it: other writers
+    wait while it runs. The scanner's in-memory status lock is never held with it.
+    """
     if conn.in_transaction:
-        conn.commit()
+        raise RuntimeError("write_transaction() needs a connection with no unsaved changes")
     conn.execute("BEGIN IMMEDIATE")
     try:
         yield

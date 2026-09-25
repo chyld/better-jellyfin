@@ -111,3 +111,22 @@ def test_overlapping_libraries_added_at_once_only_one_wins(conn, settings, media
         created = [r for r in results if isinstance(r, int)]
         refused = [r for r in results if isinstance(r, LibraryError)]
         assert len(created) == 1 and len(refused) == len(paths) - 1, results
+
+
+def test_write_transaction_never_saves_the_callers_unsaved_changes(conn):
+    """It used to commit whatever was pending before starting, so the caller's
+    later rollback couldn't undo it."""
+    from reel.db import write_transaction
+
+    conn.execute("INSERT INTO tags (uid, name) VALUES ('t1', 'outer')")
+    with pytest.raises(RuntimeError, match="no unsaved changes"):
+        with write_transaction(conn):
+            pass
+    conn.rollback()
+    assert conn.execute("SELECT COUNT(*) FROM tags WHERE name = 'outer'").fetchone()[0] == 0
+
+    with pytest.raises(ValueError):
+        with write_transaction(conn):
+            conn.execute("INSERT INTO tags (uid, name) VALUES ('t2', 'inner')")
+            raise ValueError("boom")
+    assert conn.execute("SELECT COUNT(*) FROM tags").fetchone()[0] == 0     # rolled back
