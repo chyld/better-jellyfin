@@ -71,6 +71,18 @@ class Thumbnailer:
 
 
 # ---- Uploaded images ---------------------------------------------------------------
+#
+# Every upload gets its own file, "<uuid>-<version>.jpg", which is never
+# overwritten. An upload writes its new file, then records the version in the
+# database, then deletes the previous version's file. Clean-up only deletes
+# unreferenced files older than ORPHAN_GRACE, so a file that's about to be
+# recorded can't be removed from under an upload.
+
+ORPHAN_GRACE_SECONDS = 3600
+
+
+def upload_name(uid: str, version: str) -> str:
+    return f"{uid}-{version}.jpg"
 
 UPLOAD_WIDTH = 800
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024

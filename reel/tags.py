@@ -5,7 +5,7 @@ from pathlib import Path
 
 from .browse import NotFound, item_out
 from .db import new_uid
-from .images import ThumbnailError, save_upload
+from .images import ThumbnailError, save_upload, upload_name
 
 MAX_TAG_LENGTH = 50
 # Tags are lowercase letters, digits and dashes only: "family", "1990s", "road-trip".
@@ -116,11 +116,12 @@ def rename_tag(conn: sqlite3.Connection, tag_uid: str, name: str, images_dir: Pa
     ).fetchone()
     if other:
         # The surviving tag keeps its own image, or takes this one's if it has none.
-        if tag["image_version"] and not other["image_version"]:
-            image_path(images_dir, tag["uid"]).replace(image_path(images_dir, other["uid"]))
+        own = image_path(images_dir, tag["uid"], tag["image_version"]) if tag["image_version"] else None
+        if own and not other["image_version"]:
+            own.replace(image_path(images_dir, other["uid"], tag["image_version"]))
             conn.execute("UPDATE tags SET image_version = ? WHERE id = ?", (tag["image_version"], other["id"]))
-        else:
-            image_path(images_dir, tag["uid"]).unlink(missing_ok=True)
+        elif own:
+            own.unlink(missing_ok=True)
         # Move every video over (keeping their order), then drop this tag.
         conn.execute(
             """
@@ -142,25 +143,32 @@ def delete_tag(conn: sqlite3.Connection, tag_uid: str, images_dir: Path) -> None
     tag = find_tag(conn, tag_uid)
     conn.execute("DELETE FROM tags WHERE id = ?", (tag["id"],))
     conn.commit()
-    image_path(images_dir, tag["uid"]).unlink(missing_ok=True)
+    if tag["image_version"]:
+        image_path(images_dir, tag["uid"], tag["image_version"]).unlink(missing_ok=True)
 
 
 # ---- Tag images ---------------------------------------------------------------------
 
 
-def image_path(images_dir: Path, tag_uid: str) -> Path:
-    return images_dir / f"{tag_uid}.jpg"
+def image_path(images_dir: Path, tag_uid: str, version: str) -> Path:
+    return images_dir / upload_name(tag_uid, version)
 
 
 def set_image(conn: sqlite3.Connection, images_dir: Path, tag_uid: str, data: bytes) -> dict:
-    """Give a tag an uploaded image (stored as a JPEG), replacing any old one."""
+    """Give a tag an uploaded image (stored as a JPEG), replacing any old one.
+
+    Write the new file, record it, then delete the old one (see images.py).
+    """
     tag = find_tag(conn, tag_uid)
+    version = new_uid()[:8]
     try:
-        save_upload(data, image_path(images_dir, tag["uid"]))
+        save_upload(data, image_path(images_dir, tag["uid"], version))
     except ThumbnailError as exc:
         raise TagError(str(exc))
-    conn.execute("UPDATE tags SET image_version = ? WHERE id = ?", (new_uid()[:8], tag["id"]))
+    conn.execute("UPDATE tags SET image_version = ? WHERE id = ?", (version, tag["id"]))
     conn.commit()
+    if tag["image_version"]:
+        image_path(images_dir, tag["uid"], tag["image_version"]).unlink(missing_ok=True)
     return _tag_with_count(conn, tag["id"])
 
 
@@ -168,14 +176,17 @@ def remove_image(conn: sqlite3.Connection, images_dir: Path, tag_uid: str) -> di
     tag = find_tag(conn, tag_uid)
     conn.execute("UPDATE tags SET image_version = NULL WHERE id = ?", (tag["id"],))
     conn.commit()
-    image_path(images_dir, tag["uid"]).unlink(missing_ok=True)
+    if tag["image_version"]:
+        image_path(images_dir, tag["uid"], tag["image_version"]).unlink(missing_ok=True)
     return _tag_with_count(conn, tag["id"])
 
 
 def tag_image_file(conn: sqlite3.Connection, images_dir: Path, tag_uid: str) -> Path:
     tag = find_tag(conn, tag_uid)
-    path = image_path(images_dir, tag["uid"])
-    if not tag["image_version"] or not path.is_file():
+    if not tag["image_version"]:
+        raise NotFound("This tag has no image.")
+    path = image_path(images_dir, tag["uid"], tag["image_version"])
+    if not path.is_file():
         raise NotFound("This tag has no image.")
     return path
 

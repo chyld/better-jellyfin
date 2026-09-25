@@ -46,6 +46,14 @@ def folders(client, lib, path=""):
     return {f["name"]: f for f in client.get(f"/api/libraries/{lib}/browse", params={"path": path}).json()["folders"]}
 
 
+def age_images(settings, hours=2):
+    """Make every uploaded file look older than the clean-up grace period."""
+    import os, time
+    old = time.time() - hours * 3600
+    for path in settings.images_dir.rglob("*.jpg"):
+        os.utime(path, (old, old))
+
+
 def images_on_disk(settings, kind):
     folder = settings.images_dir / kind
     return sorted(p.name for p in folder.glob("*.jpg")) if folder.is_dir() else []
@@ -68,7 +76,7 @@ def test_video_without_image_can_get_one(client, lib, picture, settings):
     assert (video["has_poster"], video["custom_image"]) == (False, version)
     thumb = client.get(f"/api/items/{video['id']}/thumb")
     assert thumb.status_code == 200 and thumb.headers["content-type"] == "image/jpeg"
-    assert images_on_disk(settings, "videos") == [f"{video['id']}.jpg"]
+    assert images_on_disk(settings, "videos") == [f"{video['id']}-{version}.jpg"]
     assert client.get(f"/api/items/{video['id']}").json()["custom_image"] == version
 
 
@@ -193,6 +201,7 @@ def test_images_of_deleted_videos_and_folders_are_removed(client, lib, picture, 
     db.execute("UPDATE media_items SET missing_since = datetime('now', '-30 days') WHERE missing_since IS NOT NULL")
     db.commit()
     db.close()
+    age_images(settings)
     rescan(client, lib)
     assert images_on_disk(settings, "videos") == []
     assert images_on_disk(settings, "folders") == []
@@ -201,6 +210,7 @@ def test_images_of_deleted_videos_and_folders_are_removed(client, lib, picture, 
 def test_removing_a_library_removes_its_images(client, lib, picture, settings):
     client.put(f"/api/items/{items(client, lib, 'Tapes')['a']['id']}/image", content=picture)
     upload_folder(client, lib, "", picture)
+    age_images(settings)
     assert client.delete(f"/api/libraries/{lib}").status_code == 204
     assert images_on_disk(settings, "videos") == [] and images_on_disk(settings, "folders") == []
 
@@ -211,6 +221,9 @@ def test_old_tag_image_folder_is_moved(settings, picture):
     old = settings.data_dir / "tag-images"
     old.mkdir(parents=True)
     (old / "rough-cut.jpg").write_bytes(picture)
+    import os, time
+    stale = time.time() - 7200
+    os.utime(old / "rough-cut.jpg", (stale, stale))
     create_app(settings)
     assert not old.exists()
     # The tag doesn't exist in this database, so the moved file is then pruned.

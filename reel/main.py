@@ -76,6 +76,7 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
     custom_images.move_old_tag_images(settings.data_dir, settings.images_dir)
     startup_conn = connect(settings.db_path)
     try:
+        custom_images.adopt_unversioned_files(startup_conn, settings.images_dir)
         custom_images.prune(startup_conn, settings.images_dir)
     finally:
         startup_conn.close()
@@ -191,8 +192,11 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
             except HTTPException:
                 raise HTTPException(404, "No image.")
             return thumb_response(lambda: thumbs.from_image(poster, "landscape"))
-        uploaded = custom_images.video_image_path(settings.images_dir, row["uid"])
-        if row["custom_image"] and uploaded.is_file():
+        uploaded = (
+            custom_images.video_image_path(settings.images_dir, row["uid"], row["custom_image"])
+            if row["custom_image"] else None
+        )
+        if uploaded and uploaded.is_file():
             return FileResponse(uploaded, media_type="image/jpeg", headers=THUMB_HEADERS)
         raise HTTPException(404, "No image.")
 
@@ -208,7 +212,7 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
             return thumb_response(lambda: thumbs.from_image(art))
         custom = custom_images.custom_folder_image(conn, library_id, rel_dir)
         if custom:
-            uploaded = custom_images.folder_image_path(settings.images_dir, custom["uid"])
+            uploaded = custom_images.folder_image_path(settings.images_dir, custom["uid"], custom["version"])
             if uploaded.is_file():
                 return FileResponse(uploaded, media_type="image/jpeg", headers=THUMB_HEADERS)
         raise HTTPException(404, "No folder art.")

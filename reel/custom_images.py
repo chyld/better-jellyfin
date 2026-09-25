@@ -2,18 +2,19 @@
 
 A NAS image (folder.png, or zombie.png beside zombie.mp4) always wins; an
 uploaded image is only shown when there isn't one. Uploads are stored in the
-data folder, never on the NAS:
+data folder, never on the NAS, one file per upload (see images.py for why):
 
-    images/videos/<video uuid>.jpg
-    images/folders/<folder image uuid>.jpg     (one row per folder in folder_images)
-    images/tags/<tag uuid>.jpg                 (see tags.py)
+    images/videos/<video uuid>-<version>.jpg
+    images/folders/<folder image uuid>-<version>.jpg   (one row per folder in folder_images)
+    images/tags/<tag uuid>-<version>.jpg               (see tags.py)
 """
 import sqlite3
+import time
 from pathlib import Path
 
 from .browse import NotFound, clean_dir
 from .db import new_uid
-from .images import save_upload
+from .images import ORPHAN_GRACE_SECONDS, save_upload, upload_name
 
 
 class ImageConflict(Exception):
@@ -37,18 +38,20 @@ def _video(conn: sqlite3.Connection, item_uid: str) -> sqlite3.Row:
     return row
 
 
-def video_image_path(images_dir: Path, item_uid: str) -> Path:
-    return images_dir / "videos" / f"{item_uid}.jpg"
+def video_image_path(images_dir: Path, item_uid: str, version: str) -> Path:
+    return images_dir / "videos" / upload_name(item_uid, version)
 
 
 def set_video_image(conn: sqlite3.Connection, images_dir: Path, item_uid: str, data: bytes) -> dict:
     row = _video(conn, item_uid)
     if row["poster_path"]:
         raise ImageConflict(f"This video already has an image on the NAS ({Path(row['poster_path']).name}).")
-    save_upload(data, video_image_path(images_dir, row["uid"]))
     version = _version()
+    save_upload(data, video_image_path(images_dir, row["uid"], version))   # 1. the new file
     conn.execute("UPDATE media_items SET custom_image = ? WHERE id = ?", (version, row["id"]))
-    conn.commit()
+    conn.commit()                                                           # 2. point at it
+    if row["custom_image"]:                                                 # 3. drop the old one
+        video_image_path(images_dir, row["uid"], row["custom_image"]).unlink(missing_ok=True)
     return {"custom_image": version}
 
 
@@ -56,7 +59,8 @@ def remove_video_image(conn: sqlite3.Connection, images_dir: Path, item_uid: str
     row = _video(conn, item_uid)
     conn.execute("UPDATE media_items SET custom_image = NULL WHERE id = ?", (row["id"],))
     conn.commit()
-    video_image_path(images_dir, row["uid"]).unlink(missing_ok=True)
+    if row["custom_image"]:
+        video_image_path(images_dir, row["uid"], row["custom_image"]).unlink(missing_ok=True)
     return {"custom_image": None}
 
 
@@ -77,8 +81,8 @@ def _folder(conn: sqlite3.Connection, library_id: int, rel_dir: str) -> str:
     return rel_dir
 
 
-def folder_image_path(images_dir: Path, image_uid: str) -> Path:
-    return images_dir / "folders" / f"{image_uid}.jpg"
+def folder_image_path(images_dir: Path, image_uid: str, version: str) -> Path:
+    return images_dir / "folders" / upload_name(image_uid, version)
 
 
 def custom_folder_image(conn: sqlite3.Connection, library_id: int, rel_dir: str) -> sqlite3.Row | None:
@@ -96,8 +100,8 @@ def set_folder_image(conn: sqlite3.Connection, images_dir: Path, library_id: int
         raise ImageConflict(f"This folder already has an image on the NAS ({Path(art['art_path']).name}).")
     existing = custom_folder_image(conn, library_id, rel_dir)
     image_uid = existing["uid"] if existing else new_uid()
-    save_upload(data, folder_image_path(images_dir, image_uid))
     version = _version()
+    save_upload(data, folder_image_path(images_dir, image_uid, version))
     conn.execute(
         """
         INSERT INTO folder_images (uid, library_id, rel_dir, version) VALUES (?, ?, ?, ?)
@@ -106,6 +110,8 @@ def set_folder_image(conn: sqlite3.Connection, images_dir: Path, library_id: int
         (image_uid, library_id, rel_dir, version),
     )
     conn.commit()
+    if existing:
+        folder_image_path(images_dir, existing["uid"], existing["version"]).unlink(missing_ok=True)
     return {"custom_art": version}
 
 
@@ -115,38 +121,70 @@ def remove_folder_image(conn: sqlite3.Connection, images_dir: Path, library_id: 
     if existing:
         conn.execute("DELETE FROM folder_images WHERE library_id = ? AND rel_dir = ?", (library_id, rel_dir))
         conn.commit()
-        folder_image_path(images_dir, existing["uid"]).unlink(missing_ok=True)
+        folder_image_path(images_dir, existing["uid"], existing["version"]).unlink(missing_ok=True)
     return {"custom_art": None}
 
 
 # ---- Housekeeping ---------------------------------------------------------------------
 
 
-def prune(conn: sqlite3.Connection, images_dir: Path) -> int:
-    """Delete uploaded images whose video, folder or tag is gone. Returns how many."""
-    keep = {
-        "videos": {r[0] for r in conn.execute("SELECT uid FROM media_items WHERE custom_image IS NOT NULL")},
-        "folders": {r[0] for r in conn.execute("SELECT uid FROM folder_images")},
-        "tags": {r[0] for r in conn.execute("SELECT uid FROM tags WHERE image_version IS NOT NULL")},
+def _referenced(conn: sqlite3.Connection) -> dict[str, set[str]]:
+    """The file names the database points at, by kind."""
+    return {
+        "videos": {upload_name(u, v) for u, v in conn.execute(
+            "SELECT uid, custom_image FROM media_items WHERE custom_image IS NOT NULL")},
+        "folders": {upload_name(u, v) for u, v in conn.execute("SELECT uid, version FROM folder_images")},
+        "tags": {upload_name(u, v) for u, v in conn.execute(
+            "SELECT uid, image_version FROM tags WHERE image_version IS NOT NULL")},
     }
+
+
+def prune(conn: sqlite3.Connection, images_dir: Path, *, grace_seconds: float = ORPHAN_GRACE_SECONDS) -> int:
+    """Delete uploaded images nothing points at any more. Returns how many.
+
+    Only files older than the grace period go: a file that was just written may
+    belong to an upload that hasn't recorded it in the database yet.
+    """
     # Folder images whose folder no longer holds any videos (or whose library is gone).
     for row in conn.execute("SELECT uid, library_id, rel_dir FROM folder_images").fetchall():
         try:
             _folder(conn, row["library_id"], row["rel_dir"])
         except NotFound:
             conn.execute("DELETE FROM folder_images WHERE uid = ?", (row["uid"],))
-            keep["folders"].discard(row["uid"])
     conn.commit()
+    keep = _referenced(conn)
+    cutoff = time.time() - grace_seconds
     removed = 0
-    for kind, uids in keep.items():
+    for kind, names in keep.items():
         folder = images_dir / kind
         if not folder.is_dir():
             continue
         for path in folder.glob("*.jpg"):
-            if path.stem not in uids:
-                path.unlink(missing_ok=True)
-                removed += 1
+            if path.name in names:
+                continue
+            try:
+                if path.stat().st_mtime > cutoff:
+                    continue  # too new: may be an upload in progress
+            except FileNotFoundError:
+                continue
+            path.unlink(missing_ok=True)
+            removed += 1
     return removed
+
+
+def adopt_unversioned_files(conn: sqlite3.Connection, images_dir: Path) -> None:
+    """Images used to be stored as "<uuid>.jpg"; rename them to "<uuid>-<version>.jpg"."""
+    rows = {
+        "videos": conn.execute("SELECT uid, custom_image FROM media_items WHERE custom_image IS NOT NULL").fetchall(),
+        "folders": conn.execute("SELECT uid, version FROM folder_images").fetchall(),
+        "tags": conn.execute("SELECT uid, image_version FROM tags WHERE image_version IS NOT NULL").fetchall(),
+    }
+    for kind, pairs in rows.items():
+        for uid, version in pairs:
+            old = images_dir / kind / f"{uid}.jpg"
+            new = images_dir / kind / upload_name(uid, version)
+            if old.is_file() and not new.exists():
+                old.replace(new)
 
 
 def move_old_tag_images(data_dir: Path, images_dir: Path) -> None:
