@@ -11,6 +11,7 @@ import hashlib
 import os
 import subprocess
 import threading
+import time
 from pathlib import Path
 
 # Crop to the largest centred area of the shape, then shrink (never enlarge).
@@ -31,16 +32,17 @@ class Thumbnailer:
         # Limit how many ffmpeg processes a page full of new thumbnails can start.
         self._slots = threading.Semaphore(max_concurrent)
 
-    def _cache_path(self, src: Path, *extra) -> Path:
-        try:
-            st = src.stat()
-        except OSError as exc:
-            raise ThumbnailError(f"Can't read {src.name}: {exc.strerror}")
-        # Keyed on the source's size and mtime, so a replaced file gets a new thumbnail.
-        key = hashlib.sha256(
-            repr((str(src), st.st_size, st.st_mtime, *extra)).encode()
-        ).hexdigest()
+    def path_for(self, key_src: str, rev: str, shape: str) -> Path:
+        """Where the thumbnail of a picture at version `rev` (its size and time, see
+        picture_rev) is kept. `key_src` is the picture's path as the catalog knows
+        it. Needs no trip to the NAS: a replaced picture has a new version."""
+        key = hashlib.sha256(repr((key_src, rev, shape)).encode()).hexdigest()
         return self.cache_dir / key[:2] / f"{key}.jpg"
+
+    def cached(self, key_src: str, rev: str, shape: str = "poster") -> Path | None:
+        """The thumbnail, if it's already made (no NAS, no ffmpeg)."""
+        out = self.path_for(key_src, rev, shape)
+        return out if out.exists() else None
 
     def _render(self, out: Path, input_args: list[str], shape: str) -> Path:
         if out.exists():
@@ -65,14 +67,46 @@ class Thumbnailer:
         os.replace(tmp, out)
         return out
 
-    def cached(self, src: Path, shape: str = "poster") -> Path | None:
-        """The thumbnail of `src`, if it's already made (no ffmpeg needed)."""
-        out = self._cache_path(src, shape)
-        return out if out.exists() else None
+    def make(self, src: Path, shape: str = "poster", *, key_src: str | None = None,
+             rev: str | None = None) -> Path:
+        """A small JPEG of `src` (the real, already checked file), cropped to `shape`
+        ("poster" or "landscape"). Without a recorded `rev` (not scanned since
+        versions were recorded), it's read from the file now."""
+        rev = rev or picture_rev(src)
+        if rev is None:
+            raise ThumbnailError(f"Can't read {src.name}")
+        return self._render(self.path_for(key_src or str(src), rev, shape), ["-i", str(src)], shape)
 
     def from_image(self, src: Path, shape: str = "poster") -> Path:
-        """A small JPEG of `src`, cropped to `shape` ("poster" or "landscape")."""
-        return self._render(self._cache_path(src, shape), ["-i", str(src)], shape)
+        """A small JPEG of `src`, cropped to `shape` (keyed by its path and version)."""
+        return self.make(src, shape)
+
+    def prune(self, keep: set[Path], *, grace_seconds: float = 3600) -> int:
+        """Delete thumbnails not in `keep` (old versions, pictures that are gone),
+        except recent ones: one may have just been made for a request. Returns how many."""
+        cutoff = time.time() - grace_seconds
+        removed = 0
+        for path in self.cache_dir.glob("*/*.jpg"):
+            if path in keep:
+                continue
+            try:
+                if path.stat().st_mtime > cutoff:
+                    continue
+            except FileNotFoundError:
+                continue
+            path.unlink(missing_ok=True)
+            removed += 1
+        return removed
+
+
+def picture_rev(path: str | os.PathLike) -> str | None:
+    """A NAS picture's version: its size and modification time. The scan records
+    it, and thumbnails are cached under it. None if it can't be read right now."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return f"{st.st_size}-{st.st_mtime_ns}"
 
 
 # ---- Uploaded images ---------------------------------------------------------------

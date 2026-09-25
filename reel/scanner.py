@@ -13,6 +13,7 @@ from datetime import timedelta
 from pathlib import Path
 
 from .db import new_uid
+from .images import picture_rev
 from .paths import is_inside
 from .sorting import parent_dir, sort_key
 from .probe import PROBE_VERSION, ProbeError, ProbeResult, probe as ffprobe
@@ -58,6 +59,7 @@ class FoundVideo:
     poster_path: str | None
     size: int
     mtime: float
+    poster_rev: str | None = None   # the poster's size and time: its thumbnail's version
 
 
 def _matters(filename: str) -> bool:
@@ -112,7 +114,7 @@ def find_poster(video_name: str, names_lower: dict[str, str]) -> str | None:
 class Walk:
     """What a walk over a library found, and what it couldn't read."""
     videos: list[FoundVideo]
-    folder_art: dict[str, str]
+    folder_art: dict[str, tuple[str, str | None]]   # folder -> (its folder.<ext>, that file's version)
     unreadable_folders: list[str]   # folders that couldn't be listed (relative)
     unreadable_files: set[str]      # videos listed but not readable (relative)
     outside_library: int = 0        # symlinks leading out of the library, skipped
@@ -186,7 +188,8 @@ def walk_library(root: Path, cancel: threading.Event | None = None) -> Walk:
 
         art = _find_image(names_lower, "folder")
         if art:
-            folder_art[rel_dir.as_posix() if rel_dir.parts else ""] = (rel_dir / art).as_posix()
+            folder_art[rel_dir.as_posix() if rel_dir.parts else ""] = (
+                (rel_dir / art).as_posix(), picture_rev(os.path.join(dirpath, art)))
 
         for name in video_names:
             rel_path = (rel_dir / name).as_posix()
@@ -207,6 +210,7 @@ def walk_library(root: Path, cancel: threading.Event | None = None) -> Walk:
                 title=title,
                 year=year,
                 poster_path=(rel_dir / poster).as_posix() if poster else None,
+                poster_rev=picture_rev(os.path.join(dirpath, poster)) if poster else None,
                 size=st.st_size,
                 mtime=st.st_mtime,
             ))
@@ -326,7 +330,7 @@ def scan_library(
         for row in conn.execute(
             """
             SELECT id, rel_path, size, mtime, probe_error, missing_since, fingerprint, probe_version,
-                   title, year, poster_path
+                   title, year, poster_path, poster_rev
             FROM media_items WHERE library_id = ?
             """,
             (library_id,),
@@ -362,12 +366,12 @@ def scan_library(
         for row, video in moves:
             conn.execute(
                 """
-                UPDATE media_items SET rel_path = ?, title = ?, year = ?, poster_path = ?,
+                UPDATE media_items SET rel_path = ?, title = ?, year = ?, poster_path = ?, poster_rev = ?,
                     size = ?, mtime = ?, missing_since = NULL, parent_dir = ?, title_key = ?
                 WHERE id = ?
                 """,
-                (video.rel_path, video.title, video.year, video.poster_path, video.size, video.mtime,
-                 parent_dir(video.rel_path), sort_key(video.title, video.rel_path), row["id"]),
+                (video.rel_path, video.title, video.year, video.poster_path, video.poster_rev, video.size,
+                 video.mtime, parent_dir(video.rel_path), sort_key(video.title, video.rel_path), row["id"]),
             )
             del existing[row["rel_path"]]
             existing[video.rel_path] = {**row, "rel_path": video.rel_path, "size": video.size,
@@ -424,15 +428,18 @@ def scan_library(
         # rewriting every row (and the browse index) on each scan would be wasted work.
         refreshed = [
             v for v in unchanged
-            if (existing[v.rel_path]["title"], existing[v.rel_path]["year"], existing[v.rel_path]["poster_path"])
-            != (v.title, v.year, v.poster_path) or existing[v.rel_path]["missing_since"]
+            if (existing[v.rel_path]["title"], existing[v.rel_path]["year"], existing[v.rel_path]["poster_path"],
+                existing[v.rel_path]["poster_rev"])
+            != (v.title, v.year, v.poster_path, v.poster_rev) or existing[v.rel_path]["missing_since"]
         ]
         conn.executemany(
             """
-            UPDATE media_items SET title = ?, year = ?, poster_path = ?, missing_since = NULL, title_key = ?
+            UPDATE media_items SET title = ?, year = ?, poster_path = ?, poster_rev = ?, missing_since = NULL,
+                title_key = ?
             WHERE library_id = ? AND rel_path = ?
             """,
-            [(v.title, v.year, v.poster_path, sort_key(v.title, v.rel_path), library_id, v.rel_path) for v in refreshed],
+            [(v.title, v.year, v.poster_path, v.poster_rev, sort_key(v.title, v.rel_path), library_id, v.rel_path)
+             for v in refreshed],
         )
         conn.commit()
 
@@ -455,14 +462,14 @@ def scan_library(
             conn.execute(
                 """
                 INSERT INTO media_items (
-                    uid, library_id, rel_path, title, year, poster_path, size, mtime,
+                    uid, library_id, rel_path, title, year, poster_path, poster_rev, size, mtime,
                     container, video_codec, audio_codec, pix_fmt, width, height,
                     duration, interlaced, probe_error, fingerprint, probe_version, parent_dir, title_key,
                     scanned_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
                 ON CONFLICT (library_id, rel_path) DO UPDATE SET
                     title = excluded.title, year = excluded.year,
-                    poster_path = excluded.poster_path, size = excluded.size,
+                    poster_path = excluded.poster_path, poster_rev = excluded.poster_rev, size = excluded.size,
                     mtime = excluded.mtime, container = excluded.container,
                     video_codec = excluded.video_codec, audio_codec = excluded.audio_codec,
                     pix_fmt = excluded.pix_fmt, width = excluded.width,
@@ -475,7 +482,7 @@ def scan_library(
                 """,
                 (
                     new_uid(), library_id, video.rel_path, video.title, video.year, video.poster_path,
-                    video.size, video.mtime, result.container, result.video_codec,
+                    video.poster_rev, video.size, video.mtime, result.container, result.video_codec,
                     result.audio_codec, result.pix_fmt, result.width, result.height,
                     result.duration, int(result.interlaced), result.error,
                     fp, PROBE_VERSION, parent_dir(video.rel_path), sort_key(video.title, video.rel_path),
@@ -521,13 +528,17 @@ def scan_library(
             (*chunk, grace),
         )]
 
-    # Folder art is rebuilt from the walk, except under folders it couldn't read.
-    for row in conn.execute("SELECT rel_dir FROM folder_art WHERE library_id = ?", (library_id,)).fetchall():
-        if not walk.protects(row["rel_dir"]):
-            conn.execute("DELETE FROM folder_art WHERE library_id = ? AND rel_dir = ?", (library_id, row["rel_dir"]))
+    # Folder art follows the walk, except under folders it couldn't read; only
+    # what changed is written.
+    stored = {r["rel_dir"]: (r["art_path"], r["art_rev"]) for r in conn.execute(
+        "SELECT rel_dir, art_path, art_rev FROM folder_art WHERE library_id = ?", (library_id,))}
     conn.executemany(
-        "INSERT OR REPLACE INTO folder_art (library_id, rel_dir, art_path) VALUES (?, ?, ?)",
-        [(library_id, d, art) for d, art in walk.folder_art.items()],
+        "DELETE FROM folder_art WHERE library_id = ? AND rel_dir = ?",
+        [(library_id, d) for d in stored if d not in walk.folder_art and not walk.protects(d)],
+    )
+    conn.executemany(
+        "INSERT OR REPLACE INTO folder_art (library_id, rel_dir, art_path, art_rev) VALUES (?, ?, ?, ?)",
+        [(library_id, d, art, rev) for d, (art, rev) in walk.folder_art.items() if stored.get(d) != (art, rev)],
     )
 
     warning = None

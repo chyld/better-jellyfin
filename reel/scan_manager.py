@@ -32,6 +32,10 @@ class ScanManager:
         self._cancel = threading.Event()
         # Called with the scan's connection after each successful scan.
         self.after_scan: Callable[[object], None] | None = None
+        # Called after a scan is done (and shown as done), before the next one
+        # starts: optional extra work, e.g. making missing thumbnails. It gets
+        # the library and the stop flag, and should stop when that's set.
+        self.after_done: Callable[[int, threading.Event], None] | None = None
 
     def start(self) -> None:
         self._cancel.clear()
@@ -160,6 +164,11 @@ class ScanManager:
                     log.exception("clean-up after scanning library %s failed", library_id)
                     conn.rollback()
             self._update(library_id, state="done", result=result)
+            if self.after_done:
+                try:
+                    self.after_done(library_id, self._cancel)
+                except Exception:
+                    log.exception("follow-up work after scanning library %s failed", library_id)
         except ScanCancelled:
             log.info("scan of library %s stopped", library_id)
             self._update(library_id, state="cancelled")

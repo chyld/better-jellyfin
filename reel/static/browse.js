@@ -23,7 +23,7 @@ function setSort(value) {
 
 // Bump when the server changes how thumbnails are made (size, crop, shape), so
 // browsers fetch the new ones instead of reusing cached old ones.
-const THUMBS = "t2";
+const THUMBS = "t3";
 
 // Re-render the current page in place (scroll position is kept), e.g. after an upload.
 const rerender = () => window.dispatchEvent(new HashChangeEvent("hashchange"));
@@ -32,12 +32,13 @@ const rerender = () => window.dispatchEvent(new HashChangeEvent("hashchange"));
  *  on the NAS, else null (placeholder). */
 function videoImageSrc(item) {
   if (item.custom_image) return `/api/items/${item.id}/thumb?${THUMBS}&v=${item.custom_image}`;
-  if (item.has_poster) return `/api/items/${item.id}/thumb?${THUMBS}`;
+  // The poster's version (from the last scan) is in the URL, so the browser can keep it for good.
+  if (item.has_poster) return `/api/items/${item.id}/thumb?${THUMBS}${item.poster_rev ? `&v=${item.poster_rev}` : ""}`;
   return null;
 }
 
 /** A folder's picture: one you uploaded, else folder.<ext> on the NAS, else null.
- *  `nasVersion` refreshes a NAS picture that may have changed (e.g. the last scan). */
+ *  `nasVersion` is the NAS picture's version (art_rev, from the last scan). */
 function folderImageSrc(libraryId, path, hasArt, customArt, nasVersion) {
   if (customArt) return folderArtUrl(libraryId, path, customArt);
   if (hasArt) return folderArtUrl(libraryId, path, nasVersion);
@@ -160,7 +161,7 @@ export async function renderHome(view) {
             artBox({
               kind: "folder",
               shape: "poster",
-              src: folderImageSrc(lib.id, "", lib.has_art, lib.custom_art, lib.last_scan_at),
+              src: folderImageSrc(lib.id, "", lib.has_art, lib.custom_art, lib.art_rev),
             }),
             h("div", { class: "label" }, lib.name),
             h("div", { class: "sub" }, lib.item_count ? plural(lib.item_count, "video") : "Not scanned yet"),
@@ -335,7 +336,7 @@ function folderCard(libraryId, folder) {
       artBox({
         kind: "folder",
         shape: "poster",
-        src: folderImageSrc(libraryId, folder.path, folder.has_art, folder.custom_art),
+        src: folderImageSrc(libraryId, folder.path, folder.has_art, folder.custom_art, folder.art_rev),
       }),
       h("div", { class: "label" }, folder.name),
       h("div", { class: "sub" }, plural(folder.item_count, "video")),

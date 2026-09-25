@@ -32,11 +32,11 @@ def test_live_schema(tmp_path):
         "media_items": ["id", "uid", "library_id", "rel_path", "title", "year", "poster_path", "size", "mtime",
                         "container", "video_codec", "audio_codec", "pix_fmt", "width", "height", "duration",
                         "interlaced", "probe_error", "custom_image", "missing_since", "scanned_at", "fingerprint",
-                        "probe_version", "parent_dir", "title_key"],
+                        "probe_version", "parent_dir", "title_key", "poster_rev"],
         "tags": ["id", "uid", "name", "created_at", "image_version"],
         "item_tags": ["item_id", "tag_id", "added_at"],
         "folder_images": ["uid", "library_id", "rel_dir", "version"],
-        "folder_art": ["library_id", "rel_dir", "art_path"],
+        "folder_art": ["library_id", "rel_dir", "art_path", "art_rev"],
         "users": ["id", "uid", "name", "is_local", "created_at"],
     }
     # Browsing, tag order, move detection and the one local user depend on these.

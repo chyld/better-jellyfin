@@ -81,20 +81,51 @@ def test_poster_is_shrunk_to_a_jpeg(client, lib, tmp_path):
 def test_thumbnails_are_cached(client, lib, settings):
     url = f"/api/items/{item_id(client, lib, 'posters', 'clip')}/thumb"
     first = client.get(url).content
-    cached = list(settings.thumbs_dir.rglob("*.jpg"))
-    assert len(cached) == 1
-    mtime = cached[0].stat().st_mtime
+    cached = {p: p.stat().st_mtime for p in settings.thumbs_dir.rglob("*.jpg")}
+    assert cached
     assert client.get(url).content == first
-    assert cached[0].stat().st_mtime == mtime
+    assert {p: p.stat().st_mtime for p in settings.thumbs_dir.rglob("*.jpg")} == cached   # nothing remade
 
 
-def test_replaced_poster_gets_a_new_thumbnail(client, lib, media_root, settings):
-    url = f"/api/items/{item_id(client, lib, 'posters', 'clip')}/thumb"
-    first = client.get(url).content
+def rescan(client, lib):
+    client.post(f"/api/libraries/{lib}/scan")
+    client.scans.wait_idle()
+
+
+def poster(client, lib, title):
+    page = client.get(f"/api/libraries/{lib}/browse", params={"path": "posters"}).json()
+    return next(i for i in page["items"] if i["title"] == title)
+
+
+def test_replaced_poster_gets_a_new_thumbnail_after_the_next_scan(client, lib, media_root, settings):
+    """A thumbnail is found by the poster's recorded version, without asking the NAS;
+    a replaced poster has a new version once a scan has seen it."""
+    video = poster(client, lib, "clip")
+    url = f"/api/items/{video['id']}/thumb"
+    first = client.get(url, params={"v": video["poster_rev"]}).content
     image(media_root / "Media/posters/clip.png", size="640x480", color="green")
-    second = client.get(url).content
-    assert first != second
-    assert len(list(settings.thumbs_dir.rglob("*.jpg"))) == 2
+    assert client.get(url).content == first                 # not scanned yet: the thumbnail we have
+    rescan(client, lib)
+    newer = poster(client, lib, "clip")
+    assert newer["poster_rev"] != video["poster_rev"]
+    assert client.get(url, params={"v": newer["poster_rev"]}).content != first
+
+
+def test_a_cached_thumbnail_is_served_without_the_nas(client, lib, media_root, monkeypatch):
+    video = poster(client, lib, "clip")
+    url = f"/api/items/{video['id']}/thumb"
+    made = client.get(url).content
+    from reel import main
+    monkeypatch.setattr(main, "resolve_inside", lambda *a, **k: (_ for _ in ()).throw(OSError("NAS gone")))
+    assert client.get(url).content == made                  # no path check, no stat: just the cache
+
+
+def test_versioned_thumbnail_urls_can_be_cached_for_good(client, lib):
+    video = poster(client, lib, "clip")
+    url = f"/api/items/{video['id']}/thumb"
+    assert "immutable" in client.get(url, params={"v": video["poster_rev"]}).headers["cache-control"]
+    assert "immutable" not in client.get(url).headers["cache-control"]
+    assert "immutable" not in client.get(url, params={"v": "old"}).headers["cache-control"]
 
 
 def test_video_without_preview_has_no_image(client, lib):
@@ -181,3 +212,32 @@ def test_poster_and_landscape_are_cached_separately(tmp_path):
     image(src)
     thumbs = Thumbnailer(tmp_path / "cache")
     assert thumbs.from_image(src, "poster") != thumbs.from_image(src, "landscape")
+
+
+def test_a_scan_makes_missing_thumbnails_and_drops_old_versions(client, lib, media_root, settings):
+    video = poster(client, lib, "clip")
+    made = settings.thumbs_dir.rglob("*.jpg")
+    assert list(made)                                         # made after the scan, before any view
+    thumbs = client.app.state.settings.thumbs_dir
+    old = {p for p in thumbs.rglob("*.jpg")}
+    image(media_root / "Media/posters/clip.png", size="640x480", color="green")
+    import os, time
+    for p in old:                                             # old enough to be cleaned up
+        os.utime(p, (time.time() - 7200, time.time() - 7200))
+    rescan(client, lib)
+    now = {p for p in thumbs.rglob("*.jpg")}
+    assert now - old                                          # the new version was made...
+    gone = old - now
+    assert len(gone) == 1                                     # ...and only the replaced one's old thumbnail went
+    assert poster(client, lib, "clip")["poster_rev"] != video["poster_rev"]
+
+
+def test_no_thumbnails_are_made_after_a_scan_while_something_plays(client, lib, settings, monkeypatch):
+    import shutil
+    shutil.rmtree(settings.thumbs_dir, ignore_errors=True)
+    client.app.state.streams.active.add(object())            # a video is playing
+    try:
+        rescan(client, lib)
+    finally:
+        client.app.state.streams.active.clear()
+    assert not list(settings.thumbs_dir.rglob("*.jpg"))

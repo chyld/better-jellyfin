@@ -277,8 +277,17 @@ the database, so **browsing never touches the NAS**.
 - `folder.<ext>` is only ever a folder's picture, never a video's.
 - NAS images can be several megabytes (up to 65 MB in practice), so the server shrinks each
   one with ffmpeg into a small cached JPEG, **cropped to the shape it's shown in**. It's
-  roughly 20–80 KB, never enlarged, and made on first view in about 0.2–0.6 s, then served from
-  cache in about 2 ms.
+  roughly 20–80 KB and never enlarged; making one takes about 0.2–0.6 s, serving a cached one
+  about 2 ms.
+- **Thumbnails don't touch the NAS once made.** The scan records each NAS picture's version
+  (its size and modification time), and thumbnails are cached under it, so showing a cached
+  one needs no trip to the NAS. The version is also in the picture's URL, so the browser keeps
+  it for good. A picture replaced on the NAS shows up after the next scan.
+- **After a scan, missing thumbnails are made** one at a time, so the first look at a folder
+  doesn't wait for ffmpeg. That stops as soon as a video plays; the rest are made on first view.
+- **While a video plays, thumbnails are made one at a time** (otherwise up to 4 at once), so a
+  new folder doesn't take the CPU or the NAS from playback. Thumbnails of old picture versions
+  are deleted after each scan.
 - Cards load their pictures lazily as they scroll into view.
 - Placeholders are drawn in the browser, so a missing picture costs no request. A picture that
   fails to load (for example with the NAS offline) also turns into its placeholder.
@@ -632,13 +641,13 @@ REEL_MEDIA_ROOT=/mnt/nas/videos REEL_DATA_DIR=./data \
 
 The frontend is served as-is from `reel/static/`, so edit and reload. Browsers re-check the
 app's files on every load (`Cache-Control: no-cache`), so updates show up without a hard
-refresh. Thumbnail URLs carry a version (`THUMBS` in `browse.js`); bump it when the server
-changes how thumbnails are made.
+refresh. Thumbnail URLs carry a version (`THUMBS` in `browse.js`, plus each picture's own
+version); bump `THUMBS` when the server changes how thumbnails are made.
 
 ### Tests
 
 ```sh
-uv run pytest              # backend: 521 tests
+uv run pytest              # backend: 534 tests
 node --test tests/js/      # frontend: 30 tests
 uv run pytest -m browser   # browser: 14 tests (about 2 minutes; needs Chromium and ffmpeg)
 scripts/docker-smoke.sh    # builds the image and checks it end to end (needs Docker)

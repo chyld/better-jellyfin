@@ -20,6 +20,7 @@ def item_out(row: sqlite3.Row) -> dict:
         "width": row["width"],
         "height": row["height"],
         "has_poster": row["poster_path"] is not None,  # an image on the NAS
+        "poster_rev": row["poster_rev"],                # its version (in its thumbnail's URL)
         "custom_image": row["custom_image"],            # version of an uploaded one, if any
     }
 
@@ -96,11 +97,12 @@ def browse(
 
     prefix = f"{rel_dir}/" if rel_dir else ""
     paths = [prefix + r["name"] for r in counts]
-    art, custom_art = set(), {}
+    art, custom_art = {}, {}
     if paths:
         marks = ",".join("?" * len(paths))
-        art = {r[0] for r in conn.execute(
-            f"SELECT rel_dir FROM folder_art WHERE library_id = ? AND rel_dir IN ({marks})", (library_id, *paths))}
+        art = dict(conn.execute(
+            f"SELECT rel_dir, art_rev FROM folder_art WHERE library_id = ? AND rel_dir IN ({marks})",
+            (library_id, *paths)).fetchall())
         custom_art = dict(conn.execute(
             f"SELECT rel_dir, version FROM folder_images WHERE library_id = ? AND rel_dir IN ({marks})",
             (library_id, *paths)).fetchall())
@@ -111,6 +113,7 @@ def browse(
             "path": prefix + r["name"],
             "item_count": r["item_count"],
             "has_art": prefix + r["name"] in art,             # folder.<ext> on the NAS
+            "art_rev": art.get(prefix + r["name"]),           # its version (in its thumbnail's URL)
             "custom_art": custom_art.get(prefix + r["name"]),  # version of an uploaded image, if any
         }
         # Same order as the videos (see sorting.py).

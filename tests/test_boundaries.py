@@ -74,6 +74,10 @@ def test_file_swapped_for_a_symlink_after_scanning_is_not_served(client, media_r
     client.post(f"/api/libraries/{lib}/scan")
     client.scans.wait_idle()
     ids = {i["title"]: i["id"] for i in client.get(f"/api/libraries/{lib}/browse").json()["items"]}
+    # (A thumbnail already made from the real a.png may still be shown: it's ours,
+    # made from a file that was inside. None is made from the outside file.)
+    import shutil
+    shutil.rmtree(client.app.state.settings.thumbs_dir, ignore_errors=True)
 
     (outside / "secret.png").write_bytes((folder / "a.png").read_bytes())
     for name, target in (("a.mp4", "secret.mp4"), ("b.mkv", "secret.mp4"), ("a.png", "secret.png")):

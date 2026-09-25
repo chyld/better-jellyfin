@@ -234,6 +234,14 @@ def _v6_folder_index(conn: sqlite3.Connection) -> None:
     )
 
 
+def _v7_picture_versions(conn: sqlite3.Connection) -> None:
+    # The size and modification time of each NAS picture (a video's poster, a
+    # folder.<ext>), recorded by the scan: thumbnails are cached under it, so a
+    # cached one is found without touching the NAS. Filled in by the next scan.
+    conn.execute("ALTER TABLE media_items ADD COLUMN poster_rev TEXT")
+    conn.execute("ALTER TABLE folder_art ADD COLUMN art_rev TEXT")
+
+
 # (version, what it does, function). Append only; functions must not commit.
 MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (2, "fingerprints and probe versions for media items", _v2_identity),
@@ -241,6 +249,7 @@ MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (4, "explicit order for a tag's videos", _v4_tag_order),
     (5, "stop storing the play mode; it's decided at play time", _v5_no_stored_play_mode),
     (6, "index each video's folder and name order for fast browsing", _v6_folder_index),
+    (7, "versions of NAS pictures, so thumbnails are found without the NAS", _v7_picture_versions),
 ]
 
 

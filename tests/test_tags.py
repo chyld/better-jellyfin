@@ -140,7 +140,7 @@ def test_videos_with_a_tag(client, videos):
     # Not sorted: in the order they were tagged.
     assert [i["title"] for i in body["items"]] == ["hiking", "zoo-trip", "holiday"]
     assert set(body["items"][0]) == {
-        "id", "title", "year", "duration", "width", "height", "has_poster", "custom_image",
+        "id", "title", "year", "duration", "width", "height", "has_poster", "poster_rev", "custom_image",
     }
 
 

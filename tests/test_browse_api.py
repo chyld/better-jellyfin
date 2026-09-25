@@ -72,7 +72,7 @@ def test_item_fields(client, lib):
     item = browse(client, lib, "Personal/Tapes", sort="year")["items"][1]
     assert item == {
         "id": item["id"], "title": "zoo-trip", "year": 1992, "duration": 60.0,
-        "width": 720, "height": 480, "has_poster": False, "custom_image": None,
+        "width": 720, "height": 480, "has_poster": False, "poster_rev": None, "custom_image": None,
     }
 
 
@@ -80,7 +80,8 @@ def test_folder_and_video_previews(client, lib):
     folders = {f["name"]: f for f in browse(client, lib, "Personal")["folders"]}
     assert folders["Camcorder"]["has_art"] is True   # has folder.png
     assert folders["Tapes"]["has_art"] is False    # gets the folder placeholder
-    assert set(folders["Tapes"]) == {"name", "path", "item_count", "has_art", "custom_art"}
+    assert set(folders["Tapes"]) == {"name", "path", "item_count", "has_art", "art_rev", "custom_art"}
+    assert folders["Camcorder"]["art_rev"] and folders["Tapes"]["art_rev"] is None   # folder.png's version
 
     videos = {i["title"]: i["has_poster"] for i in browse(client, lib, "Personal/Camcorder")["items"]}
     assert videos == {"clip1": True, "clip2": False, "clip10": False}  # only clip1.png exists
