@@ -1,5 +1,6 @@
 """The Scan buttons: background scans, progress and errors."""
 import shutil
+import sqlite3
 import threading
 import time
 
@@ -216,3 +217,73 @@ def test_a_failing_clean_up_after_a_scan_doesnt_fail_the_scan(client, media_root
     client.scans.wait_idle()
     body = client.get("/api/libraries").json()[0]
     assert body["scan"]["state"] == "done" and body["last_scan_error"] is None and body["item_count"] == 1
+
+
+class FlakyDatabase:
+    """connect() for the scan manager that fails the first `failures` times."""
+
+    def __init__(self, failures):
+        self.failures = failures
+
+    def __call__(self, path):
+        from reel.db import connect
+        if self.failures:
+            self.failures -= 1
+            raise sqlite3.OperationalError("unable to open database file")
+        return connect(path)
+
+
+def test_a_database_failure_doesnt_stop_the_scanner(client, media_root, monkeypatch):
+    """The connection fails for one scan (and for recording its error): that scan
+    reports the failure, and the next one runs normally."""
+    from reel import scan_manager
+
+    make_files(media_root, "Tapes/a.mpg")
+    lib = client.post("/api/libraries", json={"name": "Tapes", "path": str(media_root / "Tapes")}).json()["id"]
+    monkeypatch.setattr(scan_manager, "connect", FlakyDatabase(failures=2))
+    client.post(f"/api/libraries/{lib}/scan")
+    client.scans.wait_idle()
+    status = client.get("/api/libraries").json()[0]["scan"]
+    assert status["state"] == "error" and "unable to open database" in status["error"]
+    assert client.scans.alive()
+    client.post(f"/api/libraries/{lib}/scan")                 # the next scan works
+    client.scans.wait_idle()
+    body = client.get("/api/libraries").json()[0]
+    assert body["scan"]["state"] == "done" and body["item_count"] == 1
+    assert client.get("/api/health").json()["scanner"] == {"alive": True, "queued": 0}
+
+
+def test_an_unexpected_failure_is_contained_too(client, media_root, monkeypatch):
+    make_files(media_root, "Tapes/a.mpg")
+    lib = client.post("/api/libraries", json={"name": "Tapes", "path": str(media_root / "Tapes")}).json()["id"]
+    real = client.scans._scan_one
+    calls = []
+
+    def explode_once(library_id):
+        calls.append(library_id)
+        if len(calls) == 1:
+            raise RuntimeError("a bug")
+        return real(library_id)
+
+    monkeypatch.setattr(client.scans, "_scan_one", explode_once)
+    client.post(f"/api/libraries/{lib}/scan")
+    client.scans.wait_idle()
+    assert client.get("/api/libraries").json()[0]["scan"]["state"] == "error"
+    client.post(f"/api/libraries/{lib}/scan")
+    client.scans.wait_idle()
+    assert client.get("/api/libraries").json()[0]["scan"]["state"] == "done"
+
+
+def test_a_dead_scanner_is_restarted_and_reported(settings, media_root):
+    make_files(media_root, "Tapes/a.mpg")
+    init_db(settings.db_path)
+    with TestClient(create_app(settings)) as c:
+        lib = c.post("/api/libraries", json={"name": "Tapes", "path": str(media_root / "Tapes")}).json()["id"]
+        c.app.state.scans._queue.put(None)                   # the thread ends (as if it had died)
+        c.app.state.scans._thread.join(5)
+        health = c.get("/api/health")
+        assert health.status_code == 503 and health.json()["scanner"]["alive"] is False
+        c.post(f"/api/libraries/{lib}/scan")                  # asking for a scan starts it again
+        c.app.state.scans.wait_idle()
+        assert c.get("/api/libraries").json()[0]["scan"]["state"] == "done"
+        assert c.get("/api/health").status_code == 200

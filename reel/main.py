@@ -518,14 +518,16 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
 
     @app.get("/api/health")
     def health(conn: sqlite3.Connection = Db):
-        """For Docker's health check (503 when not ready): the database answers and
-        ffmpeg and ffprobe were found at startup. Also how busy the server is."""
+        """For Docker's health check (503 when not ready): the database answers,
+        ffmpeg and ffprobe were found at startup, and the scanner is running. Also
+        how busy the server is."""
         conn.execute("SELECT 1").fetchone()
-        ready = bool(tools.get("ffmpeg") and tools.get("ffprobe"))
+        ready = bool(tools.get("ffmpeg") and tools.get("ffprobe")) and scans.alive()
         body = {
             "ok": ready,
             "ffmpeg": tools.get("ffmpeg"),
             "ffprobe": tools.get("ffprobe"),
+            "scanner": {"alive": scans.alive(), "queued": scans.queued()},
             "streams": {"active": len(streams.active), "limit": settings.max_streams},
             "hls": hls_sessions.status(),
         }

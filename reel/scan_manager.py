@@ -28,6 +28,7 @@ class ScanManager:
         self._lock = threading.Lock()
         self._status: dict[int, dict] = {}
         self._thread: threading.Thread | None = None
+        self._stopping = False
         self._cancel = threading.Event()
         # Called with the scan's connection after each successful scan.
         self.after_scan: Callable[[object], None] | None = None
@@ -35,8 +36,19 @@ class ScanManager:
     def start(self) -> None:
         self._cancel.clear()
         self.probes.allow()
+        self._stopping = False
+        self._start_thread()
+
+    def _start_thread(self) -> None:
         self._thread = threading.Thread(target=self._run, name="scanner", daemon=True)
         self._thread.start()
+
+    def alive(self) -> bool:
+        """Whether the scanner thread is running (for the health check)."""
+        return self._thread is not None and self._thread.is_alive()
+
+    def queued(self) -> int:
+        return self._queue.qsize()
 
     def stop(self, timeout: float = 10) -> None:
         """Stop soon: queued scans are dropped, running ffprobes are killed, and a
@@ -47,6 +59,7 @@ class ScanManager:
         when the OS returns it, and the scan writes nothing after it. This stops
         waiting after `timeout`, but the process can't exit before that call
         returns: Python waits for the scan's worker threads when it exits."""
+        self._stopping = True
         self._cancel.set()
         self.probes.stop()
         while True:
@@ -72,7 +85,13 @@ class ScanManager:
                 return dict(current)
             self._status[library_id] = {"state": "queued", "done": 0, "total": 0}
             self._queue.put(library_id)
-            return dict(self._status[library_id])
+            status = dict(self._status[library_id])
+        # Each job is contained (see _run), so this shouldn't happen; if the thread
+        # died anyway, start a new one rather than queue work nobody will do.
+        if self._thread is not None and not self._thread.is_alive() and not self._stopping:
+            log.error("the scanner thread had stopped; starting it again")
+            self._start_thread()
+        return status
 
     def status(self, library_id: int) -> dict | None:
         with self._lock:
@@ -111,6 +130,10 @@ class ScanManager:
                 if library_id is None:
                     return
                 self._scan_one(library_id)
+            except Exception:
+                # Whatever went wrong with this job, the next one still runs.
+                log.exception("scanning library %s failed unexpectedly", library_id)
+                self._update(library_id, state="error", error="The scan failed unexpectedly; see the log.")
             finally:
                 self._queue.task_done()
 
@@ -119,8 +142,9 @@ class ScanManager:
             if library_id not in self._status:
                 return  # library was deleted while queued
         self._update(library_id, state="scanning")
-        conn = connect(self._db_path)
+        conn = None
         try:
+            conn = connect(self._db_path)
             result = self._scan_fn(
                 conn,
                 library_id,
@@ -139,15 +163,32 @@ class ScanManager:
         except ScanCancelled:
             log.info("scan of library %s stopped", library_id)
             self._update(library_id, state="cancelled")
-            conn.rollback()
+            if conn is not None:
+                conn.rollback()
         except Exception as exc:
             log.exception("scan of library %s failed", library_id)
             message = str(exc) or type(exc).__name__
             self._update(library_id, state="error", error=message)
-            conn.rollback()
-            conn.execute(
-                "UPDATE libraries SET last_scan_error = ? WHERE id = ?", (message, library_id)
-            )
-            conn.commit()
+            self._record_error(conn, library_id, message)
         finally:
-            conn.close()
+            if conn is not None:
+                conn.close()
+
+    def _record_error(self, conn, library_id: int, message: str) -> None:
+        """Keep the error on the library for later (best effort: the database may be
+        what failed; the in-memory status already says it)."""
+        try:
+            if conn is None:
+                conn = connect(self._db_path)
+                own = True
+            else:
+                conn.rollback()
+                own = False
+            try:
+                conn.execute("UPDATE libraries SET last_scan_error = ? WHERE id = ?", (message, library_id))
+                conn.commit()
+            finally:
+                if own:
+                    conn.close()
+        except Exception:
+            log.exception("couldn't record the scan error for library %s", library_id)
