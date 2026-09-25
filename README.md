@@ -185,7 +185,7 @@ Going **Back** returns you to the same scroll position in long grids.
 | Go to beginning | **⏮** button | **Home** |
 | Seek | Click or drag the seek bar; hovering shows the time | |
 | Mute / volume | Speaker button; the slider appears on hover | **M** |
-| Full screen | ⛶ button, or double-click the video | **F** |
+| Full screen | ⛶ button, or double-click the video (on iPhone: iOS's own full-screen player, since Safari there can only put the video itself full screen) | **F** |
 | Use this frame as the preview | Camera button | **P** |
 
 The controls fade out after 3 seconds without mouse movement while playing. Converted videos
@@ -659,7 +659,7 @@ version); bump `THUMBS` when the server changes how thumbnails are made.
 
 ```sh
 uv run pytest              # backend: 555 tests
-node --test tests/js/      # frontend: 30 tests
+node --test tests/js/      # frontend: 35 tests
 uv run pytest -m browser   # browser: 15 tests (about 2 minutes; needs Chromium and ffmpeg)
 scripts/docker-smoke.sh    # builds the image and checks it end to end (needs Docker)
 ```

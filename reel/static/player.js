@@ -15,6 +15,40 @@ const JUMP_SECONDS = 60; // the 1-minute buttons, and Shift + arrow keys
 // whose loading finishes late is cleaned up then, and must not undo the current one's.
 let activePlayer = null;
 
+// ---- Full screen, in whatever form the browser offers ----
+// Desktop browsers, Android and iPad put any element (our player, with its own
+// controls) full screen, some only with the older webkit- names. Safari on
+// iPhone can't: only the <video> itself goes full screen, in iOS's own player.
+
+/** Whether the player (or, on iPhone, its video) is full screen now. */
+export function isFullscreen(player, video, doc = globalThis.document) {
+  const element = doc.fullscreenElement || doc.webkitFullscreenElement || null;
+  return element === player || Boolean(video.webkitDisplayingFullscreen);
+}
+
+export function enterFullscreen(player, video) {
+  if (player.requestFullscreen) {
+    // A promise in current browsers; if it's refused, try the video on its own.
+    return Promise.resolve(player.requestFullscreen()).catch(() => videoFullscreen(video));
+  }
+  if (player.webkitRequestFullscreen) return player.webkitRequestFullscreen();
+  return videoFullscreen(video); // iPhone
+}
+
+function videoFullscreen(video) {
+  try {
+    video.webkitEnterFullscreen?.();
+  } catch {
+    // Not ready yet (iOS needs the video's metadata first): nothing to do.
+  }
+}
+
+export function exitFullscreen(player, video, doc = globalThis.document) {
+  if (doc.fullscreenElement === player) doc.exitFullscreen();
+  else if (doc.webkitFullscreenElement === player) doc.webkitExitFullscreen();
+  else if (video.webkitDisplayingFullscreen) video.webkitExitFullscreen();
+}
+
 /** Where a seek to `t` actually lands: never before the start or past the end. */
 export function clampSeek(t, duration) {
   return Math.max(0, Math.min(t, duration - 1));
@@ -229,8 +263,8 @@ export async function renderPlayer(page, itemId) {
   }
 
   function toggleFullscreen() {
-    if (document.fullscreenElement) document.exitFullscreen();
-    else player.requestFullscreen?.();
+    if (isFullscreen(player, video)) exitFullscreen(player, video);
+    else enterFullscreen(player, video);
   }
 
   function showControls() {
@@ -311,9 +345,13 @@ export async function renderPlayer(page, itemId) {
     message.textContent = "This video couldn't be played.";
   });
   function onFullscreen() {
-    setIcon(fullBtn, document.fullscreenElement ? "shrink" : "expand");
+    setIcon(fullBtn, isFullscreen(player, video) ? "shrink" : "expand");
   }
   document.addEventListener("fullscreenchange", onFullscreen);
+  document.addEventListener("webkitfullscreenchange", onFullscreen);
+  // iPhone: the video's own full screen.
+  video.addEventListener("webkitbeginfullscreen", onFullscreen);
+  video.addEventListener("webkitendfullscreen", onFullscreen);
 
   // ---- Buttons ----
   playBtn.addEventListener("click", togglePlay);
@@ -357,9 +395,10 @@ export async function renderPlayer(page, itemId) {
   return () => {
     document.removeEventListener("keydown", onKey);
     document.removeEventListener("fullscreenchange", onFullscreen);
+    document.removeEventListener("webkitfullscreenchange", onFullscreen);
     releasePage();
     clearTimeout(hideTimer);
-    if (document.fullscreenElement === player) document.exitFullscreen();
+    if (isFullscreen(player, video)) exitFullscreen(player, video);
     // Dropping the source closes the connection, which stops ffmpeg on the server.
     source.destroy();
   };
