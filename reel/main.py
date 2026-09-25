@@ -112,6 +112,10 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
         finally:
             conn.close()
 
+    # Closed when the route function returns, before the response is sent: a
+    # direct-play download can last hours and needs no database meanwhile.
+    Db = Depends(get_db, scope="function")
+
     def library_out(row: dict) -> dict:
         # The API only ever shows the UUID; the integer id stays internal.
         out = {**row, "id": row["uid"], "scan": scans.status(row["id"])}
@@ -230,92 +234,92 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
 
     @app.get("/api/libraries/{library_uid}/browse")
     def browse_folder(library_uid: str, path: str = "", sort: str = "name", limit: int | None = None,
-                      offset: int = 0, conn: sqlite3.Connection = Depends(get_db)):
+                      offset: int = 0, conn: sqlite3.Connection = Db):
         """A folder's subfolders, and its videos one page at a time (`limit`, `offset`)."""
         return browse.browse(conn, library_pk(conn, library_uid), path, sort, limit=limit, offset=offset)
 
     @app.get("/api/libraries/{library_uid}/folder-art")
-    def get_folder_art(library_uid: str, path: str = "", conn: sqlite3.Connection = Depends(get_db)):
+    def get_folder_art(library_uid: str, path: str = "", conn: sqlite3.Connection = Db):
         return folder_art(conn, library_pk(conn, library_uid), browse.clean_dir(path))
 
     @app.get("/api/items/{item_uid}")
-    def get_item(item_uid: str, conn: sqlite3.Connection = Depends(get_db)):
+    def get_item(item_uid: str, conn: sqlite3.Connection = Db):
         item = browse.item_detail(conn, item_uid)
         return {**item, "tags": tags.item_tags(conn, tags.item_pk(conn, item_uid))}
 
     @app.post("/api/items/{item_uid}/tags")
-    def add_item_tag(item_uid: str, body: TagAdd, conn: sqlite3.Connection = Depends(get_db)):
+    def add_item_tag(item_uid: str, body: TagAdd, conn: sqlite3.Connection = Db):
         """Tag a video; returns the video's tags."""
         return tags.add_tag(conn, item_uid, body.name)
 
     @app.delete("/api/items/{item_uid}/tags/{tag_uid}")
-    def remove_item_tag(item_uid: str, tag_uid: str, conn: sqlite3.Connection = Depends(get_db)):
+    def remove_item_tag(item_uid: str, tag_uid: str, conn: sqlite3.Connection = Db):
         """Untag a video; returns the video's remaining tags."""
         return tags.remove_tag(conn, item_uid, tag_uid)
 
     @app.get("/api/tags")
-    def list_tags(conn: sqlite3.Connection = Depends(get_db)):
+    def list_tags(conn: sqlite3.Connection = Db):
         return tags.list_tags(conn)
 
     @app.get("/api/tags/{tag_uid}")
-    def get_tag(tag_uid: str, limit: int | None = None, offset: int = 0, conn: sqlite3.Connection = Depends(get_db)):
+    def get_tag(tag_uid: str, limit: int | None = None, offset: int = 0, conn: sqlite3.Connection = Db):
         return tags.tag_videos(conn, tag_uid, limit=limit, offset=offset)
 
     @app.patch("/api/tags/{tag_uid}")
-    def rename_tag(tag_uid: str, body: TagRename, conn: sqlite3.Connection = Depends(get_db)):
+    def rename_tag(tag_uid: str, body: TagRename, conn: sqlite3.Connection = Db):
         """Rename a tag; renaming it to an existing tag merges the two."""
         return tags.rename_tag(conn, tag_uid, body.name, settings.tag_images_dir)
 
     @app.delete("/api/tags/{tag_uid}", status_code=204)
-    def delete_tag(tag_uid: str, conn: sqlite3.Connection = Depends(get_db)):
+    def delete_tag(tag_uid: str, conn: sqlite3.Connection = Db):
         """Delete a tag from every video."""
         tags.delete_tag(conn, tag_uid, settings.tag_images_dir)
         return Response(status_code=204)
 
     @app.put("/api/tags/{tag_uid}/image")
-    async def upload_tag_image(tag_uid: str, request: Request, conn: sqlite3.Connection = Depends(get_db)):
+    async def upload_tag_image(tag_uid: str, request: Request, conn: sqlite3.Connection = Db):
         """Set a tag's image. The request body is the image file itself."""
         data = await read_upload(request)
         return await run_in_threadpool(tags.set_image, conn, settings.tag_images_dir, tag_uid, data)
 
     @app.post("/api/tags/{tag_uid}/image-url")
-    def tag_image_from_url(tag_uid: str, body: ImageUrl, conn: sqlite3.Connection = Depends(get_db)):
+    def tag_image_from_url(tag_uid: str, body: ImageUrl, conn: sqlite3.Connection = Db):
         """Set a tag's image from a picture on the web: the server downloads it."""
         tags.find_tag(conn, tag_uid)  # 404 before downloading anything
         return tags.set_image(conn, settings.tag_images_dir, tag_uid, download(body.url))
 
     @app.delete("/api/tags/{tag_uid}/image")
-    def delete_tag_image(tag_uid: str, conn: sqlite3.Connection = Depends(get_db)):
+    def delete_tag_image(tag_uid: str, conn: sqlite3.Connection = Db):
         return tags.remove_image(conn, settings.tag_images_dir, tag_uid)
 
     @app.get("/api/tags/{tag_uid}/image")
-    def get_tag_image(tag_uid: str, conn: sqlite3.Connection = Depends(get_db)):
+    def get_tag_image(tag_uid: str, conn: sqlite3.Connection = Db):
         path = tags.tag_image_file(conn, settings.tag_images_dir, tag_uid)
         return FileResponse(path, media_type="image/jpeg", headers=THUMB_HEADERS)
 
     @app.get("/api/items/{item_uid}/thumb")
-    def get_item_thumb(item_uid: str, conn: sqlite3.Connection = Depends(get_db)):
+    def get_item_thumb(item_uid: str, conn: sqlite3.Connection = Db):
         return item_thumb(conn, item_uid)
 
     # ---- Uploaded images for videos and folders without one on the NAS ----
 
     @app.put("/api/items/{item_uid}/image")
-    async def upload_video_image(item_uid: str, request: Request, conn: sqlite3.Connection = Depends(get_db)):
+    async def upload_video_image(item_uid: str, request: Request, conn: sqlite3.Connection = Db):
         data = await read_upload(request)
         return await run_in_threadpool(custom_images.set_video_image, conn, settings.images_dir, item_uid, data)
 
     @app.post("/api/items/{item_uid}/image-url")
-    def video_image_from_url(item_uid: str, body: ImageUrl, conn: sqlite3.Connection = Depends(get_db)):
+    def video_image_from_url(item_uid: str, body: ImageUrl, conn: sqlite3.Connection = Db):
         browse.item_detail(conn, item_uid)  # 404 before downloading anything
         return custom_images.set_video_image(conn, settings.images_dir, item_uid, download(body.url))
 
     @app.delete("/api/items/{item_uid}/image")
-    def delete_video_image(item_uid: str, conn: sqlite3.Connection = Depends(get_db)):
+    def delete_video_image(item_uid: str, conn: sqlite3.Connection = Db):
         return custom_images.remove_video_image(conn, settings.images_dir, item_uid)
 
     @app.put("/api/libraries/{library_uid}/folder-image")
     async def upload_folder_image(
-        library_uid: str, request: Request, path: str = "", conn: sqlite3.Connection = Depends(get_db)
+        library_uid: str, request: Request, path: str = "", conn: sqlite3.Connection = Db
     ):
         library_id = library_pk(conn, library_uid)
         data = await read_upload(request)
@@ -325,14 +329,14 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
 
     @app.post("/api/libraries/{library_uid}/folder-image-url")
     def folder_image_from_url(
-        library_uid: str, body: ImageUrl, path: str = "", conn: sqlite3.Connection = Depends(get_db)
+        library_uid: str, body: ImageUrl, path: str = "", conn: sqlite3.Connection = Db
     ):
         library_id = library_pk(conn, library_uid)
         browse.browse(conn, library_id, path)  # 404 for an unknown folder before downloading
         return custom_images.set_folder_image(conn, settings.images_dir, library_id, path, download(body.url))
 
     @app.delete("/api/libraries/{library_uid}/folder-image")
-    def delete_folder_image(library_uid: str, path: str = "", conn: sqlite3.Connection = Depends(get_db)):
+    def delete_folder_image(library_uid: str, path: str = "", conn: sqlite3.Connection = Db):
         library_id = library_pk(conn, library_uid)
         return custom_images.remove_folder_image(conn, settings.images_dir, library_id, path)
 
@@ -346,7 +350,7 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
         return row, path
 
     @app.api_route("/api/items/{item_uid}/file", methods=["GET", "HEAD"])
-    def get_item_file(item_uid: str, conn: sqlite3.Connection = Depends(get_db)):
+    def get_item_file(item_uid: str, conn: sqlite3.Connection = Db):
         """The original file, with range requests so the browser can seek."""
         row, path = media_file(conn, item_uid)
         return FileResponse(path, media_type=playback.direct_content_type(row["rel_path"]))
@@ -361,7 +365,7 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
 
     @app.get("/api/items/{item_uid}/plan")
     def get_item_plan(item_uid: str, video: str | None = None, audio: str | None = None,
-                      hls_support: str = "none", conn: sqlite3.Connection = Depends(get_db)):
+                      hls_support: str = "none", conn: sqlite3.Connection = Db):
         """How this browser should play the video.
 
         `video`/`audio` list the codecs it can decode (e.g. video=h264,hevc&audio=aac,ac3);
@@ -471,7 +475,7 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
 
         return StreamingResponse(body(), media_type="video/mp4", headers={"Cache-Control": "no-store"})
 
-    def current_user(conn: sqlite3.Connection = Depends(get_db)) -> dict:
+    def current_user(conn: sqlite3.Connection = Db) -> dict:
         """Who's asking. Until there's login, always the built-in local user."""
         return users.local_user(conn)
 
@@ -480,7 +484,7 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
         return {"id": user["uid"], "name": user["name"]}
 
     @app.get("/api/health")
-    def health(conn: sqlite3.Connection = Depends(get_db)):
+    def health(conn: sqlite3.Connection = Db):
         """For Docker's health check: the database answers and ffmpeg is present."""
         conn.execute("SELECT 1").fetchone()
         return {"ok": True, "ffmpeg": ffmpeg_version()}
@@ -490,22 +494,22 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
         return libraries.list_subfolders(settings.media_root, path)
 
     @app.get("/api/libraries")
-    def list_all(conn: sqlite3.Connection = Depends(get_db)):
+    def list_all(conn: sqlite3.Connection = Db):
         return [library_out(row) for row in libraries.list_libraries(conn)]
 
     @app.post("/api/libraries", status_code=201)
-    def create(body: LibraryCreate, conn: sqlite3.Connection = Depends(get_db)):
+    def create(body: LibraryCreate, conn: sqlite3.Connection = Db):
         library_id = libraries.create_library(conn, settings.media_root, body.name, body.path)
         return one_library(conn, library_id)
 
     @app.patch("/api/libraries/{library_uid}")
-    def rename(library_uid: str, body: LibraryRename, conn: sqlite3.Connection = Depends(get_db)):
+    def rename(library_uid: str, body: LibraryRename, conn: sqlite3.Connection = Db):
         library_id = library_pk(conn, library_uid)
         libraries.rename_library(conn, library_id, body.name)
         return one_library(conn, library_id)
 
     @app.delete("/api/libraries/{library_uid}", status_code=204)
-    def delete(library_uid: str, conn: sqlite3.Connection = Depends(get_db)):
+    def delete(library_uid: str, conn: sqlite3.Connection = Db):
         library_id = library_pk(conn, library_uid)
         if scans.is_busy(library_id):
             raise HTTPException(409, "Wait for the scan to finish before removing this library.")
@@ -515,11 +519,11 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
         return Response(status_code=204)
 
     @app.post("/api/libraries/scan", status_code=202)
-    def scan_all(conn: sqlite3.Connection = Depends(get_db)):
+    def scan_all(conn: sqlite3.Connection = Db):
         return {row["uid"]: scans.request(row["id"]) for row in libraries.list_libraries(conn)}
 
     @app.post("/api/libraries/{library_uid}/scan", status_code=202)
-    def scan_one(library_uid: str, conn: sqlite3.Connection = Depends(get_db)):
+    def scan_one(library_uid: str, conn: sqlite3.Connection = Db):
         return scans.request(library_pk(conn, library_uid))
 
     app.mount("/", AppFiles(directory=STATIC_DIR, html=True), name="static")

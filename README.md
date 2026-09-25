@@ -540,7 +540,7 @@ changes how thumbnails are made.
 ### Tests
 
 ```sh
-uv run pytest              # backend: 444 tests
+uv run pytest              # backend: 449 tests
 node --test tests/js/      # frontend: 26 tests
 scripts/docker-smoke.sh    # builds the image and checks it end to end (needs Docker)
 ```
