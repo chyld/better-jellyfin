@@ -5,6 +5,7 @@ import subprocess
 from collections.abc import Iterator
 from contextlib import asynccontextmanager
 from functools import partial
+from urllib.parse import urlencode
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
@@ -15,6 +16,7 @@ from pydantic import BaseModel
 
 from . import browse, custom_images, fetch, libraries, playback, tags, users
 from .paths import OutsideRoot, resolve_inside
+from .plan import Capabilities, plan as make_plan
 from .config import Settings
 from .db import connect, init_db
 from .images import MAX_UPLOAD_BYTES, Thumbnailer, ThumbnailError
@@ -349,18 +351,44 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
         finally:
             conn.close()
 
+    @app.get("/api/items/{item_uid}/plan")
+    def get_item_plan(item_uid: str, video: str | None = None, audio: str | None = None,
+                      conn: sqlite3.Connection = Depends(get_db)):
+        """How this browser should play the video: `video`/`audio` list the codecs
+        it can decode (e.g. video=h264,hevc&audio=aac,ac3). Returns the mode and
+        the URL to load (streams take a `start` parameter on top)."""
+        row = conn.execute("SELECT * FROM media_items WHERE uid = ?", (item_uid,)).fetchone()
+        if row is None:
+            raise HTTPException(404, "Video not found.")
+        caps = Capabilities.from_query(video, audio)
+        p = make_plan(row, caps)
+        if p.mode == "unsupported":
+            url = None
+        elif p.streamed:
+            url = f"/api/items/{item_uid}/stream?" + urlencode({"video": ",".join(sorted(caps.video)),
+                                                                 "audio": ",".join(sorted(caps.audio))})
+        else:
+            url = f"/api/items/{item_uid}/file"
+        return {"mode": p.mode, "video": p.video, "audio": p.audio, "streamed": p.streamed, "url": url}
+
     @app.get("/api/items/{item_uid}/stream")
-    async def get_item_stream(item_uid: str, start: float = 0):
-        """A fragmented MP4 made by ffmpeg, starting `start` seconds in."""
+    async def get_item_stream(item_uid: str, start: float = 0, video: str | None = None, audio: str | None = None):
+        """A fragmented MP4 made by ffmpeg, starting `start` seconds in. `video` and
+        `audio` are the browser's codecs (as for /plan); each track is copied if
+        the browser can play it, and converted otherwise."""
         # The database and the NAS can be slow: keep them off the event loop.
         row, path = await run_in_threadpool(stream_source, item_uid)
-        if row["play_mode"] == "unsupported":
+        p = make_plan(row, Capabilities.from_query(video, audio))
+        if p.mode == "unsupported":
             raise HTTPException(409, "This video can't be played.")
+        if not p.streamed:
+            # The browser could play the file itself; stream it as a straight copy anyway.
+            p = type(p)("remux", video="copy", audio=None if row["audio_codec"] is None else "copy")
         if start < 0 or (row["duration"] and start >= row["duration"]):
             raise HTTPException(416, "Start time is outside the video.")
         cmd = playback.stream_command(
             path,
-            "transcode" if row["play_mode"] == "transcode" else "remux",
+            p,
             start=start,
             interlaced=bool(row["interlaced"]),
             height=row["height"],

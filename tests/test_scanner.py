@@ -5,6 +5,7 @@ import shutil
 import pytest
 
 from reel.libraries import create_library
+from reel.plan import plan
 from reel.scanner import ScanError, scan_library
 
 from conftest import make_files
@@ -86,7 +87,7 @@ def test_scan_records_folder_art(conn, library, fake_probe):
 def test_scan_stores_probe_details_and_play_mode(conn, library, fake_probe):
     scan_library(conn, library, probe_fn=fake_probe)
     found = items(conn, library)
-    modes = {path: row["play_mode"] for path, row in found.items()}
+    modes = {path: plan(row).mode for path, row in found.items()}
     assert modes["Personal/Lectures/session14-01-2022.mp4"] == "direct"
     assert modes["Personal/Tapes/interview.mov"] == "direct"
     assert modes["Films/Collection/Classics/0370/movie.mkv"] == "remux"
@@ -182,7 +183,7 @@ def test_unreadable_file_is_kept_and_retried_next_scan(conn, library, fake_probe
     result = scan_library(conn, library, probe_fn=fake_probe)
     assert result["failed"] == 1
     row = items(conn, library)["Personal/Camcorder/clip01.avi"]
-    assert row["play_mode"] == "unsupported"
+    assert plan(row).mode == "unsupported"
     assert "Invalid data" in row["probe_error"]
 
     # Once the file reads fine, the next scan fixes it up.
@@ -191,7 +192,7 @@ def test_unreadable_file_is_kept_and_retried_next_scan(conn, library, fake_probe
     result = scan_library(conn, library, probe_fn=fake_probe)
     assert [p.name for p in fake_probe.calls] == ["clip01.avi"]
     row = items(conn, library)["Personal/Camcorder/clip01.avi"]
-    assert (row["play_mode"], row["probe_error"]) == ("transcode", None)
+    assert (plan(row).mode, row["probe_error"]) == ("transcode", None)
     assert result["failed"] == 0
 
 

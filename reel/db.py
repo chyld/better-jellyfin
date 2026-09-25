@@ -166,11 +166,18 @@ def _v4_tag_order(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX item_tags_order ON item_tags (tag_id, added_at)")
 
 
+def _v5_no_stored_play_mode(conn: sqlite3.Connection) -> None:
+    # How to play a video is decided when Play is pressed (plan.py), from the
+    # stored facts and the viewer's browser, so it's no longer stored.
+    conn.execute("ALTER TABLE media_items DROP COLUMN play_mode")
+
+
 # (version, what it does, function). Append only; functions must not commit.
 MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (2, "fingerprints and probe versions for media items", _v2_identity),
     (3, "users, starting with the built-in local user", _v3_users),
     (4, "explicit order for a tag's videos", _v4_tag_order),
+    (5, "stop storing the play mode; it's decided at play time", _v5_no_stored_play_mode),
 ]
 
 

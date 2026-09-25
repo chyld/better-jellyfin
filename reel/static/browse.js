@@ -1,6 +1,7 @@
 // Home (library tiles), folder browsing and the video details page.
 import { api, artBox, encodePath, fill, formatDuration, formatSize, h, parseTags, plural, tagError } from "./api.js";
 import { openImageDialog } from "./imagedialog.js";
+import { capabilities, capsQuery } from "./caps.js";
 
 const SORT_KEY = "reel.sort";
 
@@ -382,6 +383,7 @@ export async function renderBrowse(view, libraryId, path) {
 const PLAY_MODES = {
   direct: ["ok", "Direct play", "Plays directly in the browser"],
   remux: ["ok", "Quick repackage", "Repackaged on the fly, with no quality loss"],
+  audio: ["ok", "Audio converted", "The video plays as is; only the audio is converted"],
   transcode: ["warn", "Converted live", "Converted by the server while it plays"],
   unsupported: ["err", "Can't play", "This video can't be played"],
 };
@@ -405,7 +407,13 @@ function codecLabel(codec) {
 }
 
 export async function renderItem(view, itemId) {
-  const item = await api("GET", `/api/items/${itemId}`);
+  const caps = await capabilities();
+  const [item, plan] = await Promise.all([
+    api("GET", `/api/items/${itemId}`),
+    api("GET", `/api/items/${itemId}/plan?${capsQuery(caps)}`),
+  ]);
+  // The mode for this browser (it may play more than a typical one, e.g. HEVC).
+  item.play_mode = plan.mode;
   const [tone, modeLabel, modeText] = PLAY_MODES[item.play_mode] || ["err", item.play_mode, item.play_mode];
   const image = videoImageSrc(item);
   const pills = [

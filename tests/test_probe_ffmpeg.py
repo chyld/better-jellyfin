@@ -3,7 +3,8 @@ import shutil
 import pytest
 
 from reel.libraries import create_library
-from reel.probe import ProbeError, classify, probe
+from reel.plan import plan
+from reel.probe import ProbeError, probe
 from reel.scanner import scan_library
 
 from conftest import requires_ffmpeg
@@ -18,7 +19,7 @@ pytestmark = [requires_ffmpeg, pytest.mark.ffmpeg]
         ("silent.mp4", "h264", None, "direct"),
         ("vp9_opus.webm", "vp9", "opus", "direct"),
         ("h264_aac.mkv", "h264", "aac", "remux"),
-        ("h264_ac3.mkv", "h264", "ac3", "transcode"),
+        ("h264_ac3.mkv", "h264", "ac3", "audio"),       # only the audio needs converting
         ("h264_10bit.mp4", "h264", "aac", "transcode"),
         ("hevc.mp4", "hevc", "aac", "transcode"),
         ("xvid_mp3.avi", "mpeg4", "mp3", "transcode"),
@@ -33,7 +34,9 @@ def test_probe_real_clip(clips, name, video, audio, mode):
     assert (result.video_codec, result.audio_codec) == (video, audio)
     assert (result.width, result.height) == (320, 240)
     assert result.duration == pytest.approx(1.0, abs=0.15)
-    assert classify(result, (clips / name).suffix) == mode
+    facts = {"container": result.container, "video_codec": result.video_codec, "audio_codec": result.audio_codec,
+             "pix_fmt": result.pix_fmt, "interlaced": result.interlaced, "probe_error": result.error, "rel_path": name}
+    assert plan(facts).mode == mode
 
 
 def test_probe_detects_interlacing(clips):
@@ -54,7 +57,7 @@ def test_full_scan_with_real_ffprobe(conn, media_root, clips):
     assert result["total"] == len(list(clips.iterdir()))
     assert result["failed"] == 1  # corrupt.mp4
     assert result["total"] == 13
-    modes = dict(conn.execute("SELECT rel_path, play_mode FROM media_items").fetchall())
+    modes = {r["rel_path"]: plan(r).mode for r in conn.execute("SELECT * FROM media_items")}
     assert modes["h264_aac.mp4"] == "direct"
     assert modes["h264_aac.mkv"] == "remux"
     assert modes["vhs_interlaced.mpg"] == "transcode"

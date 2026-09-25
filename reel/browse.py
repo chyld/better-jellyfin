@@ -6,6 +6,8 @@ import re
 import sqlite3
 from pathlib import PurePosixPath
 
+from .plan import plan
+
 SORTS = ("name", "year")
 
 
@@ -34,7 +36,8 @@ def item_out(row: sqlite3.Row) -> dict:
         "duration": row["duration"],
         "width": row["width"],
         "height": row["height"],
-        "play_mode": row["play_mode"],
+        # For a typical browser; the player asks /plan with its real capabilities.
+        "play_mode": plan(row).mode,
         "has_poster": row["poster_path"] is not None,  # an image on the NAS
         "custom_image": row["custom_image"],            # version of an uploaded one, if any
     }

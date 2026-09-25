@@ -11,7 +11,7 @@ from pathlib import Path
 
 from .db import new_uid
 from .paths import is_inside
-from .probe import PROBE_VERSION, ProbeError, ProbeResult, classify, probe as ffprobe
+from .probe import PROBE_VERSION, ProbeError, ProbeResult, probe as ffprobe
 
 VIDEO_EXTENSIONS = {
     "mp4", "m4v", "mov", "mkv", "webm", "avi", "wmv", "asf", "mpg", "mpeg",
@@ -346,14 +346,13 @@ def scan_library(
     added = updated = failed = 0
     with pool:
         for video, result, fp in pool.map(examine, to_probe):
-            mode = classify(result, Path(video.rel_path).suffix)
             conn.execute(
                 """
                 INSERT INTO media_items (
                     uid, library_id, rel_path, title, year, poster_path, size, mtime,
                     container, video_codec, audio_codec, pix_fmt, width, height,
-                    duration, interlaced, play_mode, probe_error, fingerprint, probe_version, scanned_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                    duration, interlaced, probe_error, fingerprint, probe_version, scanned_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
                 ON CONFLICT (library_id, rel_path) DO UPDATE SET
                     title = excluded.title, year = excluded.year,
                     poster_path = excluded.poster_path, size = excluded.size,
@@ -361,7 +360,7 @@ def scan_library(
                     video_codec = excluded.video_codec, audio_codec = excluded.audio_codec,
                     pix_fmt = excluded.pix_fmt, width = excluded.width,
                     height = excluded.height, duration = excluded.duration,
-                    interlaced = excluded.interlaced, play_mode = excluded.play_mode,
+                    interlaced = excluded.interlaced,
                     probe_error = excluded.probe_error, scanned_at = excluded.scanned_at,
                     fingerprint = excluded.fingerprint, probe_version = excluded.probe_version,
                     missing_since = NULL
@@ -370,7 +369,7 @@ def scan_library(
                     new_uid(), library_id, video.rel_path, video.title, video.year, video.poster_path,
                     video.size, video.mtime, result.container, result.video_codec,
                     result.audio_codec, result.pix_fmt, result.width, result.height,
-                    result.duration, int(result.interlaced), mode, result.error,
+                    result.duration, int(result.interlaced), result.error,
                     fp, PROBE_VERSION,
                 ),
             )

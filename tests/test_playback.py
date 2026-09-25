@@ -10,7 +10,12 @@ from fastapi.testclient import TestClient
 from reel import playback
 from reel.db import init_db
 from reel.main import create_app
+from reel.plan import Plan
 from reel.playback import StreamManager, direct_content_type, stream_command
+
+REMUX = Plan("remux", "copy", "copy")
+CONVERT = Plan("transcode", "encode", "encode")
+AUDIO_ONLY = Plan("audio", "copy", "encode")
 from reel.probe import probe
 from reel.scan_manager import ScanManager
 from reel.scanner import scan_library
@@ -20,22 +25,48 @@ from conftest import requires_ffmpeg
 # ---- ffmpeg commands (no ffmpeg needed) ---------------------------------------
 
 
+def test_audio_only_conversion_copies_the_video():
+    cmd = stream_command(Path("/m/a.mkv"), AUDIO_ONLY, audio_codec="ac3")
+    assert cmd[cmd.index("-c:v") + 1] == "copy"
+    assert cmd[cmd.index("-c:a") + 1] == "aac"
+    assert "libx264" not in cmd and "-vf" not in cmd
+
+
+def test_converted_video_keeps_compatible_audio():
+    cmd = stream_command(Path("/m/a.avi"), Plan("transcode", "encode", "copy"), audio_codec="mp3")
+    assert cmd[cmd.index("-c:v") + 1] == "libx264"
+    assert cmd[cmd.index("-c:a") + 1] == "copy"
+
+
+@pytest.mark.parametrize("codec", ["ac3", "eac3"])
+def test_copied_ac3_delays_the_header(codec):
+    """Without delay_moov ffmpeg refuses to copy (E-)AC-3 into a streamed MP4."""
+    cmd = stream_command(Path("/m/a.mkv"), REMUX, audio_codec=codec)
+    assert "frag_keyframe+empty_moov+default_base_moof+delay_moov" in cmd
+    assert "delay_moov" not in " ".join(stream_command(Path("/m/a.mkv"), REMUX, audio_codec="aac"))
+
+
+def test_no_audio_track():
+    cmd = stream_command(Path("/m/a.mkv"), Plan("remux", "copy", None))
+    assert "-c:a" not in cmd
+
+
 def test_remux_copies_streams():
-    cmd = stream_command(Path("/m/a.mkv"), "remux")
-    assert cmd[cmd.index("-c") + 1] == "copy"
+    cmd = stream_command(Path("/m/a.mkv"), REMUX)
+    assert cmd[cmd.index("-c:v") + 1] == "copy" and cmd[cmd.index("-c:a") + 1] == "copy"
     assert "libx264" not in cmd
     assert "-ss" not in cmd
     assert cmd[-1] == "pipe:1" and "frag_keyframe+empty_moov+default_base_moof" in cmd
 
 
 def test_seek_goes_before_input():
-    cmd = stream_command(Path("/m/a.mkv"), "remux", start=62.5)
+    cmd = stream_command(Path("/m/a.mkv"), REMUX, start=62.5)
     assert cmd.index("-ss") < cmd.index("-i")
     assert cmd[cmd.index("-ss") + 1] == "62.500"
 
 
 def test_transcode_to_browser_friendly_h264():
-    cmd = stream_command(Path("/m/a.avi"), "transcode")
+    cmd = stream_command(Path("/m/a.avi"), CONVERT)
     assert cmd[cmd.index("-c:v") + 1] == "libx264"
     assert cmd[cmd.index("-c:a") + 1] == "aac"
     assert cmd[cmd.index("-pix_fmt") + 1] == "yuv420p"
@@ -43,31 +74,31 @@ def test_transcode_to_browser_friendly_h264():
 
 
 def test_transcode_deinterlaces_and_caps_height():
-    vf = (lambda c: c[c.index("-vf") + 1])(stream_command(Path("/m/a.mpg"), "transcode", interlaced=True, height=2160))
+    vf = (lambda c: c[c.index("-vf") + 1])(stream_command(Path("/m/a.mpg"), CONVERT, interlaced=True, height=2160))
     assert vf.startswith("bwdif")
     assert "scale=-2:1080" in vf
-    assert "scale=-2:1080" not in (lambda c: c[c.index("-vf") + 1])(stream_command(Path("/m/a"), "transcode", height=1080))
+    assert "scale=-2:1080" not in (lambda c: c[c.index("-vf") + 1])(stream_command(Path("/m/a"), CONVERT, height=1080))
 
 
 def test_audio_is_optional():
-    assert "0:a:0?" in stream_command(Path("/m/a.mp4"), "remux")
+    assert "0:a:0?" in stream_command(Path("/m/a.mp4"), REMUX)
 
 
 def test_cover_art_is_never_the_video():
-    cmd = stream_command(Path("/m/a.wmv"), "transcode")
+    cmd = stream_command(Path("/m/a.wmv"), CONVERT)
     assert cmd[cmd.index("-map") + 1] == "0:V:0"
 
 
 def test_remuxed_aac_is_converted_from_adts():
-    assert "aac_adtstoasc" in stream_command(Path("/m/a.mp4"), "remux", audio_codec="aac")
+    assert "aac_adtstoasc" in stream_command(Path("/m/a.mp4"), REMUX, audio_codec="aac")
     # The filter only accepts AAC; other audio is copied untouched.
-    assert "aac_adtstoasc" not in stream_command(Path("/m/a.mp4"), "remux", audio_codec="mp3")
-    assert "aac_adtstoasc" not in stream_command(Path("/m/a.mp4"), "remux", audio_codec=None)
+    assert "aac_adtstoasc" not in stream_command(Path("/m/a.mp4"), REMUX, audio_codec="mp3")
+    assert "aac_adtstoasc" not in stream_command(Path("/m/a.mp4"), REMUX, audio_codec=None)
 
 
 def test_bad_mode():
     with pytest.raises(ValueError):
-        stream_command(Path("/m/a.mp4"), "direct")
+        stream_command(Path("/m/a.mp4"), Plan("direct"))
 
 
 @pytest.mark.parametrize(
@@ -140,7 +171,7 @@ def test_direct_file_supports_ranges(client, items, media_root):
         ("h264_aac.mkv", "h264", "aac"),         # remux: codecs copied
         ("transport_stream.mp4", "h264", "aac"), # remux of MPEG-TS with ADTS audio
         ("cover_first.mp4", "h264", "aac"),      # the real video, not the cover image
-        ("xvid_mp3.avi", "h264", "aac"),         # transcode
+        ("xvid_mp3.avi", "h264", "mp3"),         # video converted; MP3 audio copied as is
         ("wmv.wmv", "h264", "aac"),
         ("h264_ac3.mkv", "h264", "aac"),
         ("hevc.mp4", "h264", "aac"),
@@ -264,7 +295,7 @@ def test_ffmpeg_is_killed_when_the_viewer_leaves():
 
 @requires_ffmpeg
 def test_ffmpeg_stream_finishes_normally(clips):
-    cmd = stream_command(clips / "h264_aac.mkv", "remux")
+    cmd = stream_command(clips / "h264_aac.mkv", REMUX)
     manager = StreamManager()
 
     async def read_all():
@@ -272,3 +303,61 @@ def test_ffmpeg_stream_finishes_normally(clips):
 
     assert len(asyncio.run(read_all())) > 1000
     assert manager.active == set()
+
+
+# ---- Plans through the API ---------------------------------------------------------------
+
+
+def video_packets(path):
+    return subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "packet=size", "-of", "csv=p=0",
+         str(path)], capture_output=True, text=True, check=True,
+    ).stdout.split()
+
+
+@requires_ffmpeg
+def test_audio_only_conversion_leaves_the_video_untouched(client, items, media_root, tmp_path):
+    """H.264 + AC-3 in MKV: the video is copied packet for packet, the audio becomes AAC."""
+    plan = client.get(f"/api/items/{items['h264_ac3.mkv']}/plan").json()
+    assert (plan["mode"], plan["video"], plan["audio"]) == ("audio", "copy", "encode")
+    res = client.get(plan["url"] + "&start=0")
+    out = tmp_path / "out.mp4"
+    out.write_bytes(res.content)
+    assert ffprobe_bytes(res.content, tmp_path)["audio"] == "aac"
+    assert video_packets(out) == video_packets(media_root / "clips/h264_ac3.mkv")
+
+
+@requires_ffmpeg
+def test_browser_that_plays_ac3_gets_it_copied(client, items, tmp_path):
+    plan = client.get(f"/api/items/{items['h264_ac3.mkv']}/plan", params={"audio": "aac,ac3"}).json()
+    assert (plan["mode"], plan["audio"]) == ("remux", "copy")
+    assert "ac3" in plan["url"]  # the stream URL carries the capabilities
+    out = ffprobe_bytes(client.get(plan["url"]).content, tmp_path)
+    assert (out["video"], out["audio"]) == ("h264", "ac3")
+
+
+@requires_ffmpeg
+def test_hevc_depends_on_the_browser(client, items):
+    typical = client.get(f"/api/items/{items['hevc.mp4']}/plan").json()
+    assert typical["mode"] == "transcode" and typical["url"].startswith(f"/api/items/{items['hevc.mp4']}/stream?")
+    capable = client.get(f"/api/items/{items['hevc.mp4']}/plan", params={"video": "h264,hevc"}).json()
+    assert capable == {"mode": "direct", "video": None, "audio": None, "streamed": False,
+                       "url": f"/api/items/{items['hevc.mp4']}/file"}
+
+
+@requires_ffmpeg
+def test_plan_for_unplayable_and_unknown(client, items):
+    assert client.get(f"/api/items/{items['corrupt.mp4']}/plan").json()["url"] is None
+    assert client.get("/api/items/nope/plan").status_code == 404
+
+
+@requires_ffmpeg
+def test_listing_shows_the_mode_for_a_typical_browser(client, items):
+    detail = client.get(f"/api/items/{items['h264_ac3.mkv']}").json()
+    assert detail["play_mode"] == "audio"
+
+
+@requires_ffmpeg
+def test_direct_file_can_still_be_streamed_as_a_copy(client, items, tmp_path):
+    out = ffprobe_bytes(client.get(f"/api/items/{items['h264_aac.mp4']}/stream").content, tmp_path)
+    assert (out["video"], out["audio"]) == ("h264", "aac")

@@ -4,8 +4,10 @@
 // that starts at `offset` seconds, so seeking loads a new stream from the new
 // time, and the player's clock is offset + the <video> element's own clock.
 import { api, formatDuration, h } from "./api.js";
+import { capabilities, capsQuery } from "./caps.js";
 
 const HIDE_CONTROLS_AFTER = 3000;
+const BADGES = { remux: "Repackaging", audio: "Converting audio", transcode: "Converting" };
 const SKIP_SECONDS = 10; // arrow keys
 const JUMP_SECONDS = 60; // the 1-minute buttons, and Shift + arrow keys
 
@@ -43,10 +45,15 @@ function iconButton(name, label, shortcut, extraClass = "") {
 }
 
 export async function renderPlayer(page, itemId) {
-  const item = await api("GET", `/api/items/${itemId}`);
-  if (item.play_mode === "unsupported") throw new Error("This video can't be played.");
+  // Ask the server how *this* browser should play it (see plan.py).
+  const caps = await capabilities();
+  const [item, plan] = await Promise.all([
+    api("GET", `/api/items/${itemId}`),
+    api("GET", `/api/items/${itemId}/plan?${capsQuery(caps)}`),
+  ]);
+  if (plan.mode === "unsupported" || item.missing) throw new Error("This video can't be played.");
 
-  const streamed = item.play_mode !== "direct";
+  const streamed = plan.streamed;
   let offset = 0;
   let dragTime = null; // while dragging the seek bar: where it would seek to
   let hideTimer = null;
@@ -101,8 +108,7 @@ export async function renderPlayer(page, itemId) {
       "div",
       { class: "player-heading" },
       h("span", { class: "player-title" }, item.title),
-      streamed &&
-        h("span", { class: "badge" }, h("i", { class: "pulse" }), item.play_mode === "transcode" ? "Converting" : "Repackaging"),
+      streamed && h("span", { class: "badge" }, h("i", { class: "pulse" }), BADGES[plan.mode] || "Converting"),
     ),
   );
   const player = h("div", { class: "player" }, video, h("div", { class: "scrim" }), flash, spinner, message, top, dock);
@@ -115,9 +121,7 @@ export async function renderPlayer(page, itemId) {
 
   function load(start) {
     offset = streamed ? start : 0;
-    video.src = streamed
-      ? `/api/items/${item.id}/stream?start=${start.toFixed(1)}`
-      : `/api/items/${item.id}/file${start ? `#t=${start}` : ""}`;
+    video.src = streamed ? `${plan.url}&start=${start.toFixed(1)}` : `${plan.url}${start ? `#t=${start}` : ""}`;
     video.play().catch(() => {}); // autoplay may be blocked until the user clicks
   }
 

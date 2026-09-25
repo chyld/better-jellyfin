@@ -16,6 +16,8 @@ from pathlib import Path
 
 import anyio
 
+from .plan import Plan
+
 log = logging.getLogger(__name__)
 
 CHUNK_SIZE = 64 * 1024
@@ -42,14 +44,17 @@ def direct_content_type(path: str) -> str:
 
 def stream_command(
     src: Path,
-    mode: str,
+    plan: Plan,
     *,
     start: float = 0,
     interlaced: bool = False,
     height: int | None = None,
     audio_codec: str | None = None,
 ) -> list[str]:
-    """The ffmpeg command that streams `src` from `start` seconds."""
+    """The ffmpeg command that streams `src` from `start` seconds, following `plan`:
+    the video and the audio are each copied untouched or converted."""
+    if not plan.streamed:
+        raise ValueError(f"a {plan.mode!r} plan isn't streamed")
     cmd = ["ffmpeg", "-v", "error", "-nostdin"]
     if start > 0:
         # Before -i: a fast seek that jumps straight to the nearest keyframe.
@@ -57,31 +62,36 @@ def stream_command(
     # "V" (capital) skips cover art, which some files store as their first video stream.
     cmd += ["-i", str(src), "-map", "0:V:0", "-map", "0:a:0?", "-sn", "-dn"]
 
-    if mode == "remux":
-        cmd += ["-c", "copy"]
+    if plan.video == "copy":
+        cmd += ["-c:v", "copy"]
+    else:
+        filters = []
+        if interlaced:
+            filters.append("bwdif=mode=send_frame")
+        if height and height > 1080:
+            filters.append("scale=-2:1080")
+        # H.264 in 4:2:0 needs even dimensions; old codecs sometimes have odd ones.
+        filters.append("scale=trunc(iw/2)*2:trunc(ih/2)*2")
+        cmd += [
+            "-vf", ",".join(filters),
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "21",
+            "-pix_fmt", "yuv420p", "-profile:v", "high",
+            # A keyframe every 2 seconds keeps fragments small, so playback starts fast.
+            "-force_key_frames", "expr:gte(t,n_forced*2)",
+        ]
+
+    output = FMP4_OUTPUT
+    if plan.audio == "copy":
+        cmd += ["-c:a", "copy"]
         if audio_codec == "aac":
             # AAC from MPEG-TS files is in ADTS framing, which MP4 can't hold as-is.
             cmd += ["-bsf:a", "aac_adtstoasc"]
-        return cmd + FMP4_OUTPUT
-    if mode != "transcode":
-        raise ValueError(f"can't stream in mode {mode!r}")
-
-    filters = []
-    if interlaced:
-        filters.append("bwdif=mode=send_frame")
-    if height and height > 1080:
-        filters.append("scale=-2:1080")
-    # H.264 in 4:2:0 needs even dimensions; old codecs sometimes have odd ones.
-    filters.append("scale=trunc(iw/2)*2:trunc(ih/2)*2")
-    return cmd + [
-        "-vf", ",".join(filters),
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "21",
-        "-pix_fmt", "yuv420p", "-profile:v", "high",
-        # A keyframe every 2 seconds keeps fragments small, so playback starts fast.
-        "-force_key_frames", "expr:gte(t,n_forced*2)",
-        "-c:a", "aac", "-b:a", "160k", "-ac", "2",
-        *FMP4_OUTPUT,
-    ]
+        if audio_codec in ("ac3", "eac3"):
+            # ffmpeg needs the first (E-)AC-3 packet before it can write the MP4 header.
+            output = [x + "+delay_moov" if x.startswith("frag_keyframe") else x for x in FMP4_OUTPUT]
+    elif plan.audio == "encode":
+        cmd += ["-c:a", "aac", "-b:a", "160k", "-ac", "2"]
+    return cmd + output
 
 
 class StreamBusy(Exception):

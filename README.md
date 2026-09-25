@@ -254,23 +254,33 @@ the database, so **browsing never touches the NAS**.
 
 ### Playback
 
-When a video is scanned, it gets one of four play modes:
+The scanner stores **facts** about each file: container, codecs, pixel format, interlacing.
+**How to play it is decided when you press Play** (`reel/plan.py`), from those facts and from what
+*your* browser says it can decode. The browser is asked once per page load
+(`MediaCapabilities.decodingInfo()`, falling back to `canPlayType()`). Rules can therefore change
+without a rescan, and a browser that plays more (HEVC on Safari, AC-3 on Edge) gets less
+conversion. **Video and audio are decided separately:**
 
 | Mode | When | How it's sent |
 |---|---|---|
-| **direct** | MP4/MOV/M4V with H.264 (8-bit 4:2:0), VP9 or AV1 video, AAC/MP3/Opus/Vorbis/FLAC or no audio, not interlaced; or WebM with VP8/VP9/AV1 | The original file, with HTTP range requests, so the browser seeks natively. |
-| **remux** | Browser-ready codecs in the wrong container, e.g. MKV, or MPEG-TS saved as `.mp4` | ffmpeg copies the streams unchanged into a fragmented MP4, streamed as it's made. No quality loss, very little CPU. |
-| **transcode** | Anything else: Xvid/DivX, MPEG-1/2, WMV/VC-1, MJPEG, Cinepak, Sorenson, HEVC, 10-bit H.264, AC-3/DTS/ADPCM/WMA audio, interlaced video | ffmpeg converts to H.264 (veryfast, CRF 21) and AAC stereo 160 kb/s in a fragmented MP4, streamed as it's made. |
+| **direct** | MP4/MOV/M4V (or WebM) whose video and audio the browser plays: H.264 (8-bit 4:2:0), VP9, AV1, and HEVC if the browser says so; AAC, MP3, Opus, Vorbis, FLAC, and AC-3/E-AC-3 if the browser says so. Not interlaced. | The original file, with HTTP range requests, so the browser seeks natively. |
+| **remux** | Playable tracks in the wrong container, e.g. MKV, or MPEG-TS saved as `.mp4` | ffmpeg copies both tracks unchanged into a fragmented MP4, streamed as it's made. No quality loss, very little CPU. |
+| **audio** | The video plays but the audio doesn't, e.g. H.264 with AC-3, DTS or Vorbis in an MKV | The video is **copied untouched**; only the audio is converted (AAC stereo 160 kb/s). |
+| **transcode** | Video the browser can't play: Xvid/DivX, MPEG-1/2, WMV/VC-1, MJPEG, Cinepak, Sorenson, HEVC (unless the browser plays it), 10-bit H.264, interlaced video | ffmpeg converts the video to H.264 (veryfast, CRF 21); the audio is copied when the browser plays it (e.g. MP3), otherwise converted. |
 | **unsupported** | ffprobe couldn't read it, or there's no video stream | Not playable; the Play button is disabled. |
 
+The video page shows the mode for your browser, and the player shows a **CONVERTING**,
+**CONVERTING AUDIO** or **REPACKAGING** badge.
+
 Details:
-- **HEVC is always converted.** Whether a browser can play it depends on the viewer's
-  hardware, so Reel doesn't risk it.
+- **HEVC** is converted unless the browser reports it can decode it (which depends on its
+  hardware); then it's played or copied as is.
 - **Converting** deinterlaces when the file is flagged interlaced (`bwdif`), scales anything
   taller than 1080p down to 1080p, and rounds odd frame sizes to even. A keyframe every 2
   seconds keeps start-up fast.
-- **Remuxing** AAC applies `aac_adtstoasc`, because AAC from MPEG-TS uses ADTS framing, which
-  MP4 can't hold as-is.
+- **Copying** AAC applies `aac_adtstoasc`, because AAC from MPEG-TS uses ADTS framing, which
+  MP4 can't hold as-is; copying AC-3/E-AC-3 adds `delay_moov`, without which ffmpeg can't
+  write the streamed MP4's header.
 - **Cover art** stored as a video stream (as in some WMV files) is skipped (`-map 0:V:0`), so
   the real video plays.
 - **Seeking** in remuxed and converted videos: a live stream has no byte ranges, so seeking
@@ -455,7 +465,8 @@ JSON over HTTP. Every ID is a UUID. There's no authentication yet (see
 | GET | `/api/items/{id}` | Details: codecs, size, path, breadcrumbs, tags. |
 | GET | `/api/items/{id}/thumb` | The video's picture (landscape JPEG). |
 | GET, HEAD | `/api/items/{id}/file` | The original file, with range requests (direct play). |
-| GET | `/api/items/{id}/stream?start=` | A remuxed or converted fragmented MP4 from `start` seconds. |
+| GET | `/api/items/{id}/plan?video=&audio=` | How this browser should play it: `video`/`audio` list the codecs it decodes (e.g. `video=h264,hevc&audio=aac,ac3`). Returns the mode, what happens to each track, and the URL to load. |
+| GET | `/api/items/{id}/stream?start=&video=&audio=` | A fragmented MP4 from `start` seconds, each track copied or converted per the plan for those codecs. |
 | PUT | `/api/items/{id}/image` | Upload a picture (request body = the image). |
 | POST | `/api/items/{id}/image-url` | `{url}`: set a picture from a URL. |
 | DELETE | `/api/items/{id}/image` | Remove the uploaded picture. |
@@ -503,8 +514,8 @@ changes how thumbnails are made.
 ### Tests
 
 ```sh
-uv run pytest              # backend: 397 tests
-node --test tests/js/      # frontend helpers: 18 tests
+uv run pytest              # backend: 417 tests
+node --test tests/js/      # frontend: 21 tests
 scripts/docker-smoke.sh    # builds the image and checks it end to end (needs Docker)
 ```
 
@@ -538,7 +549,8 @@ reel/
   libraries.py       adding/renaming/removing libraries; folder picker
   scanner.py         walking folders; titles; matching pictures; incremental scans
   scan_manager.py    background scan queue with progress
-  probe.py           ffprobe wrapper; deciding the play mode
+  probe.py           ffprobe wrapper (facts only)
+  plan.py            deciding how to play a video for a given browser
   playback.py        ffmpeg commands for remux/convert; streaming and killing ffmpeg
   images.py          shrinking/cropping thumbnails; processing uploads
   custom_images.py   uploaded images for folders and videos; clean-up
@@ -551,6 +563,7 @@ reel/
     api.js           fetch helper, h() element builder, formatting, tag rules
     browse.js        Home, folders, video page, tag page, tag editor
     player.js        the player
+    caps.js          what this browser can decode
     manage.js        Libraries page, folder picker
     tags.js          Tags page
     imagedialog.js   the shared "photo or URL" dialog
@@ -579,7 +592,6 @@ Dockerfile, compose.yaml, .env.example
 - **No subtitles** yet (neither external `.srt` nor embedded tracks).
 - **No hardware transcoding** yet. Conversion runs on the CPU, which is fine for this library.
   `compose.yaml` notes where a GPU would go.
-- **HEVC** is always converted, even when the viewer's browser could play it.
 - **Tags** are limited to lowercase ASCII letters, digits and dashes, by design.
 - A tag's videos are listed in tagging order (kept explicitly, so it survives a database
   rebuild), with no sort options yet.
@@ -590,15 +602,12 @@ Dockerfile, compose.yaml, .env.example
 
 Ideas and planned features, roughly in order:
 
-1. **Playback decided at Play time:** keep the probed facts, decide direct/remux/convert when
-   Play is pressed (using what the browser can play), and convert only the audio when only the
-   audio is incompatible.
-2. **Delivery strategies behind one player call,** then **HLS** for Safari/iOS and cheaper seeking.
-3. **Faster browsing for big libraries:** query only a folder's direct children, and paginate.
-4. **Sorting** for a tag's videos.
-5. **Subtitles:** external `.srt`/`.vtt` and embedded text tracks, as WebVTT.
-6. **Hardware transcoding** (VAAPI/QSV/NVENC).
-7. An optional background "optimize" pass that converts old formats once into cached MP4s,
+1. **Delivery strategies behind one player call,** then **HLS** for Safari/iOS and cheaper seeking.
+2. **Faster browsing for big libraries:** query only a folder's direct children, and paginate.
+3. **Sorting** for a tag's videos.
+4. **Subtitles:** external `.srt`/`.vtt` and embedded text tracks, as WebVTT.
+5. **Hardware transcoding** (VAAPI/QSV/NVENC).
+6. An optional background "optimize" pass that converts old formats once into cached MP4s,
    for perfect seeking and zero CPU on replay.
 
 Not planned: watch progress / resume (single-user setup).
