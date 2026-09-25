@@ -767,3 +767,37 @@ def test_retiring_a_session_deletes_its_files_off_the_event_loop(tmp_path, monke
 
     assert run(scenario()) is False
     assert threads["rmtree"] != threads["loop"]
+
+
+def test_a_session_reopened_while_the_old_one_is_being_deleted_keeps_its_files(tmp_path, monkeypatch):
+    """Retiring deletes files in a worker thread; a request in that moment opens the
+    same session id again. The deletion must not take the new session's files."""
+    import threading
+
+    m = manager(tmp_path)
+    deleting, finish = threading.Event(), threading.Event()
+    real = hls.shutil.rmtree
+
+    def slow_rmtree(path, **kwargs):
+        deleting.set()
+        finish.wait(5)
+        return real(path, **kwargs)
+
+    monkeypatch.setattr(hls.shutil, "rmtree", slow_rmtree)
+
+    async def scenario():
+        src = facts(path=tmp_path / "x.avi")
+        old = m.get(await m.open("vid", src))
+        retiring = asyncio.create_task(m.retire(old))
+        while not deleting.is_set():
+            await asyncio.sleep(0.01)
+        new = m.get(await m.open("vid", src))             # same id, opened during the delete
+        new.segment(0).write_bytes(b"segment")
+        finish.set()
+        await retiring
+        result = (new.sid == old.sid, new.folder != old.folder, new.segment(0).exists(),
+                  m.get(new.sid) is new, old.folder.exists())
+        await m.shutdown()
+        return result
+
+    assert run(scenario()) == (True, True, True, True, False)

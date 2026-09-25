@@ -234,6 +234,7 @@ class HlsManager:
         self.cache_limit = cache_limit
         self.sessions: dict[str, Session] = {}
         self._runs = itertools.count(1)
+        self._instances = itertools.count(1)
         self._over_limit = False
         self._cache_bytes = 0     # as of the last housekeeping pass
 
@@ -253,7 +254,9 @@ class HlsManager:
                 await self.retire(other)
         session = self.sessions.get(sid)
         if session is None:
-            folder = self.cache_dir / sid
+            # Each session instance has its own folder: a retired one (whose files are
+            # still being deleted) and a new one for the same id never share files.
+            folder = self.cache_dir / f"{sid}-{next(self._instances)}"
             folder.mkdir(parents=True, exist_ok=True)
             self.sessions[sid] = session = Session(sid, item_uid, source, folder)
         elif session.source.path != source.path:
@@ -404,7 +407,9 @@ class HlsManager:
             current = None
         if current != session.source.revision:
             session.retired = True
-            asyncio.create_task(self.retire(session))  # it takes the lock we hold
+            # Retiring takes the session's lock, which we hold: it runs once we've
+            # raised and let go. Marked retired now, so no one starts on it meanwhile.
+            asyncio.create_task(self.retire(session))
             raise HlsGone("The video has changed or is missing. Reload the player.")
         await self.streams.acquire_slot()
         staging = session.folder / f"enc-{viewer.id}-{next(self._runs)}"
