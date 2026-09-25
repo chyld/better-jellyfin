@@ -12,7 +12,7 @@ import sqlite3
 import time
 from pathlib import Path
 
-from .browse import NotFound, clean_dir
+from .browse import NotFound, clean_dir, descendants
 from .db import new_uid
 from .images import ORPHAN_GRACE_SECONDS, save_upload, upload_name
 
@@ -71,10 +71,13 @@ def _folder(conn: sqlite3.Connection, library_id: int, rel_dir: str) -> str:
     """Check the folder exists in the library's catalog; returns its clean path."""
     rel_dir = clean_dir(rel_dir)
     if rel_dir:
-        prefix = rel_dir + "/"
+        low, high = descendants(rel_dir)
         inside = conn.execute(
-            "SELECT 1 FROM media_items WHERE library_id = ? AND substr(rel_path, 1, ?) = ? LIMIT 1",
-            (library_id, len(prefix), prefix),
+            """
+            SELECT 1 FROM media_items WHERE library_id = ?
+              AND (parent_dir = ? OR (parent_dir >= ? AND parent_dir < ?)) LIMIT 1
+            """,
+            (library_id, rel_dir, low, high),
         ).fetchone()
         if not inside:
             raise NotFound("Folder not found.")

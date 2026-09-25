@@ -229,8 +229,10 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
         raise HTTPException(404, "No folder art.")
 
     @app.get("/api/libraries/{library_uid}/browse")
-    def browse_folder(library_uid: str, path: str = "", sort: str = "name", conn: sqlite3.Connection = Depends(get_db)):
-        return browse.browse(conn, library_pk(conn, library_uid), path, sort)
+    def browse_folder(library_uid: str, path: str = "", sort: str = "name", limit: int | None = None,
+                      offset: int = 0, conn: sqlite3.Connection = Depends(get_db)):
+        """A folder's subfolders, and its videos one page at a time (`limit`, `offset`)."""
+        return browse.browse(conn, library_pk(conn, library_uid), path, sort, limit=limit, offset=offset)
 
     @app.get("/api/libraries/{library_uid}/folder-art")
     def get_folder_art(library_uid: str, path: str = "", conn: sqlite3.Connection = Depends(get_db)):
@@ -256,8 +258,8 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
         return tags.list_tags(conn)
 
     @app.get("/api/tags/{tag_uid}")
-    def get_tag(tag_uid: str, conn: sqlite3.Connection = Depends(get_db)):
-        return tags.tag_videos(conn, tag_uid)
+    def get_tag(tag_uid: str, limit: int | None = None, offset: int = 0, conn: sqlite3.Connection = Depends(get_db)):
+        return tags.tag_videos(conn, tag_uid, limit=limit, offset=offset)
 
     @app.patch("/api/tags/{tag_uid}")
     def rename_tag(tag_uid: str, body: TagRename, conn: sqlite3.Connection = Depends(get_db)):

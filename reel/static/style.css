@@ -392,3 +392,5 @@ dialog .note { margin: 0 0 14px; font-size: 14px; color: var(--warn); }
   .library { grid-template-columns: 1fr; }
   .library .buttons { grid-row: auto; grid-column: auto; margin-top: 10px; flex-wrap: wrap; }
 }
+
+.load-more { height: 1px; }

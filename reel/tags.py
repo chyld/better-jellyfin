@@ -3,7 +3,7 @@ import re
 import sqlite3
 from pathlib import Path
 
-from .browse import NotFound, item_out
+from .browse import NotFound, item_out, page_bounds
 from .db import NOW_MS, new_uid
 from .images import ThumbnailError, save_upload, upload_name
 
@@ -206,14 +206,17 @@ def list_tags(conn: sqlite3.Connection) -> list[dict]:
     return [{**_tag_out(r), "count": r["count"]} for r in rows]
 
 
-def tag_videos(conn: sqlite3.Connection, tag_uid: str) -> dict:
-    """A tag and its videos, in the order they were tagged (no sorting yet)."""
+def tag_videos(conn: sqlite3.Connection, tag_uid: str, *, limit: int | None = None, offset: int | None = None) -> dict:
+    """A tag and (one page of) its videos, in the order they were tagged (no sorting yet)."""
     tag = find_tag(conn, tag_uid)
+    limit, offset = page_bounds(limit, offset)
+    joined = """
+        FROM item_tags it JOIN media_items m ON m.id = it.item_id
+        WHERE it.tag_id = ? AND m.missing_since IS NULL
+    """
+    total = conn.execute(f"SELECT COUNT(*) {joined}", (tag["id"],)).fetchone()[0]
     rows = conn.execute(
-        """
-        SELECT m.* FROM item_tags it JOIN media_items m ON m.id = it.item_id
-        WHERE it.tag_id = ? AND m.missing_since IS NULL ORDER BY it.added_at, it.rowid
-        """,
-        (tag["id"],),
+        f"SELECT m.* {joined} ORDER BY it.added_at, it.rowid LIMIT ? OFFSET ?", (tag["id"], limit, offset)
     )
-    return {"tag": _tag_out(tag), "items": [item_out(r) for r in rows]}
+    return {"tag": _tag_out(tag), "items": [item_out(r) for r in rows],
+            "total_items": total, "offset": offset, "limit": limit}

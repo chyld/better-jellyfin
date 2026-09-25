@@ -172,12 +172,34 @@ def _v5_no_stored_play_mode(conn: sqlite3.Connection) -> None:
     conn.execute("ALTER TABLE media_items DROP COLUMN play_mode")
 
 
+def _v6_folder_index(conn: sqlite3.Connection) -> None:
+    # Browsing a folder used to load every video below it. With each video's folder
+    # and a natural-sort key stored and indexed, a folder's direct videos come one
+    # page at a time from the index, and its subfolders from an index range.
+    from .sorting import parent_dir, sort_key
+
+    conn.execute("ALTER TABLE media_items ADD COLUMN parent_dir TEXT NOT NULL DEFAULT ''")
+    conn.execute("ALTER TABLE media_items ADD COLUMN title_key TEXT NOT NULL DEFAULT ''")
+    rows = conn.execute("SELECT id, rel_path, title FROM media_items").fetchall()
+    conn.executemany(
+        "UPDATE media_items SET parent_dir = ?, title_key = ? WHERE id = ?",
+        [(parent_dir(r["rel_path"]), sort_key(r["title"], r["rel_path"]), r["id"]) for r in rows],
+    )
+    # Partial: only videos that are present, which is all browsing ever lists, so
+    # counting a folder's videos never has to read the rows themselves.
+    conn.execute(
+        "CREATE INDEX media_items_browse ON media_items (library_id, parent_dir, title_key) "
+        "WHERE missing_since IS NULL"
+    )
+
+
 # (version, what it does, function). Append only; functions must not commit.
 MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (2, "fingerprints and probe versions for media items", _v2_identity),
     (3, "users, starting with the built-in local user", _v3_users),
     (4, "explicit order for a tag's videos", _v4_tag_order),
     (5, "stop storing the play mode; it's decided at play time", _v5_no_stored_play_mode),
+    (6, "index each video's folder and name order for fast browsing", _v6_folder_index),
 ]
 
 

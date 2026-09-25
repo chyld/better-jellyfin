@@ -42,6 +42,7 @@ ffmpeg converts on the fly.
   scan it. Rescans only re-read new or changed files.
 - **Browsing.** Libraries and folders appear as movie-poster cards and videos as landscape
   cards. Numbers sort naturally (`clip2` before `clip10`), and videos can be sorted by name or year.
+  Big folders stay fast: videos load 200 at a time as you scroll.
 - **Playback of everything.** Browser-ready files play directly. Others are repackaged or
   converted live by ffmpeg, starting in about half a second.
 - **A modern player.** A frosted-glass control dock, a gradient seek bar with a time preview,
@@ -425,6 +426,11 @@ data/
 - **Re-probing when the rules change:** each video records which version of the probe and
   play-mode rules produced it. When that version goes up, the next scan re-probes older rows.
   The first scan after upgrading to fingerprints re-probes every video once.
+- **Fast folders:** each video stores its folder (`parent_dir`) and a sort key (`title_key`, the
+  title with numbers zero-padded so text order is natural order), under one index that skips
+  missing videos. Opening a folder reads only that folder's rows, already sorted, one page at a
+  time; its subfolders and their counts come from the same index. With 50,000 videos, a library's
+  top level answers in under 10 ms.
 - **Users:** there's one built-in local user (`GET /api/me`). Nothing is per-user yet; the table is
   there so that, if login is ever added, per-person data has somewhere to attach.
 
@@ -469,7 +475,7 @@ JSON over HTTP. Every ID is a UUID. There's no authentication yet (see
 | DELETE | `/api/libraries/{id}` | Remove from Reel (409 while scanning). Files untouched. |
 | POST | `/api/libraries/{id}/scan` | Queue a scan (202). |
 | POST | `/api/libraries/scan` | Queue a scan of every library. |
-| GET | `/api/libraries/{id}/browse?path=&sort=name\|year` | Subfolders and videos in a folder. |
+| GET | `/api/libraries/{id}/browse?path=&sort=name\|year&limit=&offset=` | Subfolders and one page of the videos in a folder (`limit` defaults to 200, at most 500). `total_items` is how many videos the folder has. |
 | GET | `/api/libraries/{id}/folder-art?path=` | A folder's picture (NAS `folder.<ext>`, else uploaded). |
 | PUT | `/api/libraries/{id}/folder-image?path=` | Upload a folder picture (request body = the image). |
 | POST | `/api/libraries/{id}/folder-image-url?path=` | `{url}`: set a folder picture from a URL. |
@@ -498,7 +504,7 @@ JSON over HTTP. Every ID is a UUID. There's no authentication yet (see
 | Method | Path | |
 |---|---|---|
 | GET | `/api/tags` | Tags on at least one video, with counts. |
-| GET | `/api/tags/{id}` | A tag and its videos (in tagging order). |
+| GET | `/api/tags/{id}?limit=&offset=` | A tag and one page of its videos (in tagging order), with `total_items`. |
 | PATCH | `/api/tags/{id}` | `{name}`: rename; merges into an existing tag of that name. |
 | DELETE | `/api/tags/{id}` | Delete the tag from every video. |
 | GET, PUT, DELETE | `/api/tags/{id}/image` | The tag's picture: fetch, upload, remove. |
@@ -534,7 +540,7 @@ changes how thumbnails are made.
 ### Tests
 
 ```sh
-uv run pytest              # backend: 430 tests
+uv run pytest              # backend: 444 tests
 node --test tests/js/      # frontend: 26 tests
 scripts/docker-smoke.sh    # builds the image and checks it end to end (needs Docker)
 ```
@@ -577,7 +583,8 @@ reel/
   custom_images.py   uploaded images for folders and videos; clean-up
   tags.py            tags: add/remove, rename/merge, delete, images
   fetch.py           safe image downloads from URLs
-  browse.py          read-only views: folders, video details
+  browse.py          read-only views: folders (indexed, paged), video details
+  sorting.py         natural sort keys stored for SQL ordering
   static/
     index.html       page shell and dialogs
     app.js           router (hash URLs), scroll restore
@@ -622,11 +629,10 @@ Dockerfile, compose.yaml, .env.example
 
 Ideas and planned features, roughly in order:
 
-1. **Faster browsing for big libraries:** query only a folder's direct children, and paginate.
-2. **Sorting** for a tag's videos.
-3. **Subtitles:** external `.srt`/`.vtt` and embedded text tracks, as WebVTT.
-4. **Hardware transcoding** (VAAPI/QSV/NVENC).
-5. An optional background "optimize" pass that converts old formats once into cached MP4s,
+1. **Sorting** for a tag's videos.
+2. **Subtitles:** external `.srt`/`.vtt` and embedded text tracks, as WebVTT.
+3. **Hardware transcoding** (VAAPI/QSV/NVENC).
+4. An optional background "optimize" pass that converts old formats once into cached MP4s,
    for perfect seeking and zero CPU on replay.
 
 Not planned: watch progress / resume (single-user setup).

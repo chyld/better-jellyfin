@@ -2,22 +2,19 @@
 
 Everything here comes from the database, so browsing never touches the NAS.
 """
-import re
 import sqlite3
 from pathlib import PurePosixPath
 
 from .plan import plan
+from .sorting import natural_text
 
 SORTS = ("name", "year")
+PAGE_SIZE = 200      # videos per page when the caller doesn't say
+MAX_PAGE_SIZE = 500
 
 
 class NotFound(LookupError):
     pass
-
-
-def natural_key(text: str) -> list:
-    """Sort 'clip2' before 'clip10' and '0360' after '0305' (numbers compare as numbers)."""
-    return [int(part) if part.isdigit() else part.lower() for part in re.split(r"(\d+)", text)]
 
 
 def clean_dir(rel_dir: str | None) -> str:
@@ -43,12 +40,16 @@ def item_out(row: sqlite3.Row) -> dict:
     }
 
 
-def _sort_items(rows: list[sqlite3.Row], sort: str) -> list[sqlite3.Row]:
-    by_name = sorted(rows, key=lambda r: (natural_key(r["title"]), natural_key(r["rel_path"])))
-    if sort == "year":
-        # Oldest first; videos without a year go last, in name order.
-        return sorted(by_name, key=lambda r: (r["year"] is None, r["year"] or 0))
-    return by_name
+ORDER_BY = {
+    "name": "title_key",
+    # Oldest first; videos without a year go last, in name order.
+    "year": "year IS NULL, year, title_key",
+}
+
+
+def page_bounds(limit: int | None, offset: int | None) -> tuple[int, int]:
+    limit = PAGE_SIZE if limit is None else max(1, min(int(limit), MAX_PAGE_SIZE))
+    return limit, max(0, int(offset or 0))
 
 
 def breadcrumbs(library_name: str, rel_dir: str) -> list[dict]:
@@ -59,9 +60,31 @@ def breadcrumbs(library_name: str, rel_dir: str) -> list[dict]:
     return crumbs
 
 
-def browse(conn: sqlite3.Connection, library_id: int, rel_dir: str | None, sort: str = "name") -> dict:
-    """List the subfolders and videos directly inside `rel_dir` of a library.
+def descendants(rel_dir: str) -> tuple[str, str | None]:
+    """The index range of parent_dir values at or below a folder (not the folder itself).
 
+    Everything under "Show 07" sorts between "Show 07/" and "Show 070", because
+    "/" comes just before "0".
+    """
+    if not rel_dir:
+        return "\x01", None          # any non-empty parent_dir: every subfolder
+    return rel_dir + "/", rel_dir + "0"
+
+
+def browse(
+    conn: sqlite3.Connection,
+    library_id: int,
+    rel_dir: str | None,
+    sort: str = "name",
+    *,
+    limit: int | None = None,
+    offset: int | None = None,
+) -> dict:
+    """The subfolders and (one page of) videos directly inside `rel_dir` of a library.
+
+    Both come straight from indexes, however big the library: the videos are the
+    rows whose parent_dir is this folder, sorted and paged in SQL; the subfolders
+    are the first path segment of every parent_dir below it, with video counts.
     Only folders that (somewhere below them) contain videos are listed.
     `has_art` says whether a folder has its own folder.<ext> preview.
     """
@@ -71,43 +94,60 @@ def browse(conn: sqlite3.Connection, library_id: int, rel_dir: str | None, sort:
     rel_dir = clean_dir(rel_dir)
     if sort not in SORTS:
         sort = "name"
+    limit, offset = page_bounds(limit, offset)
 
-    prefix = f"{rel_dir}/" if rel_dir else ""
+    # Videos a scan couldn't find any more are hidden (kept for a grace period).
+    here = "library_id = ? AND parent_dir = ? AND missing_since IS NULL"
+    total = conn.execute(f"SELECT COUNT(*) FROM media_items WHERE {here}", (library_id, rel_dir)).fetchone()[0]
     rows = conn.execute(
-        # Videos a scan couldn't find any more are hidden (kept for a grace period).
-        "SELECT * FROM media_items WHERE library_id = ? AND substr(rel_path, 1, ?) = ? AND missing_since IS NULL",
-        (library_id, len(prefix), prefix),
+        f"SELECT * FROM media_items WHERE {here} ORDER BY {ORDER_BY[sort]} LIMIT ? OFFSET ?",
+        (library_id, rel_dir, limit, offset),
     ).fetchall()
-    if rel_dir and not rows:
+
+    # Every folder below this one with its video count, straight from the index
+    # (grouping by the stored parent_dir follows the index order), then rolled up
+    # into this folder's direct children.
+    low, high = descendants(rel_dir)
+    skip = len(rel_dir) + 1 if rel_dir else 0
+    below = conn.execute(
+        f"""
+        SELECT parent_dir, COUNT(*) FROM media_items
+        WHERE library_id = ? AND parent_dir >= ? {"AND parent_dir < ?" if high else ""}
+          AND missing_since IS NULL
+        GROUP BY parent_dir
+        """,
+        (library_id, low, high) if high else (library_id, low),
+    ).fetchall()
+    child_counts: dict[str, int] = {}
+    for folder, n in below:
+        name = folder[skip:].split("/", 1)[0]
+        child_counts[name] = child_counts.get(name, 0) + n
+    counts = [{"name": name, "item_count": n} for name, n in child_counts.items()]
+    if rel_dir and not total and not counts:
         raise NotFound("Folder not found.")
 
-    art = {
-        row["rel_dir"]
-        for row in conn.execute("SELECT rel_dir FROM folder_art WHERE library_id = ?", (library_id,))
-    }
-    custom_art = {
-        row["rel_dir"]: row["version"]
-        for row in conn.execute("SELECT rel_dir, version FROM folder_images WHERE library_id = ?", (library_id,))
-    }
+    prefix = f"{rel_dir}/" if rel_dir else ""
+    paths = [prefix + r["name"] for r in counts]
+    art, custom_art = set(), {}
+    if paths:
+        marks = ",".join("?" * len(paths))
+        art = {r[0] for r in conn.execute(
+            f"SELECT rel_dir FROM folder_art WHERE library_id = ? AND rel_dir IN ({marks})", (library_id, *paths))}
+        custom_art = dict(conn.execute(
+            f"SELECT rel_dir, version FROM folder_images WHERE library_id = ? AND rel_dir IN ({marks})",
+            (library_id, *paths)).fetchall())
 
-    items, folders = [], {}
-    for row in rows:
-        rest = row["rel_path"][len(prefix):]
-        if "/" in rest:
-            folders.setdefault(rest.split("/", 1)[0], []).append(row)
-        else:
-            items.append(row)
-
-    folder_list = []
-    for name in sorted(folders, key=natural_key):
-        path = f"{prefix}{name}"
-        folder_list.append({
-            "name": name,
-            "path": path,
-            "item_count": len(folders[name]),
-            "has_art": path in art,                 # folder.<ext> on the NAS
-            "custom_art": custom_art.get(path),     # version of an uploaded image, if any
-        })
+    folder_list = [
+        {
+            "name": r["name"],
+            "path": prefix + r["name"],
+            "item_count": r["item_count"],
+            "has_art": prefix + r["name"] in art,             # folder.<ext> on the NAS
+            "custom_art": custom_art.get(prefix + r["name"]),  # version of an uploaded image, if any
+        }
+        # Same order as the videos (see sorting.py).
+        for r in sorted(counts, key=lambda r: natural_text(r["name"]))
+    ]
 
     return {
         "library": {"id": lib["uid"], "name": lib["name"]},
@@ -115,7 +155,10 @@ def browse(conn: sqlite3.Connection, library_id: int, rel_dir: str | None, sort:
         "breadcrumbs": breadcrumbs(lib["name"], rel_dir),
         "sort": sort,
         "folders": folder_list,
-        "items": [item_out(r) for r in _sort_items(items, sort)],
+        "items": [item_out(r) for r in rows],
+        "total_items": total,
+        "offset": offset,
+        "limit": limit,
     }
 
 

@@ -187,17 +187,19 @@ export async function renderHome(view) {
 // ---- Tag ------------------------------------------------------------------------
 
 export async function renderTag(view, tagId) {
-  const { tag, items } = await api("GET", `/api/tags/${tagId}`);
+  const first = await api("GET", `/api/tags/${tagId}`);
+  const grid = pagedVideoGrid(first, (offset) => api("GET", `/api/tags/${tagId}?offset=${offset}`));
   fill(
     view,
     h(
       "div",
       { class: "page-head" },
-      h("nav", { class: "crumbs" }, h("a", { href: "#/tags" }, "Tags"), h("span", { class: "sep", "aria-hidden": "true" }, "›"), h("span", { class: "current" }, tag.name)),
+      h("nav", { class: "crumbs" }, h("a", { href: "#/tags" }, "Tags"), h("span", { class: "sep", "aria-hidden": "true" }, "›"), h("span", { class: "current" }, first.tag.name)),
     ),
-    h("p", { class: "summary" }, items.length ? plural(items.length, "video") : "No videos have this tag."),
-    items.length > 0 && h("ul", { class: "grid videos" }, items.map(videoCard)),
+    h("p", { class: "summary" }, first.total_items ? plural(first.total_items, "video") : "No videos have this tag."),
+    first.total_items > 0 && grid.element,
   );
+  return () => grid.stop();
 }
 
 /** The tag chips on a video's page, with a box to add more. */
@@ -334,14 +336,67 @@ function folderCard(libraryId, folder) {
   );
 }
 
-export async function renderBrowse(view, libraryId, path) {
-  const load = () =>
-    api("GET", `/api/libraries/${libraryId}/browse?path=${encodeURIComponent(path)}&sort=${getSort()}`);
-  let data = await load();
+/**
+ * A grid of videos that loads the next page as you near its end.
+ * `first` is the first page ({items, total_items}); fetchPage(offset) gets the next.
+ * Returns { element, stop } — call stop() when leaving the page.
+ */
+function pagedVideoGrid(first, fetchPage) {
+  const list = h("ul", { class: "grid videos" }, first.items.map(videoCard));
+  const sentinel = h("div", { class: "load-more", "aria-hidden": "true" });
+  let loaded = first.items.length;
+  let total = first.total_items ?? loaded;
+  let busy = false;
+  let stopped = false;
 
-  const itemsList = h("ul", { class: "grid videos" });
-  const fillItems = () => itemsList.replaceChildren(...data.items.map(videoCard));
-  fillItems();
+  const nearEnd = () => sentinel.isConnected && sentinel.getBoundingClientRect().top < window.innerHeight + 800;
+  async function more() {
+    if (busy || stopped || loaded >= total) return;
+    busy = true;
+    try {
+      const page = await fetchPage(loaded);
+      if (stopped) return;
+      list.append(...page.items.map(videoCard));
+      loaded += page.items.length;
+      total = page.total_items ?? total;
+      if (!page.items.length) total = loaded;
+    } finally {
+      busy = false;
+    }
+    if (loaded >= total) finish();
+    else if (nearEnd()) more(); // a tall screen may still show the end
+  }
+  function finish() {
+    observer.disconnect();
+    sentinel.remove();
+  }
+  const observer = new IntersectionObserver((entries) => entries.some((e) => e.isIntersecting) && more(), {
+    rootMargin: "800px",
+  });
+  if (loaded < total) observer.observe(sentinel);
+  else sentinel.remove();
+  return {
+    element: h("div", { class: "paged" }, list, sentinel),
+    stop() {
+      stopped = true;
+      observer.disconnect();
+    },
+  };
+}
+
+export async function renderBrowse(view, libraryId, path) {
+  const url = (offset = 0) =>
+    `/api/libraries/${libraryId}/browse?path=${encodeURIComponent(path)}&sort=${getSort()}&offset=${offset}`;
+  let data = await api("GET", url());
+
+  const itemsHolder = h("div");
+  let grid = null;
+  const showItems = () => {
+    grid?.stop();
+    grid = pagedVideoGrid(data, async (offset) => api("GET", url(offset)));
+    itemsHolder.replaceChildren(grid.element);
+  };
+  showItems();
 
   const sortSelect = h(
     "select",
@@ -349,8 +404,8 @@ export async function renderBrowse(view, libraryId, path) {
       "aria-label": "Sort videos",
       onchange: async (e) => {
         setSort(e.target.value);
-        data = await load();
-        fillItems();
+        data = await api("GET", url());
+        showItems();
       },
     },
     h("option", { value: "name" }, "Name"),
@@ -360,21 +415,22 @@ export async function renderBrowse(view, libraryId, path) {
 
   const counts = [
     data.folders.length && plural(data.folders.length, "folder"),
-    data.items.length && plural(data.items.length, "video"),
+    data.total_items && plural(data.total_items, "video"),
   ].filter(Boolean);
 
-  fill(view, 
+  fill(view,
     h(
       "div",
       { class: "page-head" },
       crumbs(libraryId, data.breadcrumbs),
-      data.items.length > 1 && h("label", { class: "sort" }, "Sort ", sortSelect),
+      data.total_items > 1 && h("label", { class: "sort" }, "Sort ", sortSelect),
     ),
     h("p", { class: "summary" }, counts.join(" · ") || "This folder is empty."),
     data.folders.length > 0 &&
       h("ul", { class: "grid folders" }, data.folders.map((f) => folderCard(libraryId, f))),
-    data.items.length > 0 && itemsList,
+    data.total_items > 0 && itemsHolder,
   );
+  return () => grid?.stop();
 }
 
 // ---- Video details ----------------------------------------------------------
