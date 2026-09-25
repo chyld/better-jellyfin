@@ -322,6 +322,21 @@ def scan_library(
             existing[video.rel_path] = {**row, "rel_path": video.rel_path, "size": video.size,
                                         "mtime": video.mtime, "missing_since": None}
         folder_renames = _renamed_folders([(row["rel_path"], video.rel_path) for row, video in moves])
+        # Uploaded folder pictures follow a renamed folder, when the moved files say
+        # clearly where it went and nothing is already there. Saved together with
+        # the moves: once they're saved, a later scan no longer sees them as moves.
+        for row in conn.execute("SELECT uid, rel_dir FROM folder_images WHERE library_id = ?", (library_id,)).fetchall():
+            old = row["rel_dir"]
+            if not old or old in walk.folders or walk.protects(old):
+                continue
+            targets = {new + old[len(src):] for src, new in folder_renames if old == src or old.startswith(src + "/")}
+            if len(targets) == 1:
+                (target,) = targets
+                taken = conn.execute(
+                    "SELECT 1 FROM folder_images WHERE library_id = ? AND rel_dir = ?", (library_id, target)
+                ).fetchone()
+                if target in walk.folders and not taken:
+                    conn.execute("UPDATE folder_images SET rel_dir = ? WHERE uid = ?", (target, row["uid"]))
         conn.commit()
 
         unchanged, to_probe = [], []
@@ -443,21 +458,6 @@ def scan_library(
         if expired:
             to_remove.append(row["id"])
     conn.executemany("DELETE FROM media_items WHERE id = ?", [(i,) for i in to_remove])
-
-    # Uploaded folder pictures follow a renamed folder, when the moved files say
-    # clearly where it went and nothing is already there.
-    for row in conn.execute("SELECT uid, rel_dir FROM folder_images WHERE library_id = ?", (library_id,)).fetchall():
-        old = row["rel_dir"]
-        if not old or old in walk.folders or walk.protects(old):
-            continue
-        targets = {new + old[len(src):] for src, new in folder_renames if old == src or old.startswith(src + "/")}
-        if len(targets) == 1:
-            (target,) = targets
-            taken = conn.execute(
-                "SELECT 1 FROM folder_images WHERE library_id = ? AND rel_dir = ?", (library_id, target)
-            ).fetchone()
-            if target in walk.folders and not taken:
-                conn.execute("UPDATE folder_images SET rel_dir = ? WHERE uid = ?", (target, row["uid"]))
 
     # Folder art is rebuilt from the walk, except under folders it couldn't read.
     for row in conn.execute("SELECT rel_dir FROM folder_art WHERE library_id = ?", (library_id,)).fetchall():

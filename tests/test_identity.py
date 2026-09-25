@@ -167,6 +167,29 @@ def test_renamed_folder_keeps_its_uploaded_picture(conn, lib, media_root, fake_p
     assert folder_image(conn, lib, "Tapes") is None
 
 
+def test_renamed_folder_picture_survives_a_scan_stopped_after_the_moves(conn, lib, media_root, fake_probe):
+    """Stopped right after the moves are saved: the picture has moved with them, and
+    the next (complete) scan keeps it, though it no longer sees any move."""
+    import threading
+
+    from reel import custom_images
+    from reel.scanner import ScanCancelled
+
+    set_folder_image(conn, lib, "Tapes", "img-1")
+    os.rename(media_root / "Tapes", media_root / "Home Tapes")
+    write(media_root, "New/n.mpg", video(9))                # something to probe after the moves
+    cancel = threading.Event()
+    with pytest.raises(ScanCancelled):
+        scan_library(conn, lib, probe_fn=fake_probe, cancel=cancel,
+                     on_progress=lambda done, total: cancel.set())   # first progress: after the moves
+    assert row(conn, "Home Tapes/a.mpg") is not None                # the moves were saved...
+    assert folder_image(conn, lib, "Home Tapes")["uid"] == "img-1"  # ...and the picture with them
+
+    assert scan_library(conn, lib, probe_fn=fake_probe)["moved"] == 0
+    custom_images.prune(conn, media_root.parent / "images")
+    assert folder_image(conn, lib, "Home Tapes")["uid"] == "img-1"
+
+
 def test_nested_folders_follow_a_rename(conn, media_root, fake_probe):
     write(media_root, "Tapes/1990s/a.mpg", video(1))
     write(media_root, "Tapes/2000s/b.mpg", video(2))
