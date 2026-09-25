@@ -2,14 +2,18 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 // A browser that decodes H.264 and AAC, plus HEVC through MediaCapabilities.
-globalThis.navigator = {
-  mediaCapabilities: {
-    async decodingInfo(config) {
-      const type = (config.video || config.audio).contentType;
-      return { supported: /avc1|hvc1|mp4a/.test(type) };
+// (Newer Node versions have a read-only `navigator`, so it's redefined rather than assigned.)
+Object.defineProperty(globalThis, "navigator", {
+  configurable: true,
+  value: {
+    mediaCapabilities: {
+      async decodingInfo(config) {
+        const type = (config.video || config.audio).contentType;
+        return { supported: /avc1|hvc1|mp4a/.test(type) };
+      },
     },
   },
-};
+});
 
 const { capabilities, capsQuery } = await import("../../reel/static/caps.js");
 
