@@ -634,7 +634,7 @@ changes how thumbnails are made.
 ### Tests
 
 ```sh
-uv run pytest              # backend: 519 tests
+uv run pytest              # backend: 521 tests
 node --test tests/js/      # frontend: 30 tests
 uv run pytest -m browser   # browser: 14 tests (about 2 minutes; needs Chromium and ffmpeg)
 scripts/docker-smoke.sh    # builds the image and checks it end to end (needs Docker)
