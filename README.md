@@ -397,9 +397,8 @@ data/
 - **Re-probing when the rules change:** each video records which version of the probe and
   play-mode rules produced it. When that version goes up, the next scan re-probes older rows.
   The first scan after upgrading to fingerprints re-probes every video once.
-- **Users:** there's one built-in local user (`GET /api/me`). Per-person data, such as the coming
-  watch progress, is stored against a user from the start, so adding login later won't mean
-  reshaping it.
+- **Users:** there's one built-in local user (`GET /api/me`). Nothing is per-user yet; the table is
+  there so that, if login is ever added, per-person data has somewhere to attach.
 
 ---
 
@@ -591,14 +590,18 @@ Dockerfile, compose.yaml, .env.example
 
 Ideas and planned features, roughly in order:
 
-1. **Watch progress:** remember where you stopped, per user, offer to resume, and a "Continue
-   watching" row on Home. (The groundwork, stable video identity and a local user, is in.)
-2. **Login**, and optionally a hidden library that must be unlocked.
-3. **Sorting** for a tag's videos.
-4. **Subtitles:** external `.srt`/`.vtt` and embedded text tracks, as WebVTT.
-5. **Hardware transcoding** (VAAPI/QSV/NVENC).
-6. An optional background "optimize" pass that converts old formats once into cached MP4s,
+1. **Playback decided at Play time:** keep the probed facts, decide direct/remux/convert when
+   Play is pressed (using what the browser can play), and convert only the audio when only the
+   audio is incompatible.
+2. **Delivery strategies behind one player call,** then **HLS** for Safari/iOS and cheaper seeking.
+3. **Faster browsing for big libraries:** query only a folder's direct children, and paginate.
+4. **Sorting** for a tag's videos.
+5. **Subtitles:** external `.srt`/`.vtt` and embedded text tracks, as WebVTT.
+6. **Hardware transcoding** (VAAPI/QSV/NVENC).
+7. An optional background "optimize" pass that converts old formats once into cached MP4s,
    for perfect seeking and zero CPU on replay.
+
+Not planned: watch progress / resume (single-user setup).
 
 ---
 
