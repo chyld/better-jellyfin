@@ -73,13 +73,20 @@ done
 ITEMS=$(curl -fs "$BASE/api/libraries/$LIB/browse")
 echo "$ITEMS" | python3 -c '
 import json, sys
-items = {i["title"]: i for i in json.load(sys.stdin)["items"]}
-assert items["direct"]["play_mode"] == "direct", items
-assert items["old"]["play_mode"] == "transcode", items
+titles = sorted(i["title"] for i in json.load(sys.stdin)["items"])
+assert titles == ["direct", "old"], titles
 ' || fail "unexpected scan results: $ITEMS"
-ok "found direct.mp4 (direct play) and old.avi (convert)"
 id_of() { echo "$ITEMS" | python3 -c "import json,sys; print([i['id'] for i in json.load(sys.stdin)['items'] if i['title']=='$1'][0])"; }
 DIRECT=$(id_of direct); OLD=$(id_of old)
+# How to play is decided per browser at play time (/plan); without codec lists, for a typical one.
+field() { python3 -c "import json,sys; print(json.load(sys.stdin)['$1'])"; }
+DIRECT_PLAN=$(curl -fs "$BASE/api/items/$DIRECT/plan")
+OLD_PLAN=$(curl -fs "$BASE/api/items/$OLD/plan")
+[ "$(echo "$DIRECT_PLAN" | field mode)/$(echo "$DIRECT_PLAN" | field delivery)" = direct/file ] \
+  || fail "direct.mp4 plan: $DIRECT_PLAN"
+[ "$(echo "$OLD_PLAN" | field mode)/$(echo "$OLD_PLAN" | field delivery)" = transcode/progressive ] \
+  || fail "old.avi plan: $OLD_PLAN"
+ok "plans: direct.mp4 plays directly, old.avi is converted (audio: $(echo "$OLD_PLAN" | field audio))"
 
 step "Thumbnails, direct play and live conversion"
 curl -fs -o "$WORK/thumb.jpg" "$BASE/api/items/$DIRECT/thumb" || fail "thumbnail"
@@ -87,10 +94,15 @@ ok "thumbnail: $(ffprobe -v error -show_entries stream=width,height -of csv=p=0 
 CODE=$(curl -s -o /dev/null -w '%{http_code}' -r 0-999 "$BASE/api/items/$DIRECT/file")
 [ "$CODE" = 206 ] || fail "range request returned $CODE"
 ok "direct play with range requests (206)"
-curl -fs -o "$WORK/converted.mp4" "$BASE/api/items/$OLD/stream"
+curl -fs -o "$WORK/converted.mp4" "$BASE$(echo "$OLD_PLAN" | field url)"
 CODECS=$(ffprobe -v error -show_entries stream=codec_name -of csv=p=0 "$WORK/converted.mp4" | tr '\n' ' ')
-[ "$CODECS" = "h264 aac " ] || fail "conversion produced: $CODECS"
-ok "old.avi converted to $CODECS"
+# The plan says what happens to the audio: MP3 is copied as is, anything else becomes AAC.
+case "$(echo "$OLD_PLAN" | field audio)" in
+  copy) EXPECTED="h264 mp3 " ;;
+  *) EXPECTED="h264 aac " ;;
+esac
+[ "$CODECS" = "$EXPECTED" ] || fail "conversion produced: $CODECS (expected $EXPECTED from the plan)"
+ok "old.avi converted to $CODECS, as planned"
 
 step "Data folder and health"
 [ -s "$WORK/data/reel.db" ] || fail "no database in the data folder"
