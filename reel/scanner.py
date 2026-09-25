@@ -1,11 +1,13 @@
 """Walk a library folder and record every video in the database."""
 import hashlib
+import logging
 import os
 import re
 import sqlite3
 import threading
+import time
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
@@ -27,6 +29,8 @@ YEAR_PREFIX = re.compile(r"^((?:19|20)\d{2})[.\s_-]+(.+)$")
 # tags and images) before it's removed. Covers a NAS that was briefly unmounted.
 MISSING_GRACE = timedelta(days=7)
 FINGERPRINT_CHUNK = 64 * 1024
+
+log = logging.getLogger(__name__)
 
 ProgressFn = Callable[[int, int], None]
 ProbeFn = Callable[[Path], ProbeResult]
@@ -54,6 +58,14 @@ class FoundVideo:
     poster_path: str | None
     size: int
     mtime: float
+
+
+def _matters(filename: str) -> bool:
+    """Videos and pictures: the only files the scan uses (and checks for links)."""
+    if filename.startswith(".") or "." not in filename:
+        return False
+    ext = filename.rsplit(".", 1)[1].lower()
+    return ext in VIDEO_EXTENSIONS or ext in IMAGE_EXTENSIONS
 
 
 def is_video(filename: str) -> bool:
@@ -116,6 +128,31 @@ class Walk:
         return any(rel_path == d or rel_path.startswith(d + "/") for d in self.unreadable_folders)
 
 
+def _as_finished(pool, fn, items, *, window: int):
+    """fn(item) for each item on the pool, at most `window` at a time, yielded as
+    each finishes (not in input order). Stopping early leaves the rest unsubmitted."""
+    items = iter(items)
+    pending = set()
+
+    def fill() -> None:
+        while len(pending) < window:
+            item = next(items, _END)
+            if item is _END:
+                return
+            pending.add(pool.submit(fn, item))
+
+    fill()
+    while pending:
+        finished, _ = wait(pending, return_when=FIRST_COMPLETED)
+        for future in finished:
+            pending.discard(future)
+            yield future.result()
+        fill()
+
+
+_END = object()
+
+
 def walk_library(root: Path, cancel: threading.Event | None = None) -> Walk:
     """Find all videos under root, noting anything that couldn't be read."""
     videos: list[FoundVideo] = []
@@ -137,6 +174,9 @@ def walk_library(root: Path, cancel: threading.Event | None = None) -> Walk:
         dirnames[:] = sorted(d for d in dirnames if not d.startswith("."))
         rel_dir = Path(dirpath).relative_to(root)
         folders.add(rel_dir.as_posix() if rel_dir.parts else "")
+        # Only videos and pictures are used; everything else (.nfo, .srt, ...) is
+        # skipped before any per-file check, each of which is a round trip on SMB.
+        filenames = [f for f in filenames if _matters(f)]
         # Symlinks leading out of the library are ignored, videos and pictures alike.
         escaping = {f for f in filenames if os.path.islink(os.path.join(dirpath, f)) and not is_inside(root, rel_dir / f)}
         outside += sum(1 for f in escaping if is_video(f))
@@ -265,6 +305,7 @@ def scan_library(
     With `media_root`, the library folder is re-checked now, as playback does: if
     it has since been replaced by a link leading outside, nothing is read.
     """
+    began = time.monotonic()
     lib = conn.execute("SELECT path FROM libraries WHERE id = ?", (library_id,)).fetchone()
     if lib is None:
         raise ScanError("Library not found.")
@@ -284,7 +325,8 @@ def scan_library(
         row["rel_path"]: dict(row)
         for row in conn.execute(
             """
-            SELECT id, rel_path, size, mtime, probe_error, missing_since, fingerprint, probe_version
+            SELECT id, rel_path, size, mtime, probe_error, missing_since, fingerprint, probe_version,
+                   title, year, poster_path
             FROM media_items WHERE library_id = ?
             """,
             (library_id,),
@@ -376,14 +418,21 @@ def scan_library(
             [(fp, library_id, v.rel_path) for v, fp in zip(backfill, backfill_prints)],
         )
 
-        # Titles and posters are cheap to recompute, so refresh them for unchanged files
-        # too; that picks up a poster added next to an existing video.
+        # Titles and posters are cheap to recompute, so they're refreshed for unchanged
+        # files too (that picks up a poster added next to an existing video). Only rows
+        # that actually differ, or that come back from being missing, are written:
+        # rewriting every row (and the browse index) on each scan would be wasted work.
+        refreshed = [
+            v for v in unchanged
+            if (existing[v.rel_path]["title"], existing[v.rel_path]["year"], existing[v.rel_path]["poster_path"])
+            != (v.title, v.year, v.poster_path) or existing[v.rel_path]["missing_since"]
+        ]
         conn.executemany(
             """
             UPDATE media_items SET title = ?, year = ?, poster_path = ?, missing_since = NULL, title_key = ?
             WHERE library_id = ? AND rel_path = ?
             """,
-            [(v.title, v.year, v.poster_path, sort_key(v.title, v.rel_path), library_id, v.rel_path) for v in unchanged],
+            [(v.title, v.year, v.poster_path, sort_key(v.title, v.rel_path), library_id, v.rel_path) for v in refreshed],
         )
         conn.commit()
 
@@ -399,7 +448,9 @@ def scan_library(
             return video, _safe_probe(probe_fn, root / video.rel_path), fp
 
         added = updated = failed = 0
-        for video, result, fp in pool.map(examine, to_probe):
+        # A few probes at a time, recorded as each finishes: one slow file doesn't
+        # hold back the ones done after it (or the progress shown).
+        for video, result, fp in _as_finished(pool, examine, to_probe, window=2 * max(1, workers)):
             _check(cancel)
             conn.execute(
                 """
@@ -458,15 +509,17 @@ def scan_library(
     conn.executemany(
         "UPDATE media_items SET missing_since = datetime('now') WHERE id = ?", [(i,) for i in newly_missing]
     )
-    for path, row in existing.items():
-        if path in seen or walk.protects(path):
-            continue
-        expired = conn.execute(
-            "SELECT missing_since <= datetime('now', ?) FROM media_items WHERE id = ?", (grace, row["id"])
-        ).fetchone()[0]
-        if expired:
-            to_remove.append(row["id"])
-    conn.executemany("DELETE FROM media_items WHERE id = ?", [(i,) for i in to_remove])
+    gone = [row["id"] for path, row in existing.items() if path not in seen and not walk.protects(path)]
+    for start in range(0, len(gone), 500):   # one statement per 500, not one query per file
+        chunk = gone[start:start + 500]
+        to_remove += [r[0] for r in conn.execute(
+            f"""
+            DELETE FROM media_items
+            WHERE id IN ({",".join("?" * len(chunk))}) AND missing_since <= datetime('now', ?)
+            RETURNING id
+            """,
+            (*chunk, grace),
+        )]
 
     # Folder art is rebuilt from the walk, except under folders it couldn't read.
     for row in conn.execute("SELECT rel_dir FROM folder_art WHERE library_id = ?", (library_id,)).fetchall():
@@ -494,6 +547,10 @@ def scan_library(
         (warning, library_id),
     )
     conn.commit()
+    seconds = time.monotonic() - began
+    # One line per scan, to tell a slow NAS (files/s) from slow probing at a glance.
+    log.info("scanned %s: %d videos (%d probed) in %.1f s, %.1f videos/s",
+             root, total, len(to_probe), seconds, total / seconds if seconds else 0.0)
     return {
         "total": total,
         "added": added,

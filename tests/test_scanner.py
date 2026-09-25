@@ -230,3 +230,98 @@ def test_libraries_are_scanned_separately(conn, media_root, fake_probe):
     # Paths are relative to each library's own folder.
     assert "Camcorder/clip01.avi" in items(conn, internal)
     assert items(conn, external)["Collection/Classics/0360/movie.mp4"]["title"] == "0360"
+
+
+# ---- Doing only the work that's needed --------------------------------------------------
+
+
+def _count_video_updates(conn):
+    conn.execute("CREATE TEMP TABLE IF NOT EXISTS writes (n INTEGER)")
+    conn.execute("DELETE FROM temp.writes")
+    conn.execute("CREATE TEMP TRIGGER IF NOT EXISTS count_writes AFTER UPDATE ON media_items "
+                 "BEGIN INSERT INTO temp.writes VALUES (1); END")
+    conn.commit()
+    return lambda: conn.execute("SELECT COUNT(*) FROM temp.writes").fetchone()[0]
+
+
+def test_a_rescan_of_unchanged_files_writes_no_video_rows(conn, media_root, fake_probe):
+    make_files(media_root, "Tapes/a.mpg", "Tapes/b.mpg", "Tapes/c.mpg")
+    lib = create_library(conn, media_root, "Media", str(media_root))
+    scan_library(conn, lib, probe_fn=fake_probe)
+    writes = _count_video_updates(conn)
+    scan_library(conn, lib, probe_fn=fake_probe)
+    assert writes() == 0
+    make_files(media_root, "Tapes/b.png")                 # a poster appears for b
+    scan_library(conn, lib, probe_fn=fake_probe)
+    assert writes() == 1
+    row = conn.execute("SELECT poster_path FROM media_items WHERE rel_path = 'Tapes/b.mpg'").fetchone()
+    assert row["poster_path"] == "Tapes/b.png"
+
+
+def test_a_video_that_comes_back_is_shown_again_without_a_reprobe(conn, media_root, fake_probe):
+    import os
+    make_files(media_root, "Tapes/a.mpg", "Tapes/b.mpg")
+    lib = create_library(conn, media_root, "Media", str(media_root))
+    scan_library(conn, lib, probe_fn=fake_probe)
+    os.rename(media_root / "Tapes/a.mpg", media_root / "a.away")
+    scan_library(conn, lib, probe_fn=fake_probe)
+    assert conn.execute("SELECT missing_since FROM media_items WHERE rel_path = 'Tapes/a.mpg'").fetchone()[0]
+    os.rename(media_root / "a.away", media_root / "Tapes/a.mpg")
+    calls = len(fake_probe.calls)
+    scan_library(conn, lib, probe_fn=fake_probe)
+    assert conn.execute("SELECT missing_since FROM media_items WHERE rel_path = 'Tapes/a.mpg'").fetchone()[0] is None
+    assert len(fake_probe.calls) == calls                # same size and time: not probed again
+
+
+def test_one_slow_probe_doesnt_hold_back_the_others(conn, media_root, fake_probe):
+    import threading
+    import time
+
+    make_files(media_root, *[f"Tapes/v{i}.mpg" for i in range(6)])
+    lib = create_library(conn, media_root, "Media", str(media_root))
+    release = threading.Event()
+
+    def probe(path):
+        if path.name == "v0.mpg":
+            release.wait(5)                                # a slow file, first in line
+        return fake_probe(path)
+
+    seen = []
+
+    def progress(done, total):
+        seen.append(done)
+        if done == total - 1:
+            release.set()                                  # all the others are recorded first
+
+    began = time.monotonic()
+    scan_library(conn, lib, probe_fn=probe, workers=2, on_progress=progress)
+    assert time.monotonic() - began < 4                    # the slow one wasn't waited on first
+    assert seen[-1] == 6
+
+
+def test_the_walk_only_checks_videos_and_pictures(conn, media_root, fake_probe, monkeypatch):
+    """Sidecar files (.nfo, .srt, ...) cost nothing: each check is a round trip on SMB."""
+    import os
+    make_files(media_root, "Tapes/a.mpg", "Tapes/a.png", *[f"Tapes/extra{i}.nfo" for i in range(40)],
+               *[f"Tapes/extra{i}.srt" for i in range(40)])
+    lib = create_library(conn, media_root, "Media", str(media_root))
+    checked = []
+    real = os.path.islink
+    monkeypatch.setattr(os.path, "islink", lambda p: checked.append(os.path.basename(p)) or real(p))
+    scan_library(conn, lib, probe_fn=fake_probe)
+    files = [name for name in checked if "." in name]      # (os.walk checks the folders itself)
+    assert sorted(files) == ["a.mpg", "a.png"]
+
+
+def test_expired_missing_videos_are_removed_in_bulk(conn, media_root, fake_probe):
+    from datetime import timedelta
+    import os
+    make_files(media_root, *[f"Tapes/v{i}.mpg" for i in range(600)], "Tapes/keep.mpg")
+    lib = create_library(conn, media_root, "Media", str(media_root))
+    scan_library(conn, lib, probe_fn=fake_probe)
+    for i in range(600):
+        os.remove(media_root / f"Tapes/v{i}.mpg")
+    scan_library(conn, lib, probe_fn=fake_probe)          # marked missing
+    result = scan_library(conn, lib, probe_fn=fake_probe, missing_grace=timedelta(0))
+    assert result["removed"] == 600
+    assert [r[0] for r in conn.execute("SELECT rel_path FROM media_items")] == ["Tapes/keep.mpg"]
