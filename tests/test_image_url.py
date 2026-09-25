@@ -1,5 +1,6 @@
 """Setting a tag's image from a URL: the server downloads it."""
 import http.server
+import socket
 import subprocess
 import threading
 from urllib.parse import urlsplit
@@ -16,32 +17,47 @@ from conftest import make_files, requires_ffmpeg
 
 
 @pytest.mark.parametrize(
-    "url",
-    [
-        "http://127.0.0.1/pic.jpg", "http://localhost/pic.jpg", "http://[::1]/pic.jpg",
-        "http://169.254.169.254/latest/meta-data", "http://0.0.0.0/pic.jpg",
-        "http://[::ffff:127.0.0.1]/pic.jpg",
-    ],
+    "ip", ["127.0.0.1", "::1", "169.254.169.254", "0.0.0.0", "::ffff:127.0.0.1", "224.0.0.1", "240.0.0.1"],
 )
-def test_this_machine_and_link_local_are_blocked(url):
-    with pytest.raises(fetch.FetchError, match="this server itself or link-local"):
-        fetch.check_url(url)
+@pytest.mark.parametrize("policy", ["internet", "lan"])
+def test_always_refused(ip, policy):
+    assert fetch.address_allowed(ip, policy) is False
+
+
+@pytest.mark.parametrize("ip", ["192.168.1.10", "10.0.0.5", "172.16.3.4", "fd00::1", "100.64.0.1"])
+def test_local_network_needs_the_lan_policy(ip):
+    assert fetch.address_allowed(ip, "internet") is False
+    assert fetch.address_allowed(ip, "lan") is True
+
+
+@pytest.mark.parametrize("ip", ["8.8.8.8", "1.1.1.1", "2606:4700:4700::1111"])
+def test_public_addresses_are_allowed(ip):
+    assert fetch.address_allowed(ip, "internet") is True
+    assert fetch.address_allowed(ip, "lan") is True
+
+
+def test_a_name_with_any_bad_answer_is_refused(monkeypatch):
+    """If DNS returns a public and a private address, refuse rather than pick one."""
+    answers = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, 80)) for ip in ("8.8.8.8", "127.0.0.1")]
+    monkeypatch.setattr(fetch.socket, "getaddrinfo", lambda *a, **k: answers)
+    with pytest.raises(fetch.FetchError):
+        fetch.resolve("mixed.test", 80, "internet")
 
 
 @pytest.mark.parametrize("url", ["ftp://example.com/a.jpg", "file:///etc/passwd", "javascript:alert(1)", "example.com/a.jpg"])
 def test_only_http_and_https(url):
     with pytest.raises(fetch.FetchError, match="http:// or https://"):
-        fetch.check_url(url)
-
-
-@pytest.mark.parametrize("url", ["http://192.168.1.10/a.jpg", "https://10.0.0.5:8443/a.png", "http://8.8.8.8/a.jpg"])
-def test_lan_and_internet_addresses_are_allowed(url):
-    fetch.check_url(url)  # no error
+        fetch.fetch_image_bytes(url)
 
 
 def test_empty_url():
     with pytest.raises(fetch.FetchError, match="Paste"):
         fetch.fetch_image_bytes("   ")
+
+
+def test_turned_off():
+    with pytest.raises(fetch.FetchError, match="turned off"):
+        fetch.fetch_image_bytes("https://example.com/a.jpg", policy="off")
 
 
 # ---- Downloading from a local test web server ------------------------------------------
@@ -60,8 +76,11 @@ def site(tmp_path_factory):
         "/empty.png": (200, b""),
     }
 
+    hosts_seen = []
+
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
+            hosts_seen.append(self.headers.get("Host"))
             if self.path == "/to-pic":
                 self.send_response(302)
                 self.send_header("Location", "/pic.png")
@@ -88,21 +107,18 @@ def site(tmp_path_factory):
 
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    yield f"http://127.0.0.1:{server.server_port}"
+    site = f"http://127.0.0.1:{server.server_port}"
+    global site_hosts_seen
+    site_hosts_seen = hosts_seen
+    yield site
     server.shutdown()
 
 
 @pytest.fixture
-def allow_test_server(monkeypatch, site):
-    """Let the server fetch from the local test site; everything else is checked as usual."""
-    real_check = fetch.check_url
-    test_host = urlsplit(site).netloc
-
-    def check(url):
-        if urlsplit(url).netloc != test_host:
-            real_check(url)
-
-    monkeypatch.setattr(fetch, "check_url", check)
+def allow_test_server(monkeypatch):
+    """Let the server fetch from the local test site (127.0.0.1); everything else as usual."""
+    real = fetch.address_allowed
+    monkeypatch.setattr(fetch, "address_allowed", lambda ip, policy: ip == "127.0.0.1" or real(ip, policy))
 
 
 @pytest.fixture
@@ -141,7 +157,7 @@ def test_redirects_are_followed(client, tag_id, site, allow_test_server):
         ("/nope.png", "answered 404"),
         ("/huge.png", "at most 20 MB"),
         ("/empty.png", "returned nothing"),
-        ("/to-metadata", "link-local"),   # a redirect can't sneak past the check
+        ("/to-metadata", "public internet addresses"),   # a redirect can't sneak past the check
         ("/loop", "redirects too many times"),
     ],
 )
@@ -155,7 +171,34 @@ def test_bad_urls_are_explained(client, tag_id, site, allow_test_server, path, m
 def test_this_server_is_refused_without_the_test_allowance(client, tag_id, site):
     res = set_from_url(client, tag_id, f"{site}/pic.png")  # the test site is on 127.0.0.1
     assert res.status_code == 400
-    assert "this server itself" in res.json()["detail"]
+    assert "public internet addresses" in res.json()["detail"]
+
+
+@requires_ffmpeg
+def test_dns_rebinding_cannot_change_the_address(client, tag_id, site, allow_test_server, monkeypatch):
+    """The host is looked up once, checked, and then connected to by that exact address.
+
+    rebind.test only resolves through this test's resolver, to the test site. If
+    the download resolved the name a second time (as urllib did when connecting),
+    it would fail; instead it connects to the checked address and still sends
+    the real host name.
+    """
+    port = int(site.rsplit(":", 1)[1])
+    lookups = []
+    real_getaddrinfo = socket.getaddrinfo
+
+    def resolver(host, *args, **kwargs):
+        if host == "127.0.0.1":  # connecting to a literal IP: not a DNS lookup
+            return real_getaddrinfo(host, *args, **kwargs)
+        lookups.append(host)
+        assert host == "rebind.test", f"unexpected lookup of {host}"
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", port))]
+
+    monkeypatch.setattr(fetch.socket, "getaddrinfo", resolver)
+    res = set_from_url(client, tag_id, f"http://rebind.test:{port}/pic.png")
+    assert res.status_code == 200, res.text
+    assert lookups == ["rebind.test"]                    # exactly one lookup
+    assert site_hosts_seen[-1] == f"rebind.test:{port}"  # and the Host header is the name
 
 
 def test_unknown_tag(client):

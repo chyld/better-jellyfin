@@ -9,6 +9,7 @@ from datetime import timedelta
 from pathlib import Path
 
 from .db import new_uid
+from .paths import is_inside
 from .probe import ProbeError, ProbeResult, classify, probe as ffprobe
 
 VIDEO_EXTENSIONS = {
@@ -88,6 +89,7 @@ class Walk:
     folder_art: dict[str, str]
     unreadable_folders: list[str]   # folders that couldn't be listed (relative)
     unreadable_files: set[str]      # videos listed but not readable (relative)
+    outside_library: int = 0        # symlinks leading out of the library, skipped
 
     def protects(self, rel_path: str) -> bool:
         """Was this path hidden from the walk by something it couldn't read?
@@ -105,6 +107,7 @@ def walk_library(root: Path) -> Walk:
     folder_art: dict[str, str] = {}
     unreadable_folders: list[str] = []
     unreadable_files: set[str] = set()
+    outside = 0
 
     def on_error(err: OSError) -> None:
         if Path(err.filename) == root:
@@ -116,6 +119,10 @@ def walk_library(root: Path) -> Walk:
         # Skip hidden folders (.zfs snapshots, .Trash, etc.).
         dirnames[:] = sorted(d for d in dirnames if not d.startswith("."))
         rel_dir = Path(dirpath).relative_to(root)
+        # Symlinks leading out of the library are ignored, videos and pictures alike.
+        escaping = {f for f in filenames if os.path.islink(os.path.join(dirpath, f)) and not is_inside(root, rel_dir / f)}
+        outside += sum(1 for f in escaping if is_video(f))
+        filenames = [f for f in filenames if f not in escaping]
         names_lower = {f.lower(): f for f in filenames}
         video_names = sorted(f for f in filenames if is_video(f))
 
@@ -145,7 +152,7 @@ def walk_library(root: Path) -> Walk:
                 size=st.st_size,
                 mtime=st.st_mtime,
             ))
-    return Walk(videos, folder_art, sorted(unreadable_folders), unreadable_files)
+    return Walk(videos, folder_art, sorted(unreadable_folders), unreadable_files, outside)
 
 
 def _safe_probe(probe_fn: ProbeFn, path: Path) -> ProbeResult:
@@ -326,4 +333,5 @@ def scan_library(
         "removed": len(to_remove),
         "unreadable_folders": walk.unreadable_folders,
         "unreadable_files": len(walk.unreadable_files),
+        "outside_library": walk.outside_library,
     }

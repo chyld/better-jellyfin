@@ -14,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import browse, custom_images, fetch, libraries, playback, tags
+from .paths import OutsideRoot, resolve_inside
 from .config import Settings
 from .db import connect, init_db
 from .images import MAX_UPLOAD_BYTES, Thumbnailer, ThumbnailError
@@ -147,7 +148,7 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
 
     def download(url: str) -> bytes:
         try:
-            return fetch.fetch_image_bytes(url)
+            return fetch.fetch_image_bytes(url, policy=settings.image_urls)
         except fetch.FetchError as exc:
             raise HTTPException(400, str(exc))
 
@@ -156,6 +157,17 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
         if lib is None:
             raise browse.NotFound("Library not found.")
         return Path(lib["path"])
+
+    def library_file(conn: sqlite3.Connection, library_id: int, rel_path: str) -> Path:
+        """A file in a library, re-checked now: it and its library must still be
+        inside the media root, even if something was swapped for a symlink since
+        the scan. Anything else is reported as not found."""
+        root = library_root(conn, library_id)
+        try:
+            resolve_inside(settings.media_root, root)
+            return resolve_inside(root, rel_path)
+        except (OutsideRoot, OSError):
+            raise HTTPException(404, "The video file is missing. Is the NAS connected?")
 
     def thumb_response(make) -> FileResponse:
         try:
@@ -174,8 +186,11 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
         if row is None:
             raise HTTPException(404, "Video not found.")
         if row["poster_path"]:
-            root = library_root(conn, row["library_id"])
-            return thumb_response(lambda: thumbs.from_image(root / row["poster_path"], "landscape"))
+            try:
+                poster = library_file(conn, row["library_id"], row["poster_path"])
+            except HTTPException:
+                raise HTTPException(404, "No image.")
+            return thumb_response(lambda: thumbs.from_image(poster, "landscape"))
         uploaded = custom_images.video_image_path(settings.images_dir, row["uid"])
         if row["custom_image"] and uploaded.is_file():
             return FileResponse(uploaded, media_type="image/jpeg", headers=THUMB_HEADERS)
@@ -186,8 +201,11 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
             "SELECT art_path FROM folder_art WHERE library_id = ? AND rel_dir = ?", (library_id, rel_dir)
         ).fetchone()
         if row is not None:
-            root = library_root(conn, library_id)
-            return thumb_response(lambda: thumbs.from_image(root / row["art_path"]))
+            try:
+                art = library_file(conn, library_id, row["art_path"])
+            except HTTPException:
+                raise HTTPException(404, "No folder art.")
+            return thumb_response(lambda: thumbs.from_image(art))
         custom = custom_images.custom_folder_image(conn, library_id, rel_dir)
         if custom:
             uploaded = custom_images.folder_image_path(settings.images_dir, custom["uid"])
@@ -305,7 +323,7 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
         row = conn.execute("SELECT * FROM media_items WHERE uid = ?", (item_uid,)).fetchone()
         if row is None:
             raise HTTPException(404, "Video not found.")
-        path = library_root(conn, row["library_id"]) / row["rel_path"]
+        path = library_file(conn, row["library_id"], row["rel_path"])
         if not path.is_file():
             raise HTTPException(404, "The video file is missing. Is the NAS connected?")
         return row, path

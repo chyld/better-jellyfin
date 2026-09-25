@@ -211,3 +211,15 @@ def test_missing_grace_from_environment(monkeypatch):
     assert Settings.from_env().missing_grace == timedelta(hours=12)
     monkeypatch.delenv("REEL_MISSING_GRACE_DAYS")
     assert Settings.from_env().missing_grace == timedelta(days=7)
+
+
+def test_image_url_policy_from_environment(monkeypatch):
+    import pytest
+    from reel.config import Settings
+
+    assert Settings.from_env().image_urls == "internet"
+    monkeypatch.setenv("REEL_IMAGE_URLS", "LAN")
+    assert Settings.from_env().image_urls == "lan"
+    monkeypatch.setenv("REEL_IMAGE_URLS", "everything")
+    with pytest.raises(SystemExit, match="REEL_IMAGE_URLS must be one of"):
+        Settings.from_env()

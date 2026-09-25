@@ -57,4 +57,7 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --start-interval=2s --retries=3 \
     CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=4)"]
 
-CMD ["uvicorn", "--factory", "reel.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips", "*"]
+# One worker on purpose: scans and streams are managed inside the process.
+# Forwarded headers (X-Forwarded-For...) are only trusted from FORWARDED_ALLOW_IPS,
+# which defaults to 127.0.0.1; set it to your reverse proxy's address if you add one.
+CMD ["uvicorn", "--factory", "reel.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

@@ -1,4 +1,5 @@
 """Real ffprobe runs against tiny clips made with ffmpeg."""
+import shutil
 import pytest
 
 from reel.libraries import create_library
@@ -47,7 +48,7 @@ def test_probe_corrupt_file_raises(clips):
 
 def test_full_scan_with_real_ffprobe(conn, media_root, clips):
     for clip in clips.iterdir():
-        (media_root / clip.name).symlink_to(clip)
+        shutil.copyfile(clip, media_root / clip.name)
     lib = create_library(conn, media_root, "Clips", str(media_root))
     result = scan_library(conn, lib, workers=4)
     assert result["total"] == len(list(clips.iterdir()))

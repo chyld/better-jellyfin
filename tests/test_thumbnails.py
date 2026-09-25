@@ -1,4 +1,5 @@
 """Thumbnails made with real ffmpeg: posters, folder art and video frames."""
+import shutil
 import subprocess
 from functools import partial
 
@@ -50,13 +51,13 @@ def lib(client, media_root, clips):
     folder = media_root / "Media"
     (folder / "posters").mkdir(parents=True)
     (folder / "frames").mkdir()
-    (folder / "posters/clip.mp4").symlink_to(clips / "h264_aac.mp4")
-    (folder / "posters/tape.mpg").symlink_to(clips / "vhs_interlaced.mpg")
+    shutil.copyfile(clips / "h264_aac.mp4", folder / "posters/clip.mp4")
+    shutil.copyfile(clips / "vhs_interlaced.mpg", folder / "posters/tape.mpg")
     image(folder / "posters/clip.png")
     image(folder / "posters/folder.png", size="1024x1536", color="blue")
     (folder / "posters/tape.png").write_bytes(b"not really a png")
-    (folder / "frames/old.avi").symlink_to(clips / "xvid_mp3.avi")
-    (folder / "frames/broken.mp4").symlink_to(clips / "corrupt.mp4")
+    shutil.copyfile(clips / "xvid_mp3.avi", folder / "frames/old.avi")
+    shutil.copyfile(clips / "corrupt.mp4", folder / "frames/broken.mp4")
     lib = client.post("/api/libraries", json={"name": "Media", "path": str(folder)}).json()
     client.post(f"/api/libraries/{lib['id']}/scan")
     client.scans.wait_idle()
@@ -120,7 +121,7 @@ def test_folder_art(client, lib, tmp_path):
 def test_library_root_folder_preview(client, media_root, clips, tmp_path):
     folder = media_root / "Rooted"
     folder.mkdir()
-    (folder / "a.mp4").symlink_to(clips / "h264_aac.mp4")
+    shutil.copyfile(clips / "h264_aac.mp4", folder / "a.mp4")
     image(folder / "folder.png", size="800x800")
     lib = client.post("/api/libraries", json={"name": "Rooted", "path": str(folder)}).json()
     client.post(f"/api/libraries/{lib['id']}/scan")

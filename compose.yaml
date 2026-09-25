@@ -26,6 +26,9 @@ services:
     environment:
       REEL_PROBE_WORKERS: "${REEL_PROBE_WORKERS:-4}"
       REEL_MISSING_GRACE_DAYS: "${REEL_MISSING_GRACE_DAYS:-7}"
+      REEL_IMAGE_URLS: "${REEL_IMAGE_URLS:-internet}"
+      # Behind a reverse proxy? Trust forwarded headers from it only:
+      # FORWARDED_ALLOW_IPS: "172.18.0.1"
     volumes:
       # Your videos, read-only: Reel never writes to them.
       - "${MEDIA_PATH:-/mnt/nas/videos}:/media:ro"

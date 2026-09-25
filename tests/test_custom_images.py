@@ -109,7 +109,7 @@ def test_bad_video_uploads(client, lib):
 
 
 def test_video_image_from_url(client, lib, picture, monkeypatch):
-    monkeypatch.setattr(fetch, "fetch_image_bytes", lambda url: picture)
+    monkeypatch.setattr(fetch, "fetch_image_bytes", lambda url, **kwargs: picture)
     video = items(client, lib, "Tapes")["a"]["id"]
     res = client.post(f"/api/items/{video}/image-url", json={"url": "https://example.com/a.png"})
     assert res.status_code == 200 and res.json()["custom_image"]
@@ -165,7 +165,7 @@ def test_unknown_folder(client, lib, picture, path):
 
 
 def test_folder_image_from_url(client, lib, picture, monkeypatch):
-    monkeypatch.setattr(fetch, "fetch_image_bytes", lambda url: picture)
+    monkeypatch.setattr(fetch, "fetch_image_bytes", lambda url, **kwargs: picture)
     res = client.post(f"/api/libraries/{lib}/folder-image-url", params={"path": "Tapes"},
                       json={"url": "https://example.com/a.png"})
     assert res.status_code == 200 and res.json()["custom_art"]
