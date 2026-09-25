@@ -532,7 +532,7 @@ def test_cache_limit_keeps_what_viewers_need(tmp_path, long_clip, monkeypatch):
             await m.media_segment(s, V, n)
         await m._stop(s.viewers[V])
         monkeypatch.setattr(hls, "KEEP_NEAR", 2)
-        freed = m.enforce_cache_limit()              # the viewer is at 6: keeps 5 and 6
+        freed = await m.enforce_cache_limit()        # the viewer is at 6: keeps 5 and 6
         left = sorted(int(p.stem) for p in s.folder.glob("*.ts"))
         await m.shutdown()
         return freed, left
@@ -705,8 +705,8 @@ def test_cache_target_is_soft_for_what_viewers_need(tmp_path, monkeypatch, caplo
         for n in range(8):
             s.segment(n).write_bytes(b"x" * 1000)
         with caplog.at_level(logging.WARNING, logger="reel.hls"):
-            m.enforce_cache_limit()
-            m.enforce_cache_limit()                                   # still over: no second warning
+            await m.enforce_cache_limit()
+            await m.enforce_cache_limit()                             # still over: no second warning
         left = sorted(int(p.stem) for p in s.folder.glob("*.ts"))
         await m.shutdown()
         return left
@@ -714,3 +714,32 @@ def test_cache_target_is_soft_for_what_viewers_need(tmp_path, monkeypatch, caplo
     assert run(scenario()) == [3, 4, 5]                               # position - 1 .. KEEP_NEAR
     warnings = [r for r in caplog.records if "over REEL_HLS_CACHE_MB" in r.getMessage()]
     assert len(warnings) == 1
+
+
+def test_cache_file_work_runs_off_the_event_loop_and_status_doesnt_walk(tmp_path, monkeypatch):
+    import threading
+
+    m = manager(tmp_path)
+    threads = {}
+    real_evict = hls._evict
+
+    def watched_evict(*args):
+        threads["evict"] = threading.get_ident()
+        return real_evict(*args)
+
+    monkeypatch.setattr(hls, "_evict", watched_evict)
+
+    async def scenario():
+        threads["loop"] = threading.get_ident()
+        s = m.get(await m.open("vid", facts(path=tmp_path / "x.avi")))
+        s.segment(0).write_bytes(b"x" * 2048 * 1024)
+        before = m.status()["cache_mb"]                     # nothing measured yet
+        await m.enforce_cache_limit()
+        monkeypatch.setattr(hls, "_folder_size", lambda folder: 1 / 0)   # status must not walk
+        after = m.status()["cache_mb"]
+        await m.shutdown()
+        return before, after
+
+    before, after = run(scenario())
+    assert (before, after) == (0.0, 2.0)
+    assert threads["evict"] != threads["loop"]

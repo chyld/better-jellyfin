@@ -339,7 +339,10 @@ length is known and any point can be sought. ffmpeg encodes ahead of the viewer 
   near are deleted first, from the sessions used longest ago. The segments around each viewer
   (26: the one just behind, and 2½ minutes ahead) are never deleted for space, so the cache can
   stay over the target while people watch. That's at most about 25–75 MB per viewer at 1080p.
-  Reel logs a warning when that happens instead of interrupting playback.
+  Reel logs a warning when that happens instead of interrupting playback. The check runs every
+  15 seconds: what to keep is decided from the sessions in memory, and the disk work (measuring,
+  deleting) happens in a worker thread, so a slow disk doesn't hold up playback. The size shown
+  in `/api/health` is from that last check.
 
 Encoders use the same `REEL_MAX_STREAMS` slots. Safari plays HLS natively; other browsers use the
 bundled [hls.js](https://github.com/video-dev/hls.js) (light build, Apache-2.0). (Segments are
@@ -631,9 +634,9 @@ changes how thumbnails are made.
 ### Tests
 
 ```sh
-uv run pytest              # backend: 510 tests
+uv run pytest              # backend: 519 tests
 node --test tests/js/      # frontend: 30 tests
-uv run pytest -m browser   # browser: 13 tests (about 2 minutes; needs Chromium and ffmpeg)
+uv run pytest -m browser   # browser: 14 tests (about 2 minutes; needs Chromium and ffmpeg)
 scripts/docker-smoke.sh    # builds the image and checks it end to end (needs Docker)
 ```
 

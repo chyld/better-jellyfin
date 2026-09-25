@@ -234,6 +234,7 @@ class HlsManager:
         self.sessions: dict[str, Session] = {}
         self._runs = itertools.count(1)
         self._over_limit = False
+        self._cache_bytes = 0     # as of the last housekeeping pass
 
     def start(self) -> None:
         """Leftovers from a previous run are useless without their sessions: start clean.
@@ -505,50 +506,37 @@ class HlsManager:
         return removed
 
     def cache_size(self) -> int:
-        """Everything in the cache: published segments, and files encoders are
-        still writing or haven't published yet."""
-        total = 0
-        for root, _, files in os.walk(self.cache_dir):
-            for name in files:
-                try:
-                    total += os.stat(os.path.join(root, name)).st_size
-                except OSError:
-                    pass
-        return total
+        """Everything in the cache now: published segments, and files encoders are
+        still writing or haven't published yet. Walks the folder: call it from a
+        worker thread (housekeeping does)."""
+        return _folder_size(self.cache_dir)
 
     def status(self) -> dict:
-        return {"sessions": len(self.sessions), "cache_mb": round(self.cache_size() / 1024**2, 1),
+        # The size from the last housekeeping pass (every 15 s): no walk per request.
+        return {"sessions": len(self.sessions), "cache_mb": round(self._cache_bytes / 1024**2, 1),
                 "target_mb": self.cache_limit // 1024**2}
 
-    def enforce_cache_limit(self) -> int:
+    async def enforce_cache_limit(self) -> int:
         """Delete segments until the cache fits its size target, least useful first:
         sessions used longest ago, and within them the segments furthest from any
-        viewer. Segments a viewer is about to play are kept. Returns bytes freed."""
-        candidates = []
+        viewer. Segments a viewer is about to play (KEEP_NEAR around each) are kept.
+        Returns bytes freed.
+
+        What to keep is decided here, on the event loop, from the sessions as they
+        are now; the file work (walking, stat, delete) runs in a worker thread, so
+        a slow disk never holds up playback requests."""
+        plan = []
         for session in list(self.sessions.values()):
             wanted = set()
             for v in session.viewers.values():
                 wanted.update(range(v.position - 1, v.position - 1 + KEEP_NEAR))
-            positions = [v.position for v in session.viewers.values()]
-            for path in session.folder.glob("*.ts"):
-                try:
-                    n, size = int(path.stem), path.stat().st_size
-                except (ValueError, OSError):
-                    continue
-                if n not in wanted:
-                    distance = min((abs(n - p) for p in positions), default=math.inf)
-                    candidates.append((session.last_used, -distance, path, size))
-        total = self.cache_size()           # published, staging and in-progress files
-        freed = 0
-        for _, _, path, size in sorted(candidates, key=lambda c: (c[0], c[1])):
-            if total - freed <= self.cache_limit:
-                break
-            path.unlink(missing_ok=True)
-            freed += size
-        over = total - freed > self.cache_limit
+            plan.append((session.folder, session.last_used, wanted, [v.position for v in session.viewers.values()]))
+        total, freed = await anyio.to_thread.run_sync(_evict, self.cache_dir, self.cache_limit, plan)
+        self._cache_bytes = total - freed
+        over = self._cache_bytes > self.cache_limit
         if over and not self._over_limit:
             log.warning("HLS cache is over REEL_HLS_CACHE_MB (%d MB, target %d MB): what's left is "
-                        "what viewers are playing now", (total - freed) // 1024**2, self.cache_limit // 1024**2)
+                        "what viewers are playing now", self._cache_bytes // 1024**2, self.cache_limit // 1024**2)
         self._over_limit = over
         return freed
 
@@ -557,9 +545,7 @@ class HlsManager:
             await asyncio.sleep(15)
             try:
                 await self.remove_idle()
-                # On the event loop, like everything that changes sessions: it reads
-                # their viewers. A thousand stat() calls on local disk is quick.
-                self.enforce_cache_limit()
+                await self.enforce_cache_limit()
             except Exception:
                 log.exception("HLS housekeeping failed")
 
@@ -567,3 +553,38 @@ class HlsManager:
         for session in list(self.sessions.values()):
             await self.retire(session)
         shutil.rmtree(self.cache_dir, ignore_errors=True)
+
+
+def _folder_size(folder: Path) -> int:
+    total = 0
+    for root, _, files in os.walk(folder):
+        for name in files:
+            try:
+                total += os.stat(os.path.join(root, name)).st_size
+            except OSError:
+                pass
+    return total
+
+
+def _evict(cache_dir: Path, limit: int, plan: list) -> tuple[int, int]:
+    """In a worker thread: delete published segments no viewer wants until the
+    cache fits `limit`. `plan` is (folder, last used, wanted segments, viewer
+    positions) per session. Returns (bytes before, bytes freed)."""
+    candidates = []
+    for folder, last_used, wanted, positions in plan:
+        for path in folder.glob("*.ts"):
+            try:
+                n, size = int(path.stem), path.stat().st_size
+            except (ValueError, OSError):
+                continue
+            if n not in wanted:
+                distance = min((abs(n - p) for p in positions), default=math.inf)
+                candidates.append((last_used, -distance, path, size))
+    total = _folder_size(cache_dir)
+    freed = 0
+    for _, _, path, size in sorted(candidates, key=lambda c: (c[0], c[1])):
+        if total - freed <= limit:
+            break
+        path.unlink(missing_ok=True)
+        freed += size
+    return total, freed
