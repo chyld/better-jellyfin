@@ -182,17 +182,14 @@ def test_shutting_down_during_a_scan_is_quick(settings, media_root):
 def test_stopping_kills_a_probe_that_hangs(settings, media_root, monkeypatch):
     """A real scan whose ffprobe never returns (a file that never answers) still stops at once."""
     import os
-    from functools import partial
 
     from reel import scanner
-    from reel.probe import probe
-    from reel.scanner import scan_library
 
     folder = make_dir(media_root / "Tapes")
     os.mkfifo(folder / "stuck.mkv")
     monkeypatch.setattr(scanner, "fingerprint", lambda path, size: "fp")   # only ffprobe opens it
     init_db(settings.db_path)
-    manager = ScanManager(settings.db_path, scan_fn=partial(scan_library, probe_fn=probe))
+    manager = ScanManager(settings.db_path)      # the real scan, with its own ffprobe supervisor
     app = create_app(settings, manager)
     with TestClient(app) as client:
         lib = client.post("/api/libraries", json={"name": "Tapes", "path": str(folder)}).json()["id"]
@@ -205,3 +202,17 @@ def test_stopping_kills_a_probe_that_hangs(settings, media_root, monkeypatch):
         began = time.monotonic()
     assert time.monotonic() - began < 3                  # shutdown killed it
     assert manager.status(1)["state"] == "cancelled"
+
+
+def test_a_failing_clean_up_after_a_scan_doesnt_fail_the_scan(client, media_root):
+    make_files(media_root, "Tapes/a.mpg")
+    lib = client.post("/api/libraries", json={"name": "Tapes", "path": str(media_root / "Tapes")}).json()["id"]
+
+    def broken(conn):
+        raise OSError("images folder unreadable")
+
+    client.scans.after_scan = broken
+    client.post(f"/api/libraries/{lib}/scan")
+    client.scans.wait_idle()
+    body = client.get("/api/libraries").json()[0]
+    assert body["scan"]["state"] == "done" and body["last_scan_error"] is None and body["item_count"] == 1

@@ -3,10 +3,11 @@ import logging
 import queue
 import threading
 from collections.abc import Callable
+from functools import partial
 from pathlib import Path
 
 from .db import connect
-from .probe import allow_probes, stop_running_probes
+from .probe import ProbeSupervisor
 from .scanner import ScanCancelled, scan_library
 
 log = logging.getLogger(__name__)
@@ -15,10 +16,14 @@ ScanFn = Callable[..., dict]
 
 
 class ScanManager:
-    def __init__(self, db_path: Path, *, workers: int = 4, scan_fn: ScanFn = scan_library):
+    def __init__(self, db_path: Path, *, workers: int = 4, scan_fn: ScanFn | None = None, **scan_options):
+        """`scan_fn` replaces the scan (tests); otherwise scan_library runs with this
+        manager's own ffprobe supervisor, so stopping it stops only its probes.
+        `scan_options` go to scan_library (e.g. missing_grace)."""
         self._db_path = db_path
         self._workers = workers
-        self._scan_fn = scan_fn
+        self.probes = ProbeSupervisor()
+        self._scan_fn = scan_fn or partial(scan_library, probe_fn=self.probes.probe, **scan_options)
         self._queue: queue.Queue[int | None] = queue.Queue()
         self._lock = threading.Lock()
         self._status: dict[int, dict] = {}
@@ -29,7 +34,7 @@ class ScanManager:
 
     def start(self) -> None:
         self._cancel.clear()
-        allow_probes()
+        self.probes.allow()
         self._thread = threading.Thread(target=self._run, name="scanner", daemon=True)
         self._thread.start()
 
@@ -43,7 +48,7 @@ class ScanManager:
         waiting after `timeout`, but the process can't exit before that call
         returns: Python waits for the scan's worker threads when it exits."""
         self._cancel.set()
-        stop_running_probes()
+        self.probes.stop()
         while True:
             try:
                 library_id = self._queue.get_nowait()
@@ -123,8 +128,13 @@ class ScanManager:
                 on_progress=lambda done, total: self._update(library_id, done=done, total=total),
                 cancel=self._cancel,
             )
+            # The scan is saved by now: a failing clean-up afterwards doesn't undo it.
             if self.after_scan:
-                self.after_scan(conn)
+                try:
+                    self.after_scan(conn)
+                except Exception:
+                    log.exception("clean-up after scanning library %s failed", library_id)
+                    conn.rollback()
             self._update(library_id, state="done", result=result)
         except ScanCancelled:
             log.info("scan of library %s stopped", library_id)

@@ -68,6 +68,9 @@ class Settings:
                 f"e.g. `sudo chown -R {os.getuid()}:{os.getgid()} <the data folder>`."
             )
 
+    def lock_data_dir(self) -> "DataLock":
+        return DataLock(self.data_dir)
+
     @classmethod
     def from_env(cls) -> "Settings":
         return cls(
@@ -79,3 +82,32 @@ class Settings:
             max_streams=max(1, int(os.environ.get("REEL_MAX_STREAMS", "3"))),
             hls_cache_mb=max(100, int(os.environ.get("REEL_HLS_CACHE_MB", "2048"))),
         )
+
+
+class DataFolderInUse(RuntimeError):
+    """Another Reel already runs on this data folder."""
+
+
+class DataLock:
+    """Only one Reel may use a data folder: its scans, stream limits and HLS
+    sessions live in the process, so a second one would fight the first. Held
+    (an OS file lock on reel.lock) until release() or the process ends."""
+
+    def __init__(self, data_dir: Path):
+        import fcntl
+        self._fd = os.open(data_dir / "reel.lock", os.O_RDWR | os.O_CREAT, 0o644)
+        try:
+            fcntl.flock(self._fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            os.close(self._fd)
+            raise DataFolderInUse(
+                f"Another Reel is already using the data folder {data_dir}. "
+                "Only one can run per data folder: stop the other one first."
+            )
+        os.ftruncate(self._fd, 0)
+        os.write(self._fd, f"{os.getpid()}\n".encode())
+
+    def release(self) -> None:
+        if self._fd is not None:
+            os.close(self._fd)  # closing drops the lock
+            self._fd = None

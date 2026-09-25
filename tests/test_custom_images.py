@@ -239,7 +239,9 @@ def test_old_tag_image_folder_is_moved(settings, picture):
     import os, time
     stale = time.time() - 7200
     os.utime(old / "rough-cut.jpg", (stale, stale))
-    create_app(settings)
+    from fastapi.testclient import TestClient
+    with TestClient(create_app(settings)):         # the move happens when the server starts
+        pass
     assert not old.exists()
     # The tag doesn't exist in this database, so the moved file is then pruned.
     assert images_on_disk(settings, "tags") == []

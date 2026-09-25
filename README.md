@@ -79,7 +79,7 @@ Useful commands:
 
 ```sh
 docker compose logs -f                        # follow the logs
-curl localhost:8000/api/health                # {"ok": true, "ffmpeg": "n9.0.2-..."}
+curl localhost:8000/api/health                # {"ok": true, "ffmpeg": "n9.0.2-...", "ffprobe": ..., ...}
 git pull && docker compose up -d --build      # update Reel (keeps your data)
 docker compose build --no-cache && docker compose up -d   # also pull the newest ffmpeg
 scripts/docker-smoke.sh                       # build and test the image end to end
@@ -467,9 +467,11 @@ Everything Reel stores is in the data folder: `./data` with Docker, or `REEL_DAT
 ```
 data/
 ├── reel.db             SQLite database: libraries, videos, tags, image records
+├── reel.lock           held by the running Reel (one per data folder)
 ├── thumbs/             cached thumbnails of NAS pictures (safe to delete; they're remade)
 │   └── ab/abcdef….jpg
-└── images/             pictures you uploaded
+├── hls/                HLS segments being served (emptied at startup)
+└── images/             pictures you uploaded (and frames snapped in the player)
     ├── tags/<tag uuid>-<version>.jpg
     ├── videos/<video uuid>-<version>.jpg
     └── folders/<uuid>-<version>.jpg
@@ -571,8 +573,12 @@ JSON over HTTP. Every ID is a UUID. There's no authentication yet (see
 | POST | `/api/tags/{id}/image-url` | `{url}`: set the tag picture from a URL. |
 
 **Other:** `GET /api/me` returns the current user (for now, always the built-in local user).
-`GET /api/health` returns `{"ok": true, "ffmpeg": "<version>"}`. It's used by the
-Docker health check and kept out of the access log.
+`GET /api/health` returns `{"ok", "ffmpeg", "ffprobe", "streams": {"active", "limit"}, "hls":
+{"sessions", "cache_mb", "target_mb"}}`. It answers **503** with `ok: false` when ffmpeg or ffprobe
+is missing, so Docker marks the container unhealthy. The tools' versions are checked once, at
+startup (with a time limit), not on every poll. It's used by the Docker health check and kept
+out of the access log. The Libraries page shows the same numbers ("Streams in use: 1 of 3 · HLS
+cache: 120 MB of 2048 MB"), which is what a "try again in a moment" is about.
 
 Errors are JSON `{"detail": "…"}` with a message meant for people: 400 for invalid input, 404
 for not found, 409 for conflicts, 413 for an upload over 20 MB, 416 for a start time outside
@@ -600,7 +606,7 @@ changes how thumbnails are made.
 ### Tests
 
 ```sh
-uv run pytest              # backend: 501 tests
+uv run pytest              # backend: 507 tests
 node --test tests/js/      # frontend: 30 tests
 uv run pytest -m browser   # browser: 13 tests (about 2 minutes; needs Chromium and ffmpeg)
 scripts/docker-smoke.sh    # builds the image and checks it end to end (needs Docker)
@@ -684,9 +690,13 @@ Dockerfile, compose.yaml, .env.example
 
 - **No login.** Anyone who can reach the port can browse, play, and change libraries, tags and
   images. Keep it on your home network or behind a reverse proxy with authentication.
-- **One worker process.** Scans and streams are managed inside the process, so Reel runs with
-  exactly one uvicorn worker (the Docker image does). More workers would each run their own
-  scanner and stream limits.
+- **One process per data folder.** Scans, stream limits and HLS sessions are managed inside the
+  process, so Reel runs with exactly one uvicorn worker (the Docker image does). More workers
+  would each run their own scanner and stream limits. To make that impossible by accident, a
+  started Reel holds a lock on `reel.lock` in the data folder; a second one on the same folder
+  stops at startup with "Another Reel is already using the data folder". Nothing in the data
+  folder is changed until the lock is held (migrations, clean-up and emptying the HLS cache all
+  happen then, not when the app is built).
 - **No subtitles** (neither external `.srt` nor embedded tracks).
 - **No hardware transcoding.** Conversion runs on the CPU, which is fine for this library.
   `compose.yaml` notes where a GPU would go.

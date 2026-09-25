@@ -28,60 +28,67 @@ class ProbeError(Exception):
     pass
 
 
-# The ffprobe processes running now, so a scan being stopped can end them. Starting
-# and registering a probe happens under the same lock as stopping them, and once
-# stopped no new probe starts, so none can slip past a shutdown.
-_running: set[subprocess.Popen] = set()
-_running_lock = threading.Lock()
-_stopped = False
+class ProbeSupervisor:
+    """Runs ffprobe and can stop every probe it started (a scan being stopped).
+
+    Starting and registering a probe happens under the same lock as stopping,
+    and once stopped no new probe starts, so none can slip past a shutdown.
+    Each ScanManager has its own; `probe()` uses a shared default one.
+    """
+
+    def __init__(self):
+        self._running: set[subprocess.Popen] = set()
+        self._lock = threading.Lock()
+        self._stopped = False
+
+    def stop(self) -> int:
+        """Kill every probe running now and refuse new ones until allow(). Returns how many."""
+        with self._lock:
+            self._stopped = True
+            procs = list(self._running)
+            for proc in procs:
+                proc.kill()
+        return len(procs)
+
+    def allow(self) -> None:
+        with self._lock:
+            self._stopped = False
+
+    def probe(self, path: Path) -> ProbeResult:
+        """Run ffprobe on a file. Raises ProbeError if it can't be read."""
+        cmd = [
+            "ffprobe", "-v", "error", "-print_format", "json",
+            "-show_format", "-show_streams", str(path),
+        ]
+        with self._lock:
+            if self._stopped:
+                raise ProbeError("ffprobe was stopped")
+            proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE, text=True)
+            self._running.add(proc)
+        try:
+            try:
+                stdout, stderr = proc.communicate(timeout=PROBE_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.communicate()
+                raise ProbeError(f"ffprobe timed out after {PROBE_TIMEOUT}s")
+        finally:
+            with self._lock:
+                self._running.discard(proc)
+        if proc.returncode != 0:
+            if proc.returncode < 0:
+                raise ProbeError("ffprobe was stopped")
+            raise ProbeError(stderr.strip().splitlines()[-1] if stderr.strip() else "ffprobe failed")
+        return parse_probe(json.loads(stdout))
 
 
-def stop_running_probes() -> int:
-    """Kill every ffprobe running now, and refuse new ones until allow_probes()
-    (Reel is shutting down). Returns how many were killed."""
-    global _stopped
-    with _running_lock:
-        _stopped = True
-        procs = list(_running)
-        for proc in procs:
-            proc.kill()
-    return len(procs)
-
-
-def allow_probes() -> None:
-    """Let probes run again (scans are starting)."""
-    global _stopped
-    with _running_lock:
-        _stopped = False
+_default = ProbeSupervisor()
 
 
 def probe(path: Path) -> ProbeResult:
-    """Run ffprobe on a file. Raises ProbeError if it can't be read."""
-    cmd = [
-        "ffprobe", "-v", "error", "-print_format", "json",
-        "-show_format", "-show_streams", str(path),
-    ]
-    with _running_lock:
-        if _stopped:
-            raise ProbeError("ffprobe was stopped")
-        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                text=True)
-        _running.add(proc)
-    try:
-        try:
-            stdout, stderr = proc.communicate(timeout=PROBE_TIMEOUT)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.communicate()
-            raise ProbeError(f"ffprobe timed out after {PROBE_TIMEOUT}s")
-    finally:
-        with _running_lock:
-            _running.discard(proc)
-    if proc.returncode != 0:
-        if proc.returncode < 0:
-            raise ProbeError("ffprobe was stopped")
-        raise ProbeError(stderr.strip().splitlines()[-1] if stderr.strip() else "ffprobe failed")
-    return parse_probe(json.loads(stdout))
+    """Run ffprobe on a file (outside any scan manager). Raises ProbeError if it can't be read."""
+    return _default.probe(path)
 
 
 def parse_probe(data: dict) -> ProbeResult:

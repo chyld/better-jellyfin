@@ -78,6 +78,25 @@ function libraryRow(lib) {
 
 const refresh = () => activePage?.refresh();
 
+/** /api/health answers 503 when ffmpeg is missing, with the same details. */
+async function serverHealth() {
+  try {
+    const res = await fetch("/api/health");
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+function loadLine(health) {
+  const parts = [
+    `Streams in use: ${health.streams.active} of ${health.streams.limit}`,
+    `HLS cache: ${Math.round(health.hls.cache_mb)} MB of ${health.hls.target_mb} MB`,
+  ];
+  if (!health.ffmpeg || !health.ffprobe) parts.unshift(`${!health.ffmpeg ? "ffmpeg" : "ffprobe"} is missing: videos can't be scanned or converted`);
+  return parts.join(" · ");
+}
+
 const actions = {
   async scan(lib) {
     await api("POST", `/api/libraries/${lib.id}/scan`);
@@ -103,6 +122,8 @@ export function renderManage(view) {
   const listEl = h("ul", { class: "library-list" });
   const scanAllBtn = h("button", { class: "btn", disabled: true, onclick: scanAll }, "Scan all");
   const empty = h("p", { class: "empty", hidden: true }, "No libraries yet. Add a folder of videos to get started.");
+  // How busy the server is: what "try again in a moment" is about.
+  const load = h("p", { class: "summary server-load" });
   fill(view,
     h(
       "div",
@@ -112,14 +133,16 @@ export function renderManage(view) {
     ),
     empty,
     listEl,
+    load,
   );
 
   let pollTimer = null;
   let closed = false;
   const page = {
     async refresh() {
-      const libraries = await api("GET", "/api/libraries");
+      const [libraries, health] = await Promise.all([api("GET", "/api/libraries"), serverHealth()]);
       if (closed) return; // the page was left while this was loading
+      load.textContent = health ? loadLine(health) : "";
       empty.hidden = libraries.length > 0;
       scanAllBtn.disabled = libraries.length === 0 || libraries.every(isBusy);
       listEl.replaceChildren(...libraries.map(libraryRow));

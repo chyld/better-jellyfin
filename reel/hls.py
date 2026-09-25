@@ -234,8 +234,11 @@ class HlsManager:
         self.sessions: dict[str, Session] = {}
         self._runs = itertools.count(1)
         self._over_limit = False
-        # Leftovers from a previous run are useless: start clean.
-        shutil.rmtree(cache_dir, ignore_errors=True)
+
+    def start(self) -> None:
+        """Leftovers from a previous run are useless without their sessions: start clean.
+        Call once this process owns the data folder."""
+        shutil.rmtree(self.cache_dir, ignore_errors=True)
 
     async def open(self, item_uid: str, source: Source) -> str:
         """Register (or refresh) the session for this video, plan and file version.
@@ -513,6 +516,10 @@ class HlsManager:
                     pass
         return total
 
+    def status(self) -> dict:
+        return {"sessions": len(self.sessions), "cache_mb": round(self.cache_size() / 1024**2, 1),
+                "target_mb": self.cache_limit // 1024**2}
+
     def enforce_cache_limit(self) -> int:
         """Delete segments until the cache fits its size target, least useful first:
         sessions used longest ago, and within them the segments furthest from any
@@ -550,7 +557,9 @@ class HlsManager:
             await asyncio.sleep(15)
             try:
                 await self.remove_idle()
-                await anyio.to_thread.run_sync(self.enforce_cache_limit)
+                # On the event loop, like everything that changes sessions: it reads
+                # their viewers. A thousand stat() calls on local disk is quick.
+                self.enforce_cache_limit()
             except Exception:
                 log.exception("HLS housekeeping failed")
 

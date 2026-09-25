@@ -65,33 +65,31 @@ def test_full_scan_with_real_ffprobe(conn, media_root, clips):
 
 
 def test_a_running_ffprobe_can_be_stopped(tmp_path):
-    """A probe stuck on a file that never answers ends when Reel stops."""
+    """A probe stuck on a file that never answers ends when its supervisor stops."""
     import os
     import threading
     import time
 
-    from reel.probe import ProbeError, allow_probes, probe, stop_running_probes
+    from reel.probe import ProbeError, ProbeSupervisor
 
+    probes = ProbeSupervisor()
     stuck = tmp_path / "stuck.mkv"
     os.mkfifo(stuck)                                   # ffprobe waits on it forever
     outcome = {}
 
     def run():
         try:
-            probe(stuck)
+            probes.probe(stuck)
         except ProbeError as exc:
             outcome["error"] = str(exc)
 
     thread = threading.Thread(target=run)
     thread.start()
-    try:
-        for _ in range(50):
-            if stop_running_probes():
-                break
-            time.sleep(0.1)
-        thread.join(5)
-    finally:
-        allow_probes()
+    for _ in range(50):
+        if probes.stop():
+            break
+        time.sleep(0.1)
+    thread.join(5)
     assert not thread.is_alive() and outcome == {"error": "ffprobe was stopped"}
 
 
@@ -100,16 +98,25 @@ def test_no_probe_starts_once_stopped(clips, monkeypatch):
     import subprocess
 
     from reel import probe as probe_module
-    from reel.probe import ProbeError, allow_probes, probe, stop_running_probes
+    from reel.probe import ProbeError, ProbeSupervisor
 
     started = []
     real_popen = subprocess.Popen
     monkeypatch.setattr(probe_module.subprocess, "Popen", lambda *a, **k: started.append(a) or real_popen(*a, **k))
-    stop_running_probes()
-    try:
-        with pytest.raises(ProbeError, match="stopped"):
-            probe(clips / "h264_aac.mp4")
-        assert started == []
-    finally:
-        allow_probes()
-    assert probe(clips / "h264_aac.mp4").video_codec == "h264" and len(started) == 1
+    probes = ProbeSupervisor()
+    probes.stop()
+    with pytest.raises(ProbeError, match="stopped"):
+        probes.probe(clips / "h264_aac.mp4")
+    assert started == []
+    probes.allow()
+    assert probes.probe(clips / "h264_aac.mp4").video_codec == "h264" and len(started) == 1
+
+
+def test_stopping_one_supervisor_leaves_others_alone(clips):
+    """Two apps in one process (tests): stopping one's scans doesn't stop the other's probes."""
+    from reel.probe import ProbeSupervisor, probe
+
+    stopped, other = ProbeSupervisor(), ProbeSupervisor()
+    stopped.stop()
+    assert other.probe(clips / "h264_aac.mp4").video_codec == "h264"
+    assert probe(clips / "h264_aac.mp4").video_codec == "h264"

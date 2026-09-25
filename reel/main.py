@@ -1,4 +1,6 @@
 import asyncio
+import contextlib
+import functools
 import logging
 import shutil
 import sqlite3
@@ -18,7 +20,7 @@ from pydantic import BaseModel, Field
 from . import browse, custom_images, fetch, hls, libraries, playback, tags, users
 from .paths import OutsideRoot, resolve_inside
 from .plan import HLS_SUPPORT, Capabilities, Plan, plan as make_plan
-from .config import Settings
+from .config import DataLock, Settings
 from .db import connect, init_db
 from .images import MAX_UPLOAD_BYTES, Thumbnailer, ThumbnailError, frame_at
 from .scan_manager import ScanManager
@@ -69,38 +71,59 @@ class ImageUrl(BaseModel):
 
 
 def create_app(settings: Settings | None = None, scan_manager: ScanManager | None = None) -> FastAPI:
+    """Build the app. Nothing here changes the data folder: that happens when the
+    server starts (see startup()), once this process holds the data-folder lock."""
     settings = settings or Settings.from_env()
     settings.check_data_dir()
-    init_db(settings.db_path)
     scans = scan_manager or ScanManager(
-        settings.db_path,
-        workers=settings.probe_workers,
-        scan_fn=partial(scan_library, missing_grace=settings.missing_grace),
+        settings.db_path, workers=settings.probe_workers, missing_grace=settings.missing_grace
     )
     thumbs = Thumbnailer(settings.thumbs_dir)
     streams = playback.StreamManager(playback.StreamLimits(max_streams=settings.max_streams))
     hls_sessions = hls.HlsManager(settings.hls_dir, streams, cache_limit=settings.hls_cache_mb * 1024**2)
     # Uploaded images whose video, folder or tag is gone are cleaned up at
     # startup and after every scan.
-    custom_images.move_old_tag_images(settings.data_dir, settings.images_dir)
-    startup_conn = connect(settings.db_path)
-    try:
-        custom_images.adopt_unversioned_files(startup_conn, settings.images_dir)
-        custom_images.prune(startup_conn, settings.images_dir)
-    finally:
-        startup_conn.close()
     scans.after_scan = lambda conn: custom_images.prune(conn, settings.images_dir)
+    tools: dict[str, str | None] = {}   # ffmpeg/ffprobe versions, checked at startup
+
+    def startup() -> DataLock:
+        """Everything that touches the data folder, in order, once it's ours."""
+        lock = settings.lock_data_dir()
+        try:
+            init_db(settings.db_path)
+            custom_images.move_old_tag_images(settings.data_dir, settings.images_dir)
+            conn = connect(settings.db_path)
+            try:
+                custom_images.adopt_unversioned_files(conn, settings.images_dir)
+                custom_images.prune(conn, settings.images_dir)
+            finally:
+                conn.close()
+            hls_sessions.start()
+            tools.update(ffmpeg=tool_version("ffmpeg"), ffprobe=tool_version("ffprobe"))
+            for name, version in tools.items():
+                if version is None:
+                    logging.getLogger("reel").error("%s isn't available: videos can't be scanned or converted", name)
+        except BaseException:
+            lock.release()
+            raise
+        return lock
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        lock = await run_in_threadpool(startup)
         scans.start()
         housekeeping = asyncio.create_task(hls_sessions.run_housekeeping())
-        yield
-        housekeeping.cancel()
-        await hls_sessions.shutdown()
-        await streams.shutdown()
-        # A scan stops between files; wait for it off the event loop.
-        await run_in_threadpool(scans.stop)
+        try:
+            yield
+        finally:
+            housekeeping.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await housekeeping
+            await hls_sessions.shutdown()
+            await streams.shutdown()
+            # A scan stops between files; wait for it off the event loop.
+            await run_in_threadpool(scans.stop)
+            lock.release()
 
     app = FastAPI(title="Reel", lifespan=lifespan)
     # Docker's health check polls /api/health; keep it out of the access log.
@@ -514,9 +537,18 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
 
     @app.get("/api/health")
     def health(conn: sqlite3.Connection = Db):
-        """For Docker's health check: the database answers and ffmpeg is present."""
+        """For Docker's health check (503 when not ready): the database answers and
+        ffmpeg and ffprobe were found at startup. Also how busy the server is."""
         conn.execute("SELECT 1").fetchone()
-        return {"ok": True, "ffmpeg": ffmpeg_version()}
+        ready = bool(tools.get("ffmpeg") and tools.get("ffprobe"))
+        body = {
+            "ok": ready,
+            "ffmpeg": tools.get("ffmpeg"),
+            "ffprobe": tools.get("ffprobe"),
+            "streams": {"active": len(streams.active), "limit": settings.max_streams},
+            "hls": hls_sessions.status(),
+        }
+        return JSONResponse(body, status_code=200 if ready else 503)
 
     @app.get("/api/folders")
     def browse_folders(path: str | None = None):
@@ -559,13 +591,18 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
     return app
 
 
-def ffmpeg_version() -> str | None:
-    """e.g. "n9.0.2-3-ga5923073bf-20260924", or None if ffmpeg isn't installed."""
-    if not shutil.which("ffmpeg"):
+@functools.cache  # a process checks each tool once
+def tool_version(tool: str) -> str | None:
+    """ffmpeg's or ffprobe's version, e.g. "n9.0.2-3-ga5923073bf-20260924"; None if
+    it isn't installed or doesn't answer within 10 seconds."""
+    if not shutil.which(tool):
         return None
-    out = subprocess.run(["ffmpeg", "-hide_banner", "-version"], capture_output=True, text=True).stdout
+    try:
+        out = subprocess.run([tool, "-hide_banner", "-version"], capture_output=True, text=True, timeout=10).stdout
+    except (subprocess.TimeoutExpired, OSError):
+        return None
     first = out.splitlines()[0] if out else ""
-    return first.split()[2] if first.startswith("ffmpeg version") else first or None
+    return first.split()[2] if first.startswith(f"{tool} version") else first or None
 
 
 def app() -> FastAPI:

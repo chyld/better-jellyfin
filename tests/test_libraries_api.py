@@ -1,4 +1,6 @@
 """Adding, renaming and removing libraries, and the folder picker."""
+import pytest
+
 from conftest import make_files
 
 
@@ -166,7 +168,6 @@ def test_frontend_files_are_revalidated(client):
 
 def test_unwritable_data_folder_gives_a_clear_error(tmp_path, media_root):
     import os
-    import pytest
     from reel.config import Settings
     from reel.main import create_app
 
@@ -183,9 +184,60 @@ def test_unwritable_data_folder_gives_a_clear_error(tmp_path, media_root):
 
 
 def test_health(client):
-    body = client.get("/api/health").json()
-    assert body["ok"] is True
-    assert body["ffmpeg"]  # the installed ffmpeg's version
+    res = client.get("/api/health")
+    body = res.json()
+    assert res.status_code == 200 and body["ok"] is True
+    assert body["ffmpeg"] and body["ffprobe"]            # the installed versions
+    assert body["streams"] == {"active": 0, "limit": 3}
+    assert body["hls"] == {"sessions": 0, "cache_mb": 0.0, "target_mb": 2048}
+
+
+def test_health_without_ffmpeg_is_not_ready(settings, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from reel import main
+
+    monkeypatch.setattr(main, "tool_version", lambda tool: None if tool == "ffprobe" else "n9.0")
+    with TestClient(main.create_app(settings)) as c:
+        res = c.get("/api/health")
+    assert res.status_code == 503 and res.json()["ok"] is False and res.json()["ffprobe"] is None
+
+
+def test_health_checks_ffmpeg_once_at_startup(settings, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from reel import main
+
+    calls = []
+    monkeypatch.setattr(main, "tool_version", lambda tool: calls.append(tool) or "n9.0")
+    with TestClient(main.create_app(settings)) as c:
+        for _ in range(3):
+            c.get("/api/health")
+    assert sorted(calls) == ["ffmpeg", "ffprobe"]
+
+
+def test_a_second_reel_on_the_same_data_folder_refuses_to_start(settings):
+    from fastapi.testclient import TestClient
+
+    from reel.config import DataFolderInUse
+    from reel.main import create_app
+
+    with TestClient(create_app(settings)):
+        with pytest.raises(DataFolderInUse, match="Another Reel is already using the data folder"):
+            with TestClient(create_app(settings)):
+                pass
+    with TestClient(create_app(settings)):          # once the first stops, a new one can start
+        pass
+
+
+def test_building_the_app_changes_nothing_on_disk(settings):
+    """Only a started server touches the data folder (after taking its lock)."""
+    from reel.main import create_app
+
+    settings.data_dir.mkdir(parents=True, exist_ok=True)
+    before = sorted(p.name for p in settings.data_dir.iterdir())
+    create_app(settings)
+    assert sorted(p.name for p in settings.data_dir.iterdir()) == before
 
 
 def test_health_checks_stay_out_of_the_access_log(client):
@@ -214,7 +266,6 @@ def test_missing_grace_from_environment(monkeypatch):
 
 
 def test_image_url_policy_from_environment(monkeypatch):
-    import pytest
     from reel.config import Settings
 
     assert Settings.from_env().image_urls == "internet"
