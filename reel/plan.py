@@ -42,9 +42,13 @@ class Capabilities:
 
     @classmethod
     def from_query(cls, video: str | None, audio: str | None) -> "Capabilities":
-        """From "?video=h264,hevc&audio=aac,ac3": known names only; baseline if absent."""
+        """From "?video=h264,hevc&audio=aac,ac3": known names only.
+
+        A missing parameter means "a typical browser" (the baseline); an empty one
+        means the browser reported it can decode none of them.
+        """
         def parse(value, known, baseline):
-            if not value:
+            if value is None:
                 return baseline
             return frozenset(v for v in value.lower().split(",") if v in known)
         return cls(parse(video, KNOWN_VIDEO, BASELINE_VIDEO), parse(audio, KNOWN_AUDIO, BASELINE_AUDIO))

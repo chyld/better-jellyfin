@@ -336,6 +336,13 @@ def test_browser_that_plays_ac3_gets_it_copied(client, items, tmp_path):
     assert (out["video"], out["audio"]) == ("h264", "ac3")
 
 
+def test_empty_audio_list_stays_empty_in_the_stream_url(client, items):
+    """A browser that decodes no listed audio gets its audio converted, on the plan and the stream."""
+    plan = client.get(f"/api/items/{items['h264_aac.mp4']}/plan", params={"video": "h264", "audio": ""}).json()
+    assert (plan["mode"], plan["audio"]) == ("audio", "encode")
+    assert "audio=&" in plan["url"] or plan["url"].endswith("audio=")
+
+
 @requires_ffmpeg
 def test_hevc_depends_on_the_browser(client, items):
     typical = client.get(f"/api/items/{items['hevc.mp4']}/plan").json()

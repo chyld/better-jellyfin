@@ -66,4 +66,16 @@ def test_capabilities_from_the_query():
     assert caps.video == {"h264", "hevc"}            # unknown names are ignored
     assert caps.audio == {"aac", "ac3"}
     assert Capabilities.from_query(None, None) == BASELINE
-    assert Capabilities.from_query("", "") == BASELINE
+    assert Capabilities.from_query(None, "aac").video == BASELINE.video
+
+
+def test_empty_capability_lists_mean_none():
+    caps = Capabilities.from_query("", "")
+    assert caps.video == frozenset() and caps.audio == frozenset()
+    assert Capabilities.from_query("made-up", "").audio == frozenset()
+
+
+def test_browser_without_the_audio_codec_gets_it_converted():
+    mp4 = {"container": "mov,mp4,m4a,3gp,3g2,mj2", "video_codec": "h264", "audio_codec": "aac",
+           "pix_fmt": "yuv420p", "interlaced": 0, "probe_error": None, "rel_path": "clip.mp4"}
+    assert plan(mp4, Capabilities.from_query("h264", "")) == Plan("audio", video="copy", audio="encode")
