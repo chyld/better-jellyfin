@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import browse, custom_images, fetch, libraries, playback, tags
+from . import browse, custom_images, fetch, libraries, playback, tags, users
 from .paths import OutsideRoot, resolve_inside
 from .config import Settings
 from .db import connect, init_db
@@ -387,6 +387,14 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
                 await stream.aclose()
 
         return StreamingResponse(body(), media_type="video/mp4", headers={"Cache-Control": "no-store"})
+
+    def current_user(conn: sqlite3.Connection = Depends(get_db)) -> dict:
+        """Who's asking. Until there's login, always the built-in local user."""
+        return users.local_user(conn)
+
+    @app.get("/api/me")
+    def me(user: dict = Depends(current_user)):
+        return {"id": user["uid"], "name": user["name"]}
 
     @app.get("/api/health")
     def health(conn: sqlite3.Connection = Depends(get_db)):

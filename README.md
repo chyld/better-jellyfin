@@ -358,8 +358,17 @@ Libraries, videos and tags are addressed by **random UUIDs** in URLs and the API
 reveal the library's size and can't be walked by counting. The database also has integer keys,
 used only internally.
 
-A video keeps its UUID, tags and uploaded image **as long as the file stays at the same path**,
-even when its contents change. A moved or renamed file is treated as a new video.
+A video keeps its UUID, tags and uploaded picture **when its file is moved or renamed**, and
+when its contents change in place:
+
+- Each file has a **fingerprint**: its size plus hashes of its first and last 64 KB. When a scan
+  finds a new path whose fingerprint (and extension) matches exactly one video that vanished,
+  the video's record moves to the new path instead of becoming a new video. Moved files
+  aren't re-probed, and the scan summary shows how many moved.
+- Matching is **conservative**: identical copies, or a file that changed while it moved, are
+  treated as new videos rather than guessed.
+- **Renamed folders** keep their uploaded picture: the moved files show where the folder went,
+  including nested folders.
 
 ---
 
@@ -381,8 +390,16 @@ data/
 - **Back up** `reel.db` and `images/`. `thumbs/` is only a cache.
 - Uploaded images whose tag, video, folder or library is gone are cleaned up at startup, after
   every scan, and when a library is removed.
-- Databases from older versions of Reel are upgraded automatically at startup (new columns,
-  UUIDs), so there's no need to rescan after an update.
+- **Upgrades are automatic.** The schema version is kept in the database (`PRAGMA user_version`),
+  and numbered migrations run once, in order, each in a transaction, so a failed one changes
+  nothing. A database from a newer Reel is refused rather than misread. Databases from before
+  versioning are upgraded too.
+- **Re-probing when the rules change:** each video records which version of the probe and
+  play-mode rules produced it. When that version goes up, the next scan re-probes older rows.
+  The first scan after upgrading to fingerprints re-probes every video once.
+- **Users:** there's one built-in local user (`GET /api/me`). Per-person data, such as the coming
+  watch progress, is stored against a user from the start, so adding login later won't mean
+  reshaping it.
 
 ---
 
@@ -457,7 +474,8 @@ JSON over HTTP. Every ID is a UUID. There's no authentication yet (see
 | GET, PUT, DELETE | `/api/tags/{id}/image` | The tag's picture: fetch, upload, remove. |
 | POST | `/api/tags/{id}/image-url` | `{url}`: set the tag picture from a URL. |
 
-**Other:** `GET /api/health` returns `{"ok": true, "ffmpeg": "<version>"}`. It's used by the
+**Other:** `GET /api/me` returns the current user (for now, always the built-in local user).
+`GET /api/health` returns `{"ok": true, "ffmpeg": "<version>"}`. It's used by the
 Docker health check and kept out of the access log.
 
 Errors are JSON `{"detail": "…"}` with a message meant for people: 400 for invalid input, 404
@@ -486,7 +504,7 @@ changes how thumbnails are made.
 ### Tests
 
 ```sh
-uv run pytest              # backend: 373 tests
+uv run pytest              # backend: 397 tests
 node --test tests/js/      # frontend helpers: 18 tests
 scripts/docker-smoke.sh    # builds the image and checks it end to end (needs Docker)
 ```
@@ -515,7 +533,9 @@ scripts/docker-smoke.sh    # builds the image and checks it end to end (needs Do
 reel/
   main.py            FastAPI app: routes, error handling, startup clean-up
   config.py          settings from environment variables; data-folder check
-  db.py              SQLite schema and automatic upgrades of older databases
+  db.py              SQLite schema and numbered migrations
+  users.py           users (for now, the built-in local user)
+  paths.py           resolving paths without leaving the allowed folder
   libraries.py       adding/renaming/removing libraries; folder picker
   scanner.py         walking folders; titles; matching pictures; incremental scans
   scan_manager.py    background scan queue with progress
@@ -557,13 +577,13 @@ Dockerfile, compose.yaml, .env.example
 - **Safari** can't play remuxed or converted streams, because it requires range requests,
   which a live stream can't offer. Directly playable files work everywhere. Chrome, Edge and
   Firefox play everything.
-- **Moving or renaming a file** makes it a new video: its tags and uploaded picture are lost.
 - **No subtitles** yet (neither external `.srt` nor embedded tracks).
 - **No hardware transcoding** yet. Conversion runs on the CPU, which is fine for this library.
   `compose.yaml` notes where a GPU would go.
 - **HEVC** is always converted, even when the viewer's browser could play it.
 - **Tags** are limited to lowercase ASCII letters, digits and dashes, by design.
-- A tag's videos are listed in tagging order, with no sort options yet.
+- A tag's videos are listed in tagging order (kept explicitly, so it survives a database
+  rebuild), with no sort options yet.
 
 ---
 
@@ -571,8 +591,8 @@ Dockerfile, compose.yaml, .env.example
 
 Ideas and planned features, roughly in order:
 
-1. **Watch progress:** remember where you stopped, offer to resume, and a "Continue watching"
-   row on Home.
+1. **Watch progress:** remember where you stopped, per user, offer to resume, and a "Continue
+   watching" row on Home. (The groundwork, stable video identity and a local user, is in.)
 2. **Login**, and optionally a hidden library that must be unlocked.
 3. **Sorting** for a tag's videos.
 4. **Subtitles:** external `.srt`/`.vtt` and embedded text tracks, as WebVTT.

@@ -224,7 +224,9 @@ def test_rename_onto_an_existing_tag_merges_them(client, videos):
     assert [t["name"] for t in client.get("/api/tags").json()] == ["road-trip"]
     assert client.get(f"/api/tags/{drop['id']}").status_code == 404
     merged = client.get(f"/api/tags/{keep['id']}").json()["items"]
-    assert [i["title"] for i in merged] == ["zoo-trip", "holiday", "hiking"]
+    # In the order each video was tagged, across both tags: zoo-trip (road-trip),
+    # hiking (roadtrip), then holiday (road-trip; its roadtrip tag merged away).
+    assert [i["title"] for i in merged] == ["zoo-trip", "hiking", "holiday"]
     assert names(client.get(f"/api/items/{videos['holiday']}").json()["tags"]) == ["road-trip"]
 
 

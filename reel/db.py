@@ -131,9 +131,46 @@ def _v2_identity(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX media_items_fingerprint ON media_items (library_id, fingerprint)")
 
 
+def _v3_users(conn: sqlite3.Connection) -> None:
+    # One built-in local user for now. Per-user data (watch progress) points at a
+    # user from the start, so adding login later means adding users, not
+    # splitting existing rows.
+    conn.execute(
+        """
+        CREATE TABLE users (
+            id          INTEGER PRIMARY KEY,
+            uid         TEXT NOT NULL UNIQUE,
+            name        TEXT NOT NULL,
+            is_local    INTEGER NOT NULL DEFAULT 0,   -- the built-in user, used until there's login
+            created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    conn.execute("CREATE UNIQUE INDEX users_one_local ON users (is_local) WHERE is_local = 1")
+    conn.execute("INSERT INTO users (uid, name, is_local) VALUES (?, 'Local', 1)", (new_uid(),))
+
+
+NOW_MS = "strftime('%Y-%m-%d %H:%M:%f', 'now')"
+
+
+def _v4_tag_order(conn: sqlite3.Connection) -> None:
+    # A tag's videos were ordered by SQLite's internal rowid, which a rebuild can
+    # renumber. Keep the order explicitly. Existing rows get times a second apart
+    # in their current order (their real times weren't recorded).
+    conn.execute("ALTER TABLE item_tags ADD COLUMN added_at TEXT")
+    last = conn.execute("SELECT COALESCE(MAX(rowid), 0) FROM item_tags").fetchone()[0]
+    conn.execute(
+        "UPDATE item_tags SET added_at = strftime('%Y-%m-%d %H:%M:%f', 'now', printf('-%d seconds', ? - rowid))",
+        (last,),
+    )
+    conn.execute("CREATE INDEX item_tags_order ON item_tags (tag_id, added_at)")
+
+
 # (version, what it does, function). Append only; functions must not commit.
 MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (2, "fingerprints and probe versions for media items", _v2_identity),
+    (3, "users, starting with the built-in local user", _v3_users),
+    (4, "explicit order for a tag's videos", _v4_tag_order),
 ]
 
 

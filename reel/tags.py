@@ -4,7 +4,7 @@ import sqlite3
 from pathlib import Path
 
 from .browse import NotFound, item_out
-from .db import new_uid
+from .db import NOW_MS, new_uid
 from .images import ThumbnailError, save_upload, upload_name
 
 MAX_TAG_LENGTH = 50
@@ -48,7 +48,7 @@ def item_tags(conn: sqlite3.Connection, item_id: int) -> list[dict]:
     rows = conn.execute(
         """
         SELECT t.uid, t.name FROM item_tags it JOIN tags t ON t.id = it.tag_id
-        WHERE it.item_id = ? ORDER BY it.rowid
+        WHERE it.item_id = ? ORDER BY it.added_at, it.rowid
         """,
         (item_id,),
     )
@@ -66,7 +66,9 @@ def add_tag(conn: sqlite3.Connection, item_uid: str, name: str) -> list[dict]:
         tag_id = conn.execute(
             "INSERT INTO tags (uid, name) VALUES (?, ?)", (new_uid(), name)
         ).lastrowid
-    conn.execute("INSERT OR IGNORE INTO item_tags (item_id, tag_id) VALUES (?, ?)", (item_id, tag_id))
+    conn.execute(
+        f"INSERT OR IGNORE INTO item_tags (item_id, tag_id, added_at) VALUES (?, ?, {NOW_MS})", (item_id, tag_id)
+    )
     conn.commit()
     return item_tags(conn, item_id)
 
@@ -125,8 +127,8 @@ def rename_tag(conn: sqlite3.Connection, tag_uid: str, name: str, images_dir: Pa
         # Move every video over (keeping their order), then drop this tag.
         conn.execute(
             """
-            INSERT OR IGNORE INTO item_tags (item_id, tag_id)
-            SELECT item_id, ? FROM item_tags WHERE tag_id = ? ORDER BY rowid
+            INSERT OR IGNORE INTO item_tags (item_id, tag_id, added_at)
+            SELECT item_id, ?, added_at FROM item_tags WHERE tag_id = ? ORDER BY added_at, rowid
             """,
             (other["id"], tag["id"]),
         )
@@ -210,7 +212,7 @@ def tag_videos(conn: sqlite3.Connection, tag_uid: str) -> dict:
     rows = conn.execute(
         """
         SELECT m.* FROM item_tags it JOIN media_items m ON m.id = it.item_id
-        WHERE it.tag_id = ? AND m.missing_since IS NULL ORDER BY it.rowid
+        WHERE it.tag_id = ? AND m.missing_since IS NULL ORDER BY it.added_at, it.rowid
         """,
         (tag["id"],),
     )
