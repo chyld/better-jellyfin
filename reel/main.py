@@ -394,7 +394,7 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
         except OSError:
             raise HTTPException(404, "The video file is missing. Is the NAS connected?")
         source = hls.Source(path, p, row["duration"], bool(row["interlaced"]), row["height"],
-                            row["audio_codec"], rev)
+                            row["audio_codec"], rev, width=row["width"])
         return await hls_sessions.open(item_uid, source), row["duration"]
 
     def hls_query(video: str | None, audio: str | None, hls_support: str) -> str:
@@ -458,6 +458,7 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
             start=start,
             interlaced=bool(row["interlaced"]),
             height=row["height"],
+            width=row["width"],
             audio_codec=row["audio_codec"],
         )
         stream = streams.stream(cmd)

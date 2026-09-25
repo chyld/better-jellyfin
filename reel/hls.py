@@ -153,11 +153,12 @@ class Source:
     height: int | None
     audio_codec: str | None
     revision: str
+    width: int | None = None
 
     @property
     def version(self) -> tuple:
         """Everything about the file that changes the segments (not its path)."""
-        return (self.revision, round(self.duration, 3), self.interlaced, self.height, self.audio_codec)
+        return (self.revision, round(self.duration, 3), self.interlaced, self.height, self.width, self.audio_codec)
 
 
 @dataclass
@@ -382,7 +383,8 @@ class HlsManager:
         offset = start_segment * SEGMENT
         return [
             *input_args(src.path, offset),
-            *video_args(src.plan, interlaced=src.interlaced, height=src.height, keyframe_every=SEGMENT),
+            *video_args(src.plan, interlaced=src.interlaced, height=src.height, width=src.width,
+                        keyframe_every=SEGMENT),
             *audio_args(src.plan, src.audio_codec, container="mpegts"),
             # Timestamps continue from where this segment sits in the playlist.
             "-output_ts_offset", f"{offset:.3f}",

@@ -370,3 +370,18 @@ def test_only_plan_says_how_a_video_plays(client, items):
 def test_direct_file_can_still_be_streamed_as_a_copy(client, items, tmp_path):
     out = ffprobe_bytes(client.get(f"/api/items/{items['h264_aac.mp4']}/stream").content, tmp_path)
     assert (out["video"], out["audio"]) == ("h264", "aac")
+
+
+@pytest.mark.parametrize("interlaced, width, height, expected", [
+    (False, 1920, 1080, None),                                       # nothing to do: no filter at all
+    (False, 720, 480, None),
+    (False, 719, 480, "scale=trunc(iw/2)*2:trunc(ih/2)*2"),           # odd: made even
+    (False, None, None, "scale=trunc(iw/2)*2:trunc(ih/2)*2"),         # unknown: made even to be safe
+    (True, 720, 480, "bwdif=mode=send_frame"),                        # interlaced, already even
+    (True, 721, 480, "bwdif=mode=send_frame,scale=trunc(iw/2)*2:trunc(ih/2)*2"),
+    (False, 3840, 2160, "scale=-2:1080"),                              # 4K: scaled down (always even)
+])
+def test_the_filter_graph_is_only_what_the_video_needs(interlaced, width, height, expected):
+    from reel.playback import video_args
+    args = video_args(CONVERT, interlaced=interlaced, width=width, height=height, keyframe_every=2)
+    assert (args[args.index("-vf") + 1] if "-vf" in args else None) == expected

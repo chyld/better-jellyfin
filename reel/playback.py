@@ -52,18 +52,21 @@ def input_args(src: Path, start: float) -> list[str]:
     return cmd + ["-i", str(src), "-map", "0:V:0", "-map", "0:a:0?", "-sn", "-dn"]
 
 
-def video_args(plan: Plan, *, interlaced: bool, height: int | None, keyframe_every: float) -> list[str]:
+def video_args(plan: Plan, *, interlaced: bool, height: int | None, keyframe_every: float,
+               width: int | None = None) -> list[str]:
     if plan.video == "copy":
         return ["-c:v", "copy"]
     filters = []
     if interlaced:
         filters.append("bwdif=mode=send_frame")
     if height and height > 1080:
-        filters.append("scale=-2:1080")
-    # H.264 in 4:2:0 needs even dimensions; old codecs sometimes have odd ones.
-    filters.append("scale=trunc(iw/2)*2:trunc(ih/2)*2")
+        filters.append("scale=-2:1080")  # (always even)
+    elif not (width and height and width % 2 == 0 and height % 2 == 0):
+        # H.264 in 4:2:0 needs even dimensions; old codecs sometimes have odd ones.
+        # Only when they're odd (or unknown): otherwise there's nothing to filter.
+        filters.append("scale=trunc(iw/2)*2:trunc(ih/2)*2")
     return [
-        "-vf", ",".join(filters),
+        *(["-vf", ",".join(filters)] if filters else []),
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "21",
         "-pix_fmt", "yuv420p", "-profile:v", "high",
         # Regular keyframes: small fragments start fast, and HLS segments cut exactly.
@@ -91,6 +94,7 @@ def stream_command(
     interlaced: bool = False,
     height: int | None = None,
     audio_codec: str | None = None,
+    width: int | None = None,
 ) -> list[str]:
     """The ffmpeg command that streams `src` from `start` seconds, following `plan`:
     the video and the audio are each copied untouched or converted."""
@@ -102,7 +106,7 @@ def stream_command(
         output = [x + "+delay_moov" if x.startswith("frag_keyframe") else x for x in FMP4_OUTPUT]
     return [
         *input_args(src, start),
-        *video_args(plan, interlaced=interlaced, height=height, keyframe_every=2),
+        *video_args(plan, interlaced=interlaced, height=height, width=width, keyframe_every=2),
         *audio_args(plan, audio_codec),
         *output,
     ]
