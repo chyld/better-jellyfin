@@ -3,7 +3,7 @@ import os
 import sqlite3
 from pathlib import Path
 
-from .db import new_uid
+from .db import new_uid, write_transaction
 
 
 class LibraryError(ValueError):
@@ -57,12 +57,18 @@ def _check_name_free(conn: sqlite3.Connection, name: str, exclude_id: int | None
         raise LibraryError(f'A library named "{name}" already exists.')
 
 
-def validate_folder(conn: sqlite3.Connection, media_root: Path, path: str) -> Path:
+def check_folder(media_root: Path, path: str) -> Path:
+    """The library folder: inside the media root, and there and readable."""
     folder = resolve_in_root(media_root, path)
     if not folder.is_dir():
         raise LibraryError("Folder not found.")
     if not os.access(folder, os.R_OK | os.X_OK):
         raise LibraryError("Folder is not readable.")
+    return folder
+
+
+def _check_overlap(conn: sqlite3.Connection, folder: Path) -> None:
+    """Libraries never overlap: not the same folder, nor one inside another."""
     for row in conn.execute("SELECT name, path FROM libraries"):
         other = Path(row["path"])
         if folder == other:
@@ -71,25 +77,25 @@ def validate_folder(conn: sqlite3.Connection, media_root: Path, path: str) -> Pa
             raise LibraryError(f'This folder is inside the "{row["name"]}" library.')
         if other.is_relative_to(folder):
             raise LibraryError(f'This folder contains the "{row["name"]}" library.')
-    return folder
 
 
 def create_library(conn: sqlite3.Connection, media_root: Path, name: str, path: str) -> int:
     name = _clean_name(name)
-    _check_name_free(conn, name)
-    folder = validate_folder(conn, media_root, path)
-    cur = conn.execute(
-        "INSERT INTO libraries (uid, name, path) VALUES (?, ?, ?)", (new_uid(), name, str(folder))
-    )
-    conn.commit()
+    folder = check_folder(media_root, path)   # the disk first, outside the write lock
+    with write_transaction(conn):             # then the checks and the insert as one
+        _check_name_free(conn, name)
+        _check_overlap(conn, folder)
+        cur = conn.execute(
+            "INSERT INTO libraries (uid, name, path) VALUES (?, ?, ?)", (new_uid(), name, str(folder))
+        )
     return cur.lastrowid
 
 
 def rename_library(conn: sqlite3.Connection, library_id: int, name: str) -> None:
     name = _clean_name(name)
-    _check_name_free(conn, name, exclude_id=library_id)
-    cur = conn.execute("UPDATE libraries SET name = ? WHERE id = ?", (name, library_id))
-    conn.commit()
+    with write_transaction(conn):
+        _check_name_free(conn, name, exclude_id=library_id)
+        cur = conn.execute("UPDATE libraries SET name = ? WHERE id = ?", (name, library_id))
     if cur.rowcount == 0:
         raise KeyError(library_id)
 

@@ -11,7 +11,8 @@ existing one: databases out there have already run it.
 """
 import sqlite3
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 SCHEMA = """
@@ -113,6 +114,23 @@ def _upgrade_unversioned(conn: sqlite3.Connection) -> None:
 
 def new_uid() -> str:
     return str(uuid.uuid4())
+
+
+@contextmanager
+def write_transaction(conn: sqlite3.Connection) -> Iterator[None]:
+    """Checks and writes as one step: takes SQLite's write lock up front (BEGIN
+    IMMEDIATE), so no other writer can change what was checked before the write.
+    Commits at the end, rolls back on any error. Keep slow work (the disk, ffmpeg)
+    outside: other writers wait while this runs."""
+    if conn.in_transaction:
+        conn.commit()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        yield
+    except BaseException:
+        conn.rollback()
+        raise
+    conn.commit()
 
 
 def connect(db_path: Path) -> sqlite3.Connection:

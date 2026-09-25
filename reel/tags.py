@@ -1,10 +1,11 @@
 """Tags: free-form labels on videos. A video can have any number of them."""
+import os
 import re
 import sqlite3
 from pathlib import Path
 
 from .browse import NotFound, item_out, page_bounds
-from .db import NOW_MS, new_uid
+from .db import NOW_MS, new_uid, write_transaction
 from .images import ThumbnailError, save_upload, upload_name
 
 MAX_TAG_LENGTH = 50
@@ -59,13 +60,10 @@ def add_tag(conn: sqlite3.Connection, item_uid: str, name: str) -> list[dict]:
     """Tag a video, creating the tag if it's new."""
     item_id = item_pk(conn, item_uid)
     name = clean_name(name)
-    row = conn.execute("SELECT id FROM tags WHERE name = ? COLLATE NOCASE", (name,)).fetchone()
-    if row:
-        tag_id = row["id"]
-    else:
-        tag_id = conn.execute(
-            "INSERT INTO tags (uid, name) VALUES (?, ?)", (new_uid(), name)
-        ).lastrowid
+    # Create it unless it exists, then look it up: safe when two requests add the
+    # same new tag at once (a look-then-insert would fail for one of them).
+    conn.execute("INSERT INTO tags (uid, name) VALUES (?, ?) ON CONFLICT (name) DO NOTHING", (new_uid(), name))
+    tag_id = conn.execute("SELECT id FROM tags WHERE name = ?", (name,)).fetchone()["id"]
     conn.execute(
         f"INSERT OR IGNORE INTO item_tags (item_id, tag_id, added_at) VALUES (?, ?, {NOW_MS})", (item_id, tag_id)
     )
@@ -110,34 +108,46 @@ def rename_tag(conn: sqlite3.Connection, tag_uid: str, name: str, images_dir: Pa
 
     Returns the resulting tag, with `merged` saying whether it was merged (its
     id is then the other tag's; the renamed one is gone).
+
+    Image files follow the upload protocol: the surviving tag's file is made
+    first (a new name, nothing overwritten), the database change is saved, and
+    only then is the old file deleted. A failure in between leaves an unused file
+    for prune(), never a tag pointing at a missing one.
     """
-    tag = find_tag(conn, tag_uid)
     name = clean_name(name)
-    other = conn.execute(
-        "SELECT id, uid, image_version FROM tags WHERE name = ? AND id != ?", (name, tag["id"])
-    ).fetchone()
-    if other:
-        # The surviving tag keeps its own image, or takes this one's if it has none.
-        own = image_path(images_dir, tag["uid"], tag["image_version"]) if tag["image_version"] else None
-        if own and not other["image_version"]:
-            own.replace(image_path(images_dir, other["uid"], tag["image_version"]))
-            conn.execute("UPDATE tags SET image_version = ? WHERE id = ?", (tag["image_version"], other["id"]))
-        elif own:
-            own.unlink(missing_ok=True)
-        # Move every video over (keeping their order), then drop this tag.
-        conn.execute(
-            """
-            INSERT OR IGNORE INTO item_tags (item_id, tag_id, added_at)
-            SELECT item_id, ?, added_at FROM item_tags WHERE tag_id = ? ORDER BY added_at, rowid
-            """,
-            (other["id"], tag["id"]),
-        )
-        conn.execute("DELETE FROM tags WHERE id = ?", (tag["id"],))
-        conn.commit()
-        return {**_tag_with_count(conn, other["id"]), "merged": True}
-    conn.execute("UPDATE tags SET name = ? WHERE id = ?", (name, tag["id"]))
-    conn.commit()
-    return {**_tag_with_count(conn, tag["id"]), "merged": False}
+    old_file = None
+    with write_transaction(conn):   # the checks and the change as one
+        tag = find_tag(conn, tag_uid)
+        other = conn.execute(
+            "SELECT id, uid, image_version FROM tags WHERE name = ? AND id != ?", (name, tag["id"])
+        ).fetchone()
+        if other is None:
+            conn.execute("UPDATE tags SET name = ? WHERE id = ?", (name, tag["id"]))
+            result_id, merged = tag["id"], False
+        else:
+            # The surviving tag keeps its own image, or takes this one's if it has none.
+            if tag["image_version"]:
+                old_file = image_path(images_dir, tag["uid"], tag["image_version"])
+                if not other["image_version"]:
+                    version = new_uid()[:8]   # a fresh name: never one an earlier try left behind
+                    try:
+                        os.link(old_file, image_path(images_dir, other["uid"], version))
+                        conn.execute("UPDATE tags SET image_version = ? WHERE id = ?", (version, other["id"]))
+                    except FileNotFoundError:
+                        pass  # its file was already gone: nothing to take over
+            # Move every video over (keeping their order), then drop this tag.
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO item_tags (item_id, tag_id, added_at)
+                SELECT item_id, ?, added_at FROM item_tags WHERE tag_id = ? ORDER BY added_at, rowid
+                """,
+                (other["id"], tag["id"]),
+            )
+            conn.execute("DELETE FROM tags WHERE id = ?", (tag["id"],))
+            result_id, merged = other["id"], True
+    if old_file is not None:
+        old_file.unlink(missing_ok=True)  # saved: the renamed tag's own file is no longer used
+    return {**_tag_with_count(conn, result_id), "merged": merged}
 
 
 def delete_tag(conn: sqlite3.Connection, tag_uid: str, images_dir: Path) -> None:
