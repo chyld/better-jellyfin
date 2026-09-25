@@ -43,6 +43,7 @@ class AppFiles(StaticFiles):
 
 # Thumbnails change only when their source does (the cache key includes its mtime).
 THUMB_HEADERS = {"Cache-Control": "private, max-age=3600"}
+THUMB_SLOTS = 4  # NAS pictures thumbnailed at once
 
 
 class LibraryCreate(BaseModel):
@@ -213,49 +214,69 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
         except (OutsideRoot, OSError):
             raise HTTPException(404, "The video file is missing. Is the NAS connected?")
 
-    def thumb_response(make) -> FileResponse:
+    # Thumbnails of NAS pictures: at most THUMB_SLOTS made at once. A request waits
+    # for a slot here, before it takes a request thread or a database connection,
+    # so a folder of new cards can't tie up the threads the rest of the API needs.
+    thumb_slots = asyncio.Semaphore(THUMB_SLOTS)
+
+    def item_picture(item_uid: str) -> tuple[Path, str | None]:
+        """The video's picture: (your uploaded or snapped one, None), else (its own
+        image on the NAS, the shape to thumbnail it to), e.g. zombie.png beside
+        zombie.mp4. Looked up on a short connection, closed before ffmpeg runs.
+        Videos with neither get a placeholder in the browser, so this is a 404."""
+        conn = connect(settings.db_path)
         try:
-            return FileResponse(make(), media_type="image/jpeg", headers=THUMB_HEADERS)
+            row = conn.execute(
+                "SELECT uid, library_id, poster_path FROM media_items WHERE uid = ?", (item_uid,)
+            ).fetchone()
+            if row is None:
+                raise HTTPException(404, "Video not found.")
+            uploaded = pictures.picture_file(conn, settings.images_dir, pictures.VideoPicture(row["uid"]))
+            if uploaded:
+                return uploaded, None
+            if row["poster_path"]:
+                try:
+                    return library_file(conn, row["library_id"], row["poster_path"]), "landscape"
+                except HTTPException:
+                    pass
+            raise HTTPException(404, "No image.")
+        finally:
+            conn.close()
+
+    def folder_picture(library_uid: str, rel_dir: str) -> tuple[Path, str | None]:
+        """A folder's picture: (your uploaded one, None), else (its folder.<ext> on
+        the NAS, the shape to thumbnail it to). A short connection, as above."""
+        conn = connect(settings.db_path)
+        try:
+            library_id = library_pk(conn, library_uid)
+            rel_dir = catalog.clean_dir(rel_dir)
+            uploaded = pictures.picture_file(conn, settings.images_dir, pictures.FolderPicture(library_id, rel_dir))
+            if uploaded:
+                return uploaded, None
+            row = conn.execute(
+                "SELECT art_path FROM folder_art WHERE library_id = ? AND rel_dir = ?", (library_id, rel_dir)
+            ).fetchone()
+            if row is not None:
+                try:
+                    return library_file(conn, library_id, row["art_path"]), "poster"
+                except HTTPException:
+                    pass
+            raise HTTPException(404, "No folder art.")
+        finally:
+            conn.close()
+
+    async def picture_response(found: tuple[Path, str | None]) -> FileResponse:
+        path, shape = found
+        try:
+            if shape is not None:
+                cached = await run_in_threadpool(thumbs.cached, path, shape)
+                if cached is None:
+                    async with thumb_slots:
+                        cached = await run_in_threadpool(thumbs.from_image, path, shape)
+                path = cached
         except ThumbnailError:
             raise HTTPException(404, "No image.")
-
-    def item_thumb(conn: sqlite3.Connection, item_uid: str) -> FileResponse:
-        """The video's preview: one you uploaded (or snapped from the video), else
-        its own image on the NAS (zombie.png beside zombie.mp4), shrunk.
-
-        Videos without either get a placeholder in the browser, so this is a 404.
-        """
-        row = conn.execute(
-            "SELECT uid, library_id, poster_path, custom_image FROM media_items WHERE uid = ?", (item_uid,)
-        ).fetchone()
-        if row is None:
-            raise HTTPException(404, "Video not found.")
-        uploaded = pictures.picture_file(conn, settings.images_dir, pictures.VideoPicture(row["uid"]))
-        if uploaded:
-            return FileResponse(uploaded, media_type="image/jpeg", headers=THUMB_HEADERS)
-        if row["poster_path"]:
-            try:
-                poster = library_file(conn, row["library_id"], row["poster_path"])
-            except HTTPException:
-                raise HTTPException(404, "No image.")
-            return thumb_response(lambda: thumbs.from_image(poster, "landscape"))
-        raise HTTPException(404, "No image.")
-
-    def folder_art(conn: sqlite3.Connection, library_id: int, rel_dir: str) -> FileResponse:
-        """A folder's picture: one you uploaded, else its folder.<ext> on the NAS."""
-        uploaded = pictures.picture_file(conn, settings.images_dir, pictures.FolderPicture(library_id, rel_dir))
-        if uploaded:
-            return FileResponse(uploaded, media_type="image/jpeg", headers=THUMB_HEADERS)
-        row = conn.execute(
-            "SELECT art_path FROM folder_art WHERE library_id = ? AND rel_dir = ?", (library_id, rel_dir)
-        ).fetchone()
-        if row is not None:
-            try:
-                art = library_file(conn, library_id, row["art_path"])
-            except HTTPException:
-                raise HTTPException(404, "No folder art.")
-            return thumb_response(lambda: thumbs.from_image(art))
-        raise HTTPException(404, "No folder art.")
+        return FileResponse(path, media_type="image/jpeg", headers=THUMB_HEADERS)
 
     @app.get("/api/libraries/{library_uid}/browse")
     def browse_folder(library_uid: str, path: str = "", sort: str = "name", limit: int | None = None,
@@ -264,8 +285,8 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
         return browse.browse(conn, library_pk(conn, library_uid), path, sort, limit=limit, offset=offset)
 
     @app.get("/api/libraries/{library_uid}/folder-art")
-    def get_folder_art(library_uid: str, path: str = "", conn: sqlite3.Connection = Db):
-        return folder_art(conn, library_pk(conn, library_uid), catalog.clean_dir(path))
+    async def get_folder_art(library_uid: str, path: str = ""):
+        return await picture_response(await run_in_threadpool(folder_picture, library_uid, path))
 
     @app.get("/api/items/{item_uid}")
     def get_item(item_uid: str, conn: sqlite3.Connection = Db):
@@ -309,8 +330,8 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
         return FileResponse(path, media_type="image/jpeg", headers=THUMB_HEADERS)
 
     @app.get("/api/items/{item_uid}/thumb")
-    def get_item_thumb(item_uid: str, conn: sqlite3.Connection = Db):
-        return item_thumb(conn, item_uid)
+    async def get_item_thumb(item_uid: str):
+        return await picture_response(await run_in_threadpool(item_picture, item_uid))
 
     # ---- Your pictures for tags, videos and folders (they win over NAS pictures) ----
 

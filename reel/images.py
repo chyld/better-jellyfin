@@ -65,6 +65,11 @@ class Thumbnailer:
         os.replace(tmp, out)
         return out
 
+    def cached(self, src: Path, shape: str = "poster") -> Path | None:
+        """The thumbnail of `src`, if it's already made (no ffmpeg needed)."""
+        out = self._cache_path(src, shape)
+        return out if out.exists() else None
+
     def from_image(self, src: Path, shape: str = "poster") -> Path:
         """A small JPEG of `src`, cropped to `shape` ("poster" or "landscape")."""
         return self._render(self._cache_path(src, shape), ["-i", str(src)], shape)
