@@ -28,6 +28,7 @@ const ICONS = {
   expand: '<path d="M4 9V5.5A1.5 1.5 0 0 1 5.5 4H9M15 4h3.5A1.5 1.5 0 0 1 20 5.5V9M20 15v3.5a1.5 1.5 0 0 1-1.5 1.5H15M9 20H5.5A1.5 1.5 0 0 1 4 18.5V15"/>',
   shrink: '<path d="M9 4v3.5A1.5 1.5 0 0 1 7.5 9H4M20 9h-3.5A1.5 1.5 0 0 1 15 7.5V4M15 20v-3.5a1.5 1.5 0 0 1 1.5-1.5H20M4 15h3.5A1.5 1.5 0 0 1 9 16.5V20"/>',
   chevron: '<path d="M14.5 5.5L8 12l6.5 6.5"/>',
+  camera: '<path d="M4 8.5A1.5 1.5 0 0 1 5.5 7h2.2l1.5-2h5.6l1.5 2h2.2A1.5 1.5 0 0 1 20 8.5v9a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 17.5z"/><circle cx="12" cy="13" r="3.3"/>',
 };
 
 function icon(name) {
@@ -68,6 +69,8 @@ export async function renderPlayer(page, itemId) {
   const forwardBtn = iconButton("forward", "Forward 1 minute", "Shift + →", "jump");
   const muteBtn = iconButton("volume", "Mute", "M");
   const fullBtn = iconButton("expand", "Full screen", "F");
+  const snapBtn = iconButton("camera", "Use this frame as the preview", "P");
+  const toast = h("div", { class: "player-toast", role: "status", "aria-live": "polite", hidden: true });
   const volume = h("input", { type: "range", class: "volume", min: 0, max: 1, step: 0.05, value: 1, "aria-label": "Volume" });
 
   const timeNow = h("span", { class: "clock now" }, "0:00");
@@ -95,7 +98,7 @@ export async function renderPlayer(page, itemId) {
       { class: "dock-row" },
       h("div", { class: "dock-side" }, timeNow),
       h("div", { class: "dock-center" }, startBtn, backBtn, playBtn, forwardBtn),
-      h("div", { class: "dock-side right" }, timeTotal, h("div", { class: "vol" }, muteBtn, volume), fullBtn),
+      h("div", { class: "dock-side right" }, timeTotal, h("div", { class: "vol" }, muteBtn, volume), snapBtn, fullBtn),
     ),
   );
   const backLink = h("a", { class: "pbtn glass", href: `#/item/${item.id}`, "aria-label": "Back", title: "Back" }, icon("chevron"));
@@ -110,7 +113,7 @@ export async function renderPlayer(page, itemId) {
       streamed && h("span", { class: "badge" }, h("i", { class: "pulse" }), BADGES[plan.mode] || "Converting"),
     ),
   );
-  const player = h("div", { class: "player" }, video, h("div", { class: "scrim" }), flash, spinner, message, top, dock);
+  const player = h("div", { class: "player" }, video, h("div", { class: "scrim" }), flash, spinner, message, toast, top, dock);
   page.replaceChildren(player);
   document.body.classList.add("playing");
 
@@ -159,6 +162,38 @@ export async function renderPlayer(page, itemId) {
 
   function setIcon(button, name) {
     button.replaceChildren(icon(name));
+  }
+
+  // A short note at the top of the screen, e.g. "Preview updated".
+  let toastTimer = null;
+  function showToast(text, tone = "", stay = false) {
+    clearTimeout(toastTimer);
+    toast.textContent = text;
+    toast.className = `player-toast ${tone}`.trim();
+    toast.hidden = false;
+    if (!stay) toastTimer = setTimeout(() => (toast.hidden = true), 3000);
+  }
+
+  // Use the frame on screen as the video's preview (replacing any): the server
+  // takes it from the original file at this exact time.
+  let snapping = false;
+  async function takeSnapshot() {
+    if (snapping) return;
+    snapping = true;
+    snapBtn.disabled = true;
+    video.pause();
+    const time = Math.max(0, position());
+    showToast("Saving preview…", "", true);
+    try {
+      await api("POST", `/api/items/${item.id}/snapshot`, { time });
+      flashIcon("camera");
+      showToast(`Preview updated (${formatDuration(time) || "0:00"})`, "ok");
+    } catch (err) {
+      showToast(err.message, "err");
+    } finally {
+      snapping = false;
+      snapBtn.disabled = false;
+    }
   }
 
   function flashIcon(name) {
@@ -266,6 +301,7 @@ export async function renderPlayer(page, itemId) {
   backBtn.addEventListener("click", () => seek(position() - JUMP_SECONDS));
   forwardBtn.addEventListener("click", () => seek(position() + JUMP_SECONDS));
   fullBtn.addEventListener("click", toggleFullscreen);
+  snapBtn.addEventListener("click", takeSnapshot);
   muteBtn.addEventListener("click", () => (video.muted = !video.muted));
   volume.addEventListener("input", () => {
     video.volume = Number(volume.value);
@@ -281,6 +317,7 @@ export async function renderPlayer(page, itemId) {
       k: togglePlay,
       f: toggleFullscreen,
       m: () => (video.muted = !video.muted),
+      p: takeSnapshot,
       Home: () => seek(0),
       ArrowLeft: () => seek(position() - (e.shiftKey ? JUMP_SECONDS : SKIP_SECONDS)),
       ArrowRight: () => seek(position() + (e.shiftKey ? JUMP_SECONDS : SKIP_SECONDS)),

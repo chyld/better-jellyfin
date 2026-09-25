@@ -152,6 +152,17 @@ body.playing main { padding: 0; max-width: none; }
 }
 .player-message[hidden] { display: none; }
 
+.player-toast {
+  position: absolute; top: 76px; left: 50%; transform: translateX(-50%); max-width: calc(100% - 32px);
+  padding: 9px 16px; border-radius: 999px; font-size: 14px; color: var(--ink); pointer-events: none;
+  background: var(--glass); box-shadow: 0 0 0 1px var(--glass-edge);
+  backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+}
+.player-toast[hidden] { display: none; }
+.player-toast.ok { box-shadow: 0 0 0 1px var(--glass-edge), 0 0 22px rgb(56 189 248 / 0.35); }
+.player-toast.err { box-shadow: 0 0 0 1px rgb(248 113 113 / 0.7); }
+.pbtn:disabled { opacity: 0.45; cursor: progress; }
+
 @media (max-width: 640px) {
   .player-top { padding: 14px 14px; }
   .dock { bottom: 12px; width: calc(100% - 16px); padding: 8px 10px 10px; border-radius: 18px; }

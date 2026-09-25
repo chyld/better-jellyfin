@@ -44,6 +44,10 @@ CLIPS = {
     "flac.mkv": (60, "320x180", ["-c:v", "mpeg4", "-c:a", "flac"]),
     "long.avi": (300, "320x180", ["-c:v", "mpeg4", "-c:a", "libmp3lame"]),
     "big.avi": (600, "1280x720", ["-c:v", "mpeg4", "-q:v", "8", "-c:a", "libmp3lame"]),
+    # Red for the first 30 seconds, blue after: shows which moment a snapshot is from.
+    "colours.mkv": (60, "320x180", ["-vf", "drawbox=x=0:y=0:w=iw:h=ih:color=red:t=fill,"
+                                           "drawbox=x=0:y=0:w=iw:h=ih:color=blue:t=fill:enable='gte(t,30)'",
+                                    "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac"]),
 }
 
 

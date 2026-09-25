@@ -28,32 +28,35 @@ const THUMBS = "t2";
 // Re-render the current page in place (scroll position is kept), e.g. after an upload.
 const rerender = () => window.dispatchEvent(new HashChangeEvent("hashchange"));
 
-/** A video's picture: its image on the NAS, else one you uploaded, else null (placeholder). */
+/** A video's picture: one you uploaded (or snapped in the player), else its image
+ *  on the NAS, else null (placeholder). */
 function videoImageSrc(item) {
-  if (item.has_poster) return `/api/items/${item.id}/thumb?${THUMBS}`;
   if (item.custom_image) return `/api/items/${item.id}/thumb?${THUMBS}&v=${item.custom_image}`;
+  if (item.has_poster) return `/api/items/${item.id}/thumb?${THUMBS}`;
   return null;
 }
 
-/** A folder's picture: folder.<ext> on the NAS, else one you uploaded, else null. */
-function folderImageSrc(libraryId, path, hasArt, customArt) {
-  if (hasArt) return folderArtUrl(libraryId, path);
+/** A folder's picture: one you uploaded, else folder.<ext> on the NAS, else null.
+ *  `nasVersion` refreshes a NAS picture that may have changed (e.g. the last scan). */
+function folderImageSrc(libraryId, path, hasArt, customArt, nasVersion) {
   if (customArt) return folderArtUrl(libraryId, path, customArt);
+  if (hasArt) return folderArtUrl(libraryId, path, nasVersion);
   return null;
 }
 
 /**
- * The "Add image" / "Change image" button over a card's picture. Only shown
- * when there's no image on the NAS: NAS images always win.
+ * The "Add image" / "Replace image" / "Change image" button over a card's
+ * picture. Your image wins over one on the NAS; removing it shows the NAS one again.
  */
-function imageEditButton({ title, base, query = "", custom }) {
+function imageEditButton({ title, base, query = "", custom, onNas }) {
+  const label = custom ? "Change image" : onNas ? "Replace image" : "Add image";
   return h(
     "button",
     {
       type: "button",
       class: "art-edit",
-      title: custom ? "Change image" : "Add image",
-      "aria-label": `${custom ? "Change" : "Add"} image for ${title}`,
+      title: label,
+      "aria-label": `${label} for ${title}`,
       onclick: (event) => {
         event.preventDefault();
         openImageDialog({
@@ -66,7 +69,7 @@ function imageEditButton({ title, base, query = "", custom }) {
       },
     },
     imageIcon(),
-    h("span", {}, custom ? "Change image" : "Add image"),
+    h("span", {}, label),
   );
 }
 
@@ -79,17 +82,21 @@ function imageIcon() {
 }
 
 function videoImageButton(item) {
-  if (item.has_poster) return null;
-  return imageEditButton({ title: item.title, base: `/api/items/${item.id}/image`, custom: item.custom_image });
+  return imageEditButton({
+    title: item.title,
+    base: `/api/items/${item.id}/image`,
+    custom: item.custom_image,
+    onNas: item.has_poster,
+  });
 }
 
 function folderImageButton(libraryId, path, name, hasArt, customArt) {
-  if (hasArt) return null;
   return imageEditButton({
     title: name,
     base: `/api/libraries/${libraryId}/folder-image`,
     query: `?path=${encodeURIComponent(path)}`,
     custom: customArt,
+    onNas: hasArt,
   });
 }
 
@@ -153,7 +160,7 @@ export async function renderHome(view) {
             artBox({
               kind: "folder",
               shape: "poster",
-              src: lib.has_art ? folderArtUrl(lib.id, "", lib.last_scan_at) : folderImageSrc(lib.id, "", false, lib.custom_art),
+              src: folderImageSrc(lib.id, "", lib.has_art, lib.custom_art, lib.last_scan_at),
             }),
             h("div", { class: "label" }, lib.name),
             h("div", { class: "sub" }, lib.item_count ? plural(lib.item_count, "video") : "Not scanned yet"),

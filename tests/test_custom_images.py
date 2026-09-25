@@ -1,4 +1,4 @@
-"""Uploading images for folders and videos that have none on the NAS."""
+"""Uploading images for folders and videos. Uploads win over images on the NAS."""
 import subprocess
 
 import pytest
@@ -90,23 +90,32 @@ def test_replace_and_remove_a_video_image(client, lib, tmp_path, settings):
     assert images_on_disk(settings, "videos") == []
 
 
-def test_video_with_a_nas_image_cannot_get_an_upload(client, lib, picture):
+def uploaded_file(settings, kind, name_start):
+    (path,) = [p for p in (settings.images_dir / kind).glob("*.jpg") if p.name.startswith(name_start)]
+    return path.read_bytes()
+
+
+def test_upload_wins_over_the_nas_image_and_removing_it_brings_that_back(client, lib, picture, settings):
     video = items(client, lib, "Lectures")["x"]
     assert video["has_poster"] is True
+    nas = client.get(f"/api/items/{video['id']}/thumb").content
     res = client.put(f"/api/items/{video['id']}/image", content=picture)
-    assert res.status_code == 409
-    assert "x.png" in res.json()["detail"]
+    assert res.status_code == 200
+    item = items(client, lib, "Lectures")["x"]
+    assert item["has_poster"] is True and item["custom_image"] == res.json()["custom_image"]
+    shown = client.get(f"/api/items/{video['id']}/thumb").content
+    assert shown == uploaded_file(settings, "videos", video["id"]) != nas
+    client.delete(f"/api/items/{video['id']}/image")
+    assert client.get(f"/api/items/{video['id']}/thumb").content == nas
 
 
-def test_nas_image_wins_once_it_appears(client, lib, picture, media_root):
+def test_upload_still_wins_when_a_nas_image_appears_later(client, lib, picture, media_root, settings):
     video = items(client, lib, "Tapes")["a"]["id"]
     client.put(f"/api/items/{video}/image", content=picture)
-    uploaded = client.get(f"/api/items/{video}/thumb").content
     png(media_root / "Tapes/a.png", color="purple")  # someone adds a poster on the NAS
     rescan(client, lib)
-    item = items(client, lib, "Tapes")["a"]
-    assert item["has_poster"] is True
-    assert client.get(f"/api/items/{video}/thumb").content != uploaded
+    assert items(client, lib, "Tapes")["a"]["has_poster"] is True
+    assert client.get(f"/api/items/{video}/thumb").content == uploaded_file(settings, "videos", video)
 
 
 def test_bad_video_uploads(client, lib):
@@ -161,10 +170,16 @@ def test_replace_and_remove_a_folder_image(client, lib, tmp_path, settings):
     assert images_on_disk(settings, "folders") == []
 
 
-def test_folder_with_nas_image_cannot_get_an_upload(client, lib, picture):
+def test_folder_upload_wins_over_folder_png(client, lib, picture, settings):
+    art = lambda: client.get(f"/api/libraries/{lib}/folder-art", params={"path": "Lectures"}).content
+    nas = art()
     res = upload_folder(client, lib, "Lectures", picture)
-    assert res.status_code == 409
-    assert "folder.png" in res.json()["detail"]
+    assert res.status_code == 200
+    listed = folders(client, lib)["Lectures"]
+    assert listed["has_art"] is True and listed["custom_art"] == res.json()["custom_art"]
+    assert art() == uploaded_file(settings, "folders", "") != nas
+    client.delete(f"/api/libraries/{lib}/folder-image", params={"path": "Lectures"})
+    assert art() == nas
 
 
 @pytest.mark.parametrize("path", ["Nope", "../x", "Tapes/a.mpg"])

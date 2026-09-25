@@ -1,7 +1,7 @@
-"""Images you upload for folders and videos that have none on the NAS.
+"""Images you upload for folders and videos (or take from a video's frame).
 
-A NAS image (folder.png, or zombie.png beside zombie.mp4) always wins; an
-uploaded image is only shown when there isn't one. Uploads are stored in the
+An uploaded image wins over one on the NAS (folder.png, or zombie.png beside
+zombie.mp4); removing it shows the NAS image again. Uploads are stored in the
 data folder, never on the NAS, one file per upload (see images.py for why):
 
     images/videos/<video uuid>-<version>.jpg
@@ -15,10 +15,6 @@ from pathlib import Path
 from .browse import NotFound, clean_dir, descendants
 from .db import new_uid
 from .images import ORPHAN_GRACE_SECONDS, save_upload, upload_name
-
-
-class ImageConflict(Exception):
-    """The folder or video already has an image on the NAS."""
 
 
 def _version() -> str:
@@ -44,8 +40,6 @@ def video_image_path(images_dir: Path, item_uid: str, version: str) -> Path:
 
 def set_video_image(conn: sqlite3.Connection, images_dir: Path, item_uid: str, data: bytes) -> dict:
     row = _video(conn, item_uid)
-    if row["poster_path"]:
-        raise ImageConflict(f"This video already has an image on the NAS ({Path(row['poster_path']).name}).")
     version = _version()
     save_upload(data, video_image_path(images_dir, row["uid"], version))   # 1. the new file
     conn.execute("UPDATE media_items SET custom_image = ? WHERE id = ?", (version, row["id"]))
@@ -96,11 +90,6 @@ def custom_folder_image(conn: sqlite3.Connection, library_id: int, rel_dir: str)
 
 def set_folder_image(conn: sqlite3.Connection, images_dir: Path, library_id: int, rel_dir: str, data: bytes) -> dict:
     rel_dir = _folder(conn, library_id, rel_dir)
-    art = conn.execute(
-        "SELECT art_path FROM folder_art WHERE library_id = ? AND rel_dir = ?", (library_id, rel_dir)
-    ).fetchone()
-    if art:
-        raise ImageConflict(f"This folder already has an image on the NAS ({Path(art['art_path']).name}).")
     existing = custom_folder_image(conn, library_id, rel_dir)
     image_uid = existing["uid"] if existing else new_uid()
     version = _version()

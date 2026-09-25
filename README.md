@@ -47,10 +47,12 @@ ffmpeg converts on the fly.
   converted live by ffmpeg, starting in about half a second.
 - **A modern player.** A frosted-glass control dock, a gradient seek bar with a time preview,
   ±1 minute jumps, a go-to-beginning button, keyboard shortcuts and full screen.
+- **Snap a preview.** The camera button in the player (or **P**) makes the frame on screen the
+  video's picture, replacing any it had.
 - **Pictures from your files.** `movie.png` beside `movie.mp4` and `folder.png` in a folder are
   picked up automatically, then shrunk and cached.
-- **Your own pictures.** Folders and videos without one can get an image from your device or a
-  URL. The image is stored by Reel, never on the NAS.
+- **Your own pictures.** Any folder or video can get an image from your device or a URL, and it
+  wins over the picture on the NAS. The image is stored by Reel, never on the NAS.
 - **Tags.** Put any number of tags on a video, browse by tag from Home, rename, merge or delete
   tags, and give each tag a picture.
 - **Read-only media.** Reel never writes to your video folders.
@@ -176,9 +178,16 @@ Going **Back** returns you to the same scroll position in long grids.
 | Seek | Click or drag the seek bar; hovering shows the time | |
 | Mute / volume | Speaker button; the slider appears on hover | **M** |
 | Full screen | ⛶ button, or double-click the video | **F** |
+| Use this frame as the preview | Camera button | **P** |
 
 The controls fade out after 3 seconds without mouse movement while playing. Converted videos
 show a pulsing **CONVERTING** badge, and repackaged ones show **REPACKAGING**.
+
+**Use this frame as the preview** pauses the video and asks the server for the frame at that
+exact moment, taken from the **original file** (full quality, whatever the player was sent;
+VHS captures are deinterlaced as for playback). It's stored like an uploaded picture, replaces
+any earlier one, and wins over a picture on the NAS. A note at the top says "Preview updated"
+(or what went wrong). Nothing is written to the NAS.
 
 ---
 
@@ -244,8 +253,8 @@ the database, so **browsing never touches the NAS**.
 
 | Shows | Shape | Picture comes from |
 |---|---|---|
-| Video cards and the video page | 16:9 landscape (thumbnail up to 640×360) | the image beside the video **with the same name** (`zombie.mp4` → `zombie.png`), else an [uploaded image](#uploaded-images), else a film-strip placeholder |
-| Folder cards and library tiles | 2:3 poster (up to 480×720) | `folder.<ext>` **in that folder**, else an uploaded image, else a folder placeholder |
+| Video cards and the video page | 16:9 landscape (thumbnail up to 640×360) | an [uploaded image](#uploaded-images) or a frame snapped in the player, else the image beside the video **with the same name** (`zombie.mp4` → `zombie.png`), else a film-strip placeholder |
+| Folder cards and library tiles | 2:3 poster (up to 480×720) | an uploaded image, else `folder.<ext>` **in that folder**, else a folder placeholder |
 | Tag cards | 2:3 poster | the tag's uploaded image, else a tag placeholder |
 
 - Image extensions: `jpg`, `jpeg`, `png`, `webp`, in any capitalisation.
@@ -379,9 +388,9 @@ Details:
 
 ### Uploaded images
 
-Tags, and any folder or video without a picture on the NAS, can be given one: hover the card (on
-touch screens, tap the round image icon), or use **Set image** on the Tags page. The dialog
-offers:
+Tags, folders and videos can be given a picture: hover the card (on touch screens, tap the
+round image icon), or use **Set image** on the Tags page. A video can also take one of its own
+frames (see [Player controls](#player-controls)). The dialog offers:
 
 - **Choose a photo from this device**, or
 - **Image URL**, which the server downloads.
@@ -389,10 +398,12 @@ offers:
 Rules:
 - Formats: JPG, PNG, WebP, GIF, BMP, up to **20 MB**. The format is checked from the file's
   contents, not its name. Uploads are stored as a JPEG at most 800 px wide.
-- **NAS pictures always win.** Uploading is refused (409) when the folder or video already has
-  one, and a NAS picture added later takes over. The uploaded image stays stored but unused.
+- **Your pictures win.** An uploaded (or snapped) picture is shown instead of the one on the NAS,
+  including a NAS picture added later. **Remove image** deletes only yours, and the NAS picture
+  shows again.
 - A failed upload leaves the previous image in place.
-- Once an image is set, the button reads **Change image**, and the dialog also offers
+- The button reads **Add image** when there's no picture, **Replace image** over a NAS
+  picture, and **Change image** once you've set one; then the dialog also offers
   **Remove image**.
 - **URL safety:** only `http://` and `https://`, a 15-second limit for the whole download, at
   most 5 redirects, and the result must really be an image.
@@ -525,7 +536,8 @@ JSON over HTTP. Every ID is a UUID. There's no authentication yet (see
 | GET | `/api/items/{id}/stream?start=&video=&audio=` | A fragmented MP4 from `start` seconds, each track copied or converted per the plan for those codecs. |
 | PUT | `/api/items/{id}/image` | Upload a picture (request body = the image). |
 | POST | `/api/items/{id}/image-url` | `{url}`: set a picture from a URL. |
-| DELETE | `/api/items/{id}/image` | Remove the uploaded picture. |
+| POST | `/api/items/{id}/snapshot` | `{time}`: use the frame at `time` seconds (from the original file) as the picture, replacing any. |
+| DELETE | `/api/items/{id}/image` | Remove the uploaded picture (the NAS one, if any, shows again). |
 | POST | `/api/items/{id}/tags` | `{name}`: tag the video. Returns its tags. |
 | DELETE | `/api/items/{id}/tags/{tag}` | Untag. Returns its remaining tags. |
 
@@ -570,9 +582,9 @@ changes how thumbnails are made.
 ### Tests
 
 ```sh
-uv run pytest              # backend: 476 tests
+uv run pytest              # backend: 486 tests
 node --test tests/js/      # frontend: 27 tests
-uv run pytest -m browser   # browser: 11 tests (about 2 minutes; needs Chromium and ffmpeg)
+uv run pytest -m browser   # browser: 12 tests (about 2 minutes; needs Chromium and ffmpeg)
 scripts/docker-smoke.sh    # builds the image and checks it end to end (needs Docker)
 ```
 
@@ -588,7 +600,8 @@ scripts/docker-smoke.sh    # builds the image and checks it end to end (needs Do
   browser without HLS) really plays **with audio**; repeated seeking in HLS and progressive
   streams; that leaving the player stops ffmpeg; two tabs at different points of one video;
   playing on after the HLS session expired; a file replaced mid-play (the player reloads and
-  carries on); and simultaneous first uploads of a folder picture. They're skipped by a plain
+  carries on); simultaneous first uploads of a folder picture; and the player's snapshot button
+  (the saved picture is the frame that was on screen, before and after a seek). They're skipped by a plain
   `uv run pytest` because they're slow.
 - The smoke test generates clips, builds the image, and checks the ffmpeg version, scanning,
   thumbnails, direct play with range requests, live conversion, the data volume and the health

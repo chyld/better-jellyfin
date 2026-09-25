@@ -13,14 +13,14 @@ from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from . import browse, custom_images, fetch, hls, libraries, playback, tags, users
 from .paths import OutsideRoot, resolve_inside
 from .plan import HLS_SUPPORT, Capabilities, Plan, plan as make_plan
 from .config import Settings
 from .db import connect, init_db
-from .images import MAX_UPLOAD_BYTES, Thumbnailer, ThumbnailError
+from .images import MAX_UPLOAD_BYTES, Thumbnailer, ThumbnailError, frame_at
 from .scan_manager import ScanManager
 from .scanner import scan_library
 
@@ -58,6 +58,10 @@ class TagAdd(BaseModel):
 
 class TagRename(BaseModel):
     name: str
+
+
+class Snapshot(BaseModel):
+    time: float = Field(ge=0, allow_inf_nan=False)   # seconds into the video
 
 
 class ImageUrl(BaseModel):
@@ -140,10 +144,6 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
     async def tag_error(request: Request, exc: tags.TagError):
         return JSONResponse({"detail": str(exc)}, status_code=400)
 
-    @app.exception_handler(custom_images.ImageConflict)
-    async def image_conflict(request: Request, exc: custom_images.ImageConflict):
-        return JSONResponse({"detail": str(exc)}, status_code=409)
-
     @app.exception_handler(ThumbnailError)
     async def bad_image(request: Request, exc: ThumbnailError):
         return JSONResponse({"detail": str(exc)}, status_code=400)
@@ -193,30 +193,35 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
             raise HTTPException(404, "No image.")
 
     def item_thumb(conn: sqlite3.Connection, item_uid: str) -> FileResponse:
-        """The video's own preview (zombie.png beside zombie.mp4), shrunk.
+        """The video's preview: one you uploaded (or snapped from the video), else
+        its own image on the NAS (zombie.png beside zombie.mp4), shrunk.
 
-        Videos without one get a placeholder in the browser, so this is a 404.
+        Videos without either get a placeholder in the browser, so this is a 404.
         """
         row = conn.execute(
             "SELECT uid, library_id, poster_path, custom_image FROM media_items WHERE uid = ?", (item_uid,)
         ).fetchone()
         if row is None:
             raise HTTPException(404, "Video not found.")
+        if row["custom_image"]:
+            uploaded = custom_images.video_image_path(settings.images_dir, row["uid"], row["custom_image"])
+            if uploaded.is_file():
+                return FileResponse(uploaded, media_type="image/jpeg", headers=THUMB_HEADERS)
         if row["poster_path"]:
             try:
                 poster = library_file(conn, row["library_id"], row["poster_path"])
             except HTTPException:
                 raise HTTPException(404, "No image.")
             return thumb_response(lambda: thumbs.from_image(poster, "landscape"))
-        uploaded = (
-            custom_images.video_image_path(settings.images_dir, row["uid"], row["custom_image"])
-            if row["custom_image"] else None
-        )
-        if uploaded and uploaded.is_file():
-            return FileResponse(uploaded, media_type="image/jpeg", headers=THUMB_HEADERS)
         raise HTTPException(404, "No image.")
 
     def folder_art(conn: sqlite3.Connection, library_id: int, rel_dir: str) -> FileResponse:
+        """A folder's picture: one you uploaded, else its folder.<ext> on the NAS."""
+        custom = custom_images.custom_folder_image(conn, library_id, rel_dir)
+        if custom:
+            uploaded = custom_images.folder_image_path(settings.images_dir, custom["uid"], custom["version"])
+            if uploaded.is_file():
+                return FileResponse(uploaded, media_type="image/jpeg", headers=THUMB_HEADERS)
         row = conn.execute(
             "SELECT art_path FROM folder_art WHERE library_id = ? AND rel_dir = ?", (library_id, rel_dir)
         ).fetchone()
@@ -226,11 +231,6 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
             except HTTPException:
                 raise HTTPException(404, "No folder art.")
             return thumb_response(lambda: thumbs.from_image(art))
-        custom = custom_images.custom_folder_image(conn, library_id, rel_dir)
-        if custom:
-            uploaded = custom_images.folder_image_path(settings.images_dir, custom["uid"], custom["version"])
-            if uploaded.is_file():
-                return FileResponse(uploaded, media_type="image/jpeg", headers=THUMB_HEADERS)
         raise HTTPException(404, "No folder art.")
 
     @app.get("/api/libraries/{library_uid}/browse")
@@ -302,7 +302,7 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
     def get_item_thumb(item_uid: str, conn: sqlite3.Connection = Db):
         return item_thumb(conn, item_uid)
 
-    # ---- Uploaded images for videos and folders without one on the NAS ----
+    # ---- Your images for videos and folders (they win over images on the NAS) ----
 
     @app.put("/api/items/{item_uid}/image")
     async def upload_video_image(item_uid: str, request: Request, conn: sqlite3.Connection = Db):
@@ -313,6 +313,18 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
     def video_image_from_url(item_uid: str, body: ImageUrl, conn: sqlite3.Connection = Db):
         browse.item_detail(conn, item_uid)  # 404 before downloading anything
         return custom_images.set_video_image(conn, settings.images_dir, item_uid, download(body.url))
+
+    @app.post("/api/items/{item_uid}/snapshot")
+    def video_image_from_frame(item_uid: str, body: Snapshot, conn: sqlite3.Connection = Db):
+        """Use the frame at `time` seconds as the video's picture, replacing any."""
+        row, path = media_file(conn, item_uid)
+        # The very last moment may have no frame to decode: stay a little before it.
+        at = min(body.time, max(0.0, row["duration"] - 0.5)) if row["duration"] else body.time
+        try:
+            frame = frame_at(path, at, interlaced=bool(row["interlaced"]))
+        except ThumbnailError as exc:
+            raise HTTPException(502, f"Couldn't take a picture from the video ({exc}).")
+        return custom_images.set_video_image(conn, settings.images_dir, item_uid, frame)
 
     @app.delete("/api/items/{item_uid}/image")
     def delete_video_image(item_uid: str, conn: sqlite3.Connection = Db):

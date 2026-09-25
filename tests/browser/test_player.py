@@ -193,3 +193,48 @@ def test_simultaneous_first_folder_uploads(server, tmp_path):
     assert folder["custom_art"]
     art = server.call("GET", f"/api/libraries/{server.library}/folder-art?path=Sub&v={folder['custom_art']}")
     assert art[:3] == b"\xff\xd8\xff"               # a JPEG came back
+
+
+# ---- Snapshots -------------------------------------------------------------------------
+
+
+def colour_of(image: bytes, tmp_path) -> str:
+    import subprocess
+    src = tmp_path / "shot.img"
+    src.write_bytes(image)
+    rgb = subprocess.run(["ffmpeg", "-v", "error", "-i", str(src), "-vf", "scale=1:1", "-f", "rawvideo",
+                          "-pix_fmt", "rgb24", "pipe:1"], capture_output=True, check=True).stdout
+    return "red" if rgb[0] > rgb[2] else "blue"
+
+
+def snap(page) -> str:
+    """Press P and wait for the player to say how it went."""
+    page.key("p")
+    return page.wait_for("""(() => { const t = document.querySelector('.player-toast');
+        return t && !t.hidden && !t.textContent.startsWith('Saving') && t.textContent; })()""",
+                         message="the snapshot result")
+
+
+def test_snapshot_button_takes_the_frame_on_screen(server, page, tmp_path):
+    """In a progressive stream (whose clock restarts at each seek), before and after a seek."""
+    video = server.videos["colours.mkv"]
+    page.play(server, "colours.mkv")
+    page.playing_past(2)
+    assert snap(page).startswith("Preview updated")
+    first = server.call("GET", f"/api/items/{video}")["custom_image"]
+    assert colour_of(server.call("GET", f"/api/items/{video}/thumb?v={first}"), tmp_path) == "red"
+
+    page.js("document.querySelector('video.screen').play()")
+    for _ in range(4):
+        page.key("ArrowRight")                          # +10 s each: to about 0:42
+        time.sleep(0.4)
+    page.playing_past(35)
+    assert snap(page).startswith("Preview updated")
+    second = server.call("GET", f"/api/items/{video}")["custom_image"]
+    assert second != first
+    assert colour_of(server.call("GET", f"/api/items/{video}/thumb?v={second}"), tmp_path) == "blue"
+    assert page.video_state()["paused"]                 # taking it paused the video
+
+    page.goto(f"{server.base}/#/item/{video}")          # the video page shows the new picture
+    src = page.wait_for("(document.querySelector('.hero-wrap img') || {}).src", message="the preview")
+    assert f"v={second}" in src
