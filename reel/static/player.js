@@ -11,6 +11,10 @@ const BADGES = { remux: "Repackaging", audio: "Converting audio", transcode: "Co
 const SKIP_SECONDS = 10; // arrow keys
 const JUMP_SECONDS = 60; // the 1-minute buttons, and Shift + arrow keys
 
+// The player that owns the page-wide state (the "playing" look). A replaced player
+// whose loading finishes late is cleaned up then, and must not undo the current one's.
+let activePlayer = null;
+
 /** Where a seek to `t` actually lands: never before the start or past the end. */
 export function clampSeek(t, duration) {
   return Math.max(0, Math.min(t, duration - 1));
@@ -115,19 +119,35 @@ export async function renderPlayer(page, itemId) {
   );
   const player = h("div", { class: "player" }, video, h("div", { class: "scrim" }), flash, spinner, message, toast, top, dock);
   page.replaceChildren(player);
-  document.body.classList.add("playing");
+  // Only the current page takes the page-wide state: a replaced one (the router
+  // has detached it) is about to be cleaned up.
+  if (page.isConnected) {
+    activePlayer = player;
+    document.body.classList.add("playing");
+  }
+  const releasePage = () => {
+    if (activePlayer !== player) return; // a newer player owns it now
+    activePlayer = null;
+    document.body.classList.remove("playing");
+  };
 
   // How the video arrives (file, progressive stream or HLS): see sources.js.
-  const source = await makeSource(
-    video,
-    plan,
-    (text) => {
-      spinner.hidden = true;
-      message.hidden = false;
-      message.textContent = text;
-    },
-    { nativeHls: hlsSupport() === "native" },
-  );
+  let source;
+  try {
+    source = await makeSource(
+      video,
+      plan,
+      (text) => {
+        spinner.hidden = true;
+        message.hidden = false;
+        message.textContent = text;
+      },
+      { nativeHls: hlsSupport() === "native" },
+    );
+  } catch (err) {
+    releasePage(); // failed before a cleanup was handed back: undo what was set
+    throw err;
+  }
   const duration = () =>
     plan.delivery === "progressive" || !Number.isFinite(video.duration) ? item.duration || 0 : video.duration;
   const position = () => source.position();
@@ -337,9 +357,9 @@ export async function renderPlayer(page, itemId) {
   return () => {
     document.removeEventListener("keydown", onKey);
     document.removeEventListener("fullscreenchange", onFullscreen);
-    document.body.classList.remove("playing");
+    releasePage();
     clearTimeout(hideTimer);
-    if (document.fullscreenElement) document.exitFullscreen();
+    if (document.fullscreenElement === player) document.exitFullscreen();
     // Dropping the source closes the connection, which stops ffmpeg on the server.
     source.destroy();
   };
