@@ -14,7 +14,7 @@ from pathlib import Path
 
 from .browse import NotFound, clean_dir, descendants
 from .db import new_uid
-from .images import ORPHAN_GRACE_SECONDS, save_upload, upload_name
+from .images import ORPHAN_GRACE_SECONDS, save_frame, save_upload, upload_name
 
 
 def _version() -> str:
@@ -39,9 +39,22 @@ def video_image_path(images_dir: Path, item_uid: str, version: str) -> Path:
 
 
 def set_video_image(conn: sqlite3.Connection, images_dir: Path, item_uid: str, data: bytes) -> dict:
+    """An uploaded picture for the video, replacing any."""
+    return _replace_video_image(conn, images_dir, item_uid, lambda out: save_upload(data, out))
+
+
+def set_video_frame(conn: sqlite3.Connection, images_dir: Path, item_uid: str, src: Path, seconds: float,
+                    *, interlaced: bool = False) -> dict:
+    """One of the video's own frames as its picture, replacing any."""
+    return _replace_video_image(
+        conn, images_dir, item_uid, lambda out: save_frame(src, seconds, out, interlaced=interlaced)
+    )
+
+
+def _replace_video_image(conn: sqlite3.Connection, images_dir: Path, item_uid: str, write) -> dict:
     row = _video(conn, item_uid)
     version = _version()
-    save_upload(data, video_image_path(images_dir, row["uid"], version))   # 1. the new file
+    write(video_image_path(images_dir, row["uid"], version))               # 1. the new file
     conn.execute("UPDATE media_items SET custom_image = ? WHERE id = ?", (version, row["id"]))
     conn.commit()                                                           # 2. point at it
     if row["custom_image"]:                                                 # 3. drop the old one

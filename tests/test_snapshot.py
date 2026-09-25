@@ -6,7 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from reel.db import init_db
-from reel.images import frame_at
+from reel.images import save_frame
 from reel.main import create_app
 from reel.probe import probe
 from reel.scan_manager import ScanManager
@@ -73,11 +73,24 @@ def thumb(client, video):
     return res.content
 
 
-def test_frame_at_takes_the_frame_at_that_time(tmp_path):
+def test_save_frame_takes_the_frame_at_that_time_in_one_step(tmp_path):
     clip = make_clip(tmp_path / "c.mp4", "-c:v", "libx264", "-pix_fmt", "yuv420p")
-    assert colour(frame_at(clip, 2.0), tmp_path) == "red"
-    assert colour(frame_at(clip, 7.5), tmp_path) == "blue"
-    assert frame_at(clip, 0).startswith(b"\x89PNG")
+    out = tmp_path / "shot.jpg"
+    save_frame(clip, 2.0, out)
+    assert colour(out.read_bytes(), tmp_path) == "red" and out.read_bytes()[:3] == b"\xff\xd8\xff"
+    save_frame(clip, 7.5, out)
+    assert colour(out.read_bytes(), tmp_path) == "blue"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["c.mp4", "check.img", "shot.jpg"]  # no temp files
+
+
+def test_frames_are_stored_at_most_800_wide(tmp_path):
+    clip = make_clip(tmp_path / "big.mp4", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-s", "1920x1080")
+    out = tmp_path / "shot.jpg"
+    save_frame(clip, 1.0, out)
+    import json, subprocess
+    info = json.loads(subprocess.run(["ffprobe", "-v", "error", "-show_streams", "-of", "json", str(out)],
+                                     capture_output=True, text=True, check=True).stdout)["streams"][0]
+    assert (info["width"], info["height"]) == (800, 450)
 
 
 def test_snapshot_becomes_the_preview_and_replaces_an_earlier_one(client, videos, settings, tmp_path):

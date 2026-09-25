@@ -22,7 +22,7 @@ from .paths import OutsideRoot, resolve_inside
 from .plan import HLS_SUPPORT, Capabilities, Plan, plan as make_plan
 from .config import DataLock, Settings
 from .db import connect, init_db
-from .images import MAX_UPLOAD_BYTES, Thumbnailer, ThumbnailError, frame_at
+from .images import MAX_UPLOAD_BYTES, Thumbnailer, ThumbnailError
 from .scan_manager import ScanManager
 from .scanner import scan_library
 
@@ -344,10 +344,10 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
         # The very last moment may have no frame to decode: stay a little before it.
         at = min(body.time, max(0.0, row["duration"] - 0.5)) if row["duration"] else body.time
         try:
-            frame = frame_at(path, at, interlaced=bool(row["interlaced"]))
+            return custom_images.set_video_frame(conn, settings.images_dir, item_uid, path, at,
+                                                 interlaced=bool(row["interlaced"]))
         except ThumbnailError as exc:
             raise HTTPException(502, f"Couldn't take a picture from the video ({exc}).")
-        return custom_images.set_video_image(conn, settings.images_dir, item_uid, frame)
 
     @app.delete("/api/items/{item_uid}/image")
     def delete_video_image(item_uid: str, conn: sqlite3.Connection = Db):

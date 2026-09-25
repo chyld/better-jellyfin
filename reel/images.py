@@ -138,23 +138,29 @@ def save_upload(data: bytes, out: Path, *, width: int = UPLOAD_WIDTH) -> None:
 FRAME_TIMEOUT = 30
 
 
-def frame_at(src: Path, seconds: float, *, interlaced: bool = False) -> bytes:
-    """One frame of a video at `seconds`, as PNG bytes (full size; save_upload shrinks it).
+def save_frame(src: Path, seconds: float, out: Path, *, interlaced: bool = False,
+               width: int = UPLOAD_WIDTH) -> None:
+    """Save one frame of a video, at `seconds`, as a JPEG at most `width` wide, in
+    one ffmpeg run (stored like an upload).
 
     Taken from the original file, so it's full quality whatever the player was
-    sent. Interlaced video is deinterlaced, as it is for playback."""
-    cmd = ["ffmpeg", "-v", "error", "-nostdin"]
+    sent. Interlaced video is deinterlaced, as it is for playback. Replaced
+    atomically; raises ThumbnailError if there's no frame to take."""
+    cmd = ["ffmpeg", "-v", "error", "-nostdin", "-y"]
     if seconds > 0:
         cmd += ["-ss", f"{seconds:.3f}"]   # before -i: fast, and exact (decodes up to the frame)
-    cmd += ["-i", str(src), "-map", "0:V:0", "-frames:v", "1"]
-    if interlaced:
-        cmd += ["-vf", "bwdif=mode=send_frame"]
-    cmd += ["-c:v", "png", "-f", "image2pipe", "pipe:1"]
+    filters = (["bwdif=mode=send_frame"] if interlaced else []) + [f"scale='min({width},iw)':-2"]
+    out.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out.with_suffix(f".{os.getpid()}.{threading.get_ident()}.tmp.jpg")
+    cmd += ["-i", str(src), "-map", "0:V:0", "-frames:v", "1", "-vf", ",".join(filters), "-q:v", "3", str(tmp)]
     try:
-        proc = subprocess.run(cmd, capture_output=True, timeout=FRAME_TIMEOUT)
-    except subprocess.TimeoutExpired:
-        raise ThumbnailError("Taking the picture took too long.")
-    if proc.returncode != 0 or not proc.stdout:
-        detail = proc.stderr.decode(errors="replace").strip().splitlines()
-        raise ThumbnailError(detail[-1] if detail else "ffmpeg made no picture")
-    return proc.stdout
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=FRAME_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            raise ThumbnailError("Taking the picture took too long.")
+        if proc.returncode != 0 or not tmp.exists() or tmp.stat().st_size == 0:
+            detail = proc.stderr.strip().splitlines()
+            raise ThumbnailError(detail[-1] if detail else "ffmpeg made no picture")
+        os.replace(tmp, out)
+    finally:
+        tmp.unlink(missing_ok=True)
