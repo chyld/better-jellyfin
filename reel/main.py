@@ -71,6 +71,7 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
         scan_fn=partial(scan_library, missing_grace=settings.missing_grace),
     )
     thumbs = Thumbnailer(settings.thumbs_dir)
+    streams = playback.StreamManager(playback.StreamLimits(max_streams=settings.max_streams))
     # Uploaded images whose video, folder or tag is gone are cleaned up at
     # startup and after every scan.
     custom_images.move_old_tag_images(settings.data_dir, settings.images_dir)
@@ -86,6 +87,7 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
     async def lifespan(app: FastAPI):
         scans.start()
         yield
+        await streams.shutdown()
         scans.stop()
 
     app = FastAPI(title="Reel", lifespan=lifespan)
@@ -93,6 +95,7 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
     logging.getLogger("uvicorn.access").addFilter(lambda record: "/api/health" not in record.getMessage())
     app.state.settings = settings
     app.state.scans = scans
+    app.state.streams = streams
 
     def get_db() -> Iterator[sqlite3.Connection]:
         conn = connect(settings.db_path)
@@ -338,10 +341,19 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
         row, path = media_file(conn, item_uid)
         return FileResponse(path, media_type=playback.direct_content_type(row["rel_path"]))
 
+    def stream_source(item_uid: str) -> tuple[sqlite3.Row, Path]:
+        """Look the video up on a short-lived connection (closed before streaming)."""
+        conn = connect(settings.db_path)
+        try:
+            return media_file(conn, item_uid)
+        finally:
+            conn.close()
+
     @app.get("/api/items/{item_uid}/stream")
-    async def get_item_stream(item_uid: str, start: float = 0, conn: sqlite3.Connection = Depends(get_db)):
+    async def get_item_stream(item_uid: str, start: float = 0):
         """A fragmented MP4 made by ffmpeg, starting `start` seconds in."""
-        row, path = media_file(conn, item_uid)
+        # The database and the NAS can be slow: keep them off the event loop.
+        row, path = await run_in_threadpool(stream_source, item_uid)
         if row["play_mode"] == "unsupported":
             raise HTTPException(409, "This video can't be played.")
         if start < 0 or (row["duration"] and start >= row["duration"]):
@@ -354,11 +366,15 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
             height=row["height"],
             audio_codec=row["audio_codec"],
         )
-        stream = playback.ffmpeg_stream(cmd)
+        stream = streams.stream(cmd)
         # Wait for the first bytes, so a file ffmpeg can't read gets a clear
         # error instead of an empty 200 response.
         try:
             first = await anext(stream)
+        except playback.StreamBusy as exc:
+            raise HTTPException(503, str(exc), headers={"Retry-After": "5"})
+        except playback.StreamFailed as exc:
+            raise HTTPException(502, str(exc))
         except StopAsyncIteration:
             raise HTTPException(502, "ffmpeg couldn't play this video.")
 

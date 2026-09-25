@@ -137,6 +137,10 @@ documents each one.
 | `REEL_MEDIA_ROOT` | `/media` | Libraries must be inside this folder, and the folder picker can't leave it. |
 | `REEL_DATA_DIR` | `./data` (`/data` in Docker) | The data folder. |
 | `REEL_PROBE_WORKERS` | `4` | How many ffprobe processes run at once during a scan. |
+| `REEL_MAX_STREAMS` | `3` | How many videos may be converted or repackaged at once. More viewers get a "try again in a moment" message. |
+| `REEL_MISSING_GRACE_DAYS` | `7` | How long a video a scan can no longer find stays in the catalog (hidden, with its tags and pictures) before it's removed. |
+| `REEL_IMAGE_URLS` | `internet` | Where pictures may be downloaded from when you paste a URL: `internet` (public addresses only), `lan` (also your local network) or `off`. |
+| `FORWARDED_ALLOW_IPS` | `127.0.0.1` | *(uvicorn)* Behind a reverse proxy, set this to the proxy's address so its forwarded headers are trusted. Nothing else's are. |
 
 If the data folder isn't writable, Reel stops at startup with a message saying how to fix the
 permissions. The usual cause is a `./data` that Docker created owned by root.
@@ -191,16 +195,28 @@ the database, so **browsing never touches the NAS**.
 - **Rescans are incremental.** A file is re-probed only if its size or modification time
   changed, or its last probe failed. Titles and pictures are refreshed for every file, which is
   cheap, so a poster added later or a title-rule change is picked up without re-probing.
-  Deleted files are removed from the catalog.
-- **Safety:** if the library folder is missing (for example the NAS is offline), the scan
-  fails with an error instead of wiping the catalog. A single unreadable subfolder doesn't
-  abort the scan.
+- **A scan never throws data away because of something it couldn't read:**
+  - A folder it can't list, or a video it can't read, is left exactly as it was: the videos,
+    their tags, pictures and the folder's art are all kept. The scan finishes, and the
+    Libraries page shows a warning naming what it couldn't read.
+  - A library folder that's missing, or that used to have videos but is now completely
+    empty (an unmounted NAS usually leaves an empty mount point), stops the scan with nothing
+    changed.
+  - A video that's really gone is first marked **missing**: hidden from browsing, counts and
+    tag pages, but kept with its tags and pictures. It's removed only after
+    `REEL_MISSING_GRACE_DAYS` (default 7). If it comes back before then, for example when the
+    NAS is mounted again, it reappears with everything intact. Its page shows "Missing from
+    the library".
+- **Symlinks** that lead out of the library are ignored, videos and pictures alike, and the
+  scan reports how many. Symlinks that stay inside the library are fine. Symlinked folders
+  aren't followed.
 - Scans run one at a time on a background thread, and the Libraries page shows progress
   ("Scanning: 71 / 312"). Each file is committed as it's done, so a long scan never blocks
   other actions.
 - A file ffprobe can't read is kept, marked *unsupported* with the error, and retried on the
   next scan.
-- After every scan, uploaded images whose video or folder no longer exists are deleted.
+- After every scan, uploaded pictures whose video or folder no longer exists are deleted (see
+  [Uploaded images](#uploaded-images)).
 
 **Library rules:**
 - A library's folder must be inside the media root and readable.
@@ -262,7 +278,18 @@ Details:
   half a second. The player shows its own clock and seek bar, based on the length recorded at
   scan time.
 - **Clean-up:** when the browser drops a stream (a seek, leaving the player, closing the tab),
-  the server kills that ffmpeg process at once, so no encoders are left running.
+  the server kills that ffmpeg process at once, so no encoders are left running. All streams
+  are stopped when the server shuts down.
+- **Limits:** at most `REEL_MAX_STREAMS` (default 3) remuxes and conversions run at once. A new
+  one waits up to 5 seconds for a free slot (so a seek, which frees its old slot, doesn't
+  bounce), then gets a 503 "try again in a moment".
+- **Deadlines:** ffmpeg must start sending video within 30 seconds, and a stream that produces
+  nothing for 60 seconds while the browser is waiting is stopped. ffmpeg's error output is
+  read continuously (so it can't fill up and freeze ffmpeg), and its last lines are kept for
+  the log and for error messages.
+- **Files are re-checked when used:** the file must still be inside its library, which must
+  still be inside the media root. A file swapped for a symlink leading elsewhere since the
+  scan isn't served.
 - **Speed:** on a typical machine, conversion runs 4–54× faster than real time depending on
   the format. Streams start in under 0.6 s.
 - **Errors:** if ffmpeg can't read a file, the stream request fails with a clear error instead
@@ -308,10 +335,21 @@ Rules:
 - A failed upload leaves the previous image in place.
 - Once an image is set, the button reads **Change image**, and the dialog also offers
   **Remove image**.
-- **URL safety:** only `http://` and `https://`, a 15-second timeout, at most 5 redirects, and
-  the result must really be an image. The server refuses to fetch from **itself** (localhost)
-  and from **link-local addresses** such as `169.254.169.254` (cloud metadata), including via
-  redirects. Other machines on your network are allowed.
+- **URL safety:** only `http://` and `https://`, a 15-second limit for the whole download, at
+  most 5 redirects, and the result must really be an image.
+  - Which addresses are allowed is set by `REEL_IMAGE_URLS`: `internet` (the default) allows
+    only public addresses; `lan` also allows your local network (192.168.x.x, 10.x.x.x, …),
+    for pictures on another homelab server; `off` turns URL downloads off.
+  - **This machine** (localhost), **link-local addresses** such as `169.254.169.254` (cloud
+    metadata), multicast and reserved addresses are always refused, including via redirects.
+  - Each host name is looked up once, every address it returns is checked, and the
+    connection goes to exactly the checked address (with HTTPS still verified against the
+    name). A DNS server can't pass the check with one answer and redirect the connection with
+    another ("DNS rebinding").
+- **Each upload gets its own file** (`<uuid>-<version>.jpg`), which is never overwritten. An
+  upload writes its new file, records it, then deletes the previous one. Clean-up only
+  deletes unreferenced files older than an hour, so a picture that's just been uploaded is
+  never removed before it's recorded.
 - Uploads are stored in the data folder, never on the NAS (see below).
 
 ### IDs and URLs
@@ -335,9 +373,9 @@ data/
 ├── thumbs/             cached thumbnails of NAS pictures (safe to delete; they're remade)
 │   └── ab/abcdef….jpg
 └── images/             pictures you uploaded
-    ├── tags/<tag uuid>.jpg
-    ├── videos/<video uuid>.jpg
-    └── folders/<uuid>.jpg
+    ├── tags/<tag uuid>-<version>.jpg
+    ├── videos/<video uuid>-<version>.jpg
+    └── folders/<uuid>-<version>.jpg
 ```
 
 - **Back up** `reel.db` and `images/`. `thumbs/` is only a cache.
@@ -424,7 +462,8 @@ Docker health check and kept out of the access log.
 
 Errors are JSON `{"detail": "…"}` with a message meant for people: 400 for invalid input, 404
 for not found, 409 for conflicts, 413 for an upload over 20 MB, 416 for a start time outside
-the video, and 502 when ffmpeg can't read a file.
+the video, 502 when ffmpeg can't read a file, and 503 (with `Retry-After`) when every stream
+slot is busy.
 
 ---
 
@@ -447,7 +486,7 @@ changes how thumbnails are made.
 ### Tests
 
 ```sh
-uv run pytest              # backend: 320 tests
+uv run pytest              # backend: 373 tests
 node --test tests/js/      # frontend helpers: 18 tests
 scripts/docker-smoke.sh    # builds the image and checks it end to end (needs Docker)
 ```
@@ -512,6 +551,9 @@ Dockerfile, compose.yaml, .env.example
 
 - **No login.** Anyone who can reach the port can browse, play, and change libraries, tags and
   images. Keep it on your home network or behind a reverse proxy with authentication.
+- **One worker process.** Scans and streams are managed inside the process, so Reel runs with
+  exactly one uvicorn worker (the Docker image does). More workers would each run their own
+  scanner and stream limits.
 - **Safari** can't play remuxed or converted streams, because it requires range requests,
   which a live stream can't offer. Directly playable files work everywhere. Chrome, Edge and
   Firefox play everything.

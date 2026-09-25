@@ -27,6 +27,7 @@ services:
       REEL_PROBE_WORKERS: "${REEL_PROBE_WORKERS:-4}"
       REEL_MISSING_GRACE_DAYS: "${REEL_MISSING_GRACE_DAYS:-7}"
       REEL_IMAGE_URLS: "${REEL_IMAGE_URLS:-internet}"
+      REEL_MAX_STREAMS: "${REEL_MAX_STREAMS:-3}"
       # Behind a reverse proxy? Trust forwarded headers from it only:
       # FORWARDED_ALLOW_IPS: "172.18.0.1"
     volumes:

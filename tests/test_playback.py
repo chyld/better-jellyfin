@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 from reel import playback
 from reel.db import init_db
 from reel.main import create_app
-from reel.playback import direct_content_type, ffmpeg_stream, stream_command
+from reel.playback import StreamManager, direct_content_type, stream_command
 from reel.probe import probe
 from reel.scan_manager import ScanManager
 from reel.scanner import scan_library
@@ -248,25 +248,27 @@ def test_ffmpeg_is_killed_when_the_viewer_leaves():
     # An endless test pattern: ffmpeg would run forever if nobody stopped it.
     cmd = ["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc=size=320x240:rate=25",
            "-c:v", "libx264", "-preset", "ultrafast", *playback.FMP4_OUTPUT]
+    manager = StreamManager()
 
     async def watch_briefly():
-        stream = ffmpeg_stream(cmd)
+        stream = manager.stream(cmd)
         assert len(await anext(stream)) > 0
-        (proc,) = playback.active_streams
+        (proc,) = manager.active
         await stream.aclose()
         return proc
 
     proc = asyncio.run(watch_briefly())
     assert proc.returncode is not None
-    assert playback.active_streams == set()
+    assert manager.active == set()
 
 
 @requires_ffmpeg
 def test_ffmpeg_stream_finishes_normally(clips):
     cmd = stream_command(clips / "h264_aac.mkv", "remux")
+    manager = StreamManager()
 
     async def read_all():
-        return b"".join([chunk async for chunk in ffmpeg_stream(cmd)])
+        return b"".join([chunk async for chunk in manager.stream(cmd)])
 
     assert len(asyncio.run(read_all())) > 1000
-    assert playback.active_streams == set()
+    assert manager.active == set()

@@ -24,6 +24,8 @@ class Settings:
     missing_grace: timedelta = timedelta(days=7)
     # Which addresses image URLs may be downloaded from: internet, lan or off.
     image_urls: str = "internet"
+    # How many remuxes/conversions may run at once.
+    max_streams: int = 3
 
     @property
     def db_path(self) -> Path:
@@ -67,4 +69,5 @@ class Settings:
             probe_workers=int(os.environ.get("REEL_PROBE_WORKERS", "4")),
             missing_grace=timedelta(days=float(os.environ.get("REEL_MISSING_GRACE_DAYS", "7"))),
             image_urls=_choice("REEL_IMAGE_URLS", ("internet", "lan", "off"), "internet"),
+            max_streams=max(1, int(os.environ.get("REEL_MAX_STREAMS", "3"))),
         )
