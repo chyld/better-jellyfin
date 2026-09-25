@@ -192,3 +192,43 @@ def test_scan_warning_shows_on_the_library(client, media_root):
     assert "couldn't read 1 folder(s): Tapes" in listed["last_scan_warning"]
     assert listed["item_count"] == 2
     assert listed["scan"]["result"]["unreadable_folders"] == ["Tapes"]
+
+
+def test_stopped_scan_marks_nothing_missing(conn, lib, media_root, fake_probe):
+    """A scan stopped halfway (Reel shutting down) must not treat unwalked or
+    unprobed videos as gone."""
+    import threading
+
+    from reel.scanner import ScanCancelled
+
+    os.remove(media_root / "Tapes/a.mpg")                       # really gone...
+    make_files(media_root, *[f"New/n{i}.mpg" for i in range(6)])
+    before = conn.execute("SELECT last_scan_at FROM libraries WHERE id = ?", (lib,)).fetchone()[0]
+    cancel = threading.Event()
+
+    def probe_then_stop(path):
+        if len(fake_probe.calls) >= 2:
+            cancel.set()
+        return fake_probe(path)
+
+    with pytest.raises(ScanCancelled):
+        scan_library(conn, lib, probe_fn=probe_then_stop, workers=1, cancel=cancel)
+    after = rows(conn, lib)
+    assert after["Tapes/a.mpg"]["missing_since"] is None        # ...but this scan didn't finish
+    new = [r for p, r in after.items() if p.startswith("New/")]
+    assert len(new) < 6 and all(r["video_codec"] for r in new)  # what was recorded is complete
+    assert conn.execute("SELECT last_scan_at FROM libraries WHERE id = ?", (lib,)).fetchone()[0] == before
+
+
+def test_scan_stopped_before_it_starts_changes_nothing(conn, lib, media_root, fake_probe):
+    import threading
+
+    from reel.scanner import ScanCancelled
+
+    make_files(media_root, "New/n.mpg")
+    before = rows(conn, lib)
+    cancel = threading.Event()
+    cancel.set()
+    with pytest.raises(ScanCancelled):
+        scan_library(conn, lib, probe_fn=fake_probe, cancel=cancel)
+    assert rows(conn, lib) == before

@@ -341,7 +341,7 @@ class HlsManager:
         # A file replaced since the session began would give segments that don't
         # match the ones already made: retire the session instead.
         try:
-            current = await asyncio.to_thread(revision, session.source.path)
+            current = await anyio.to_thread.run_sync(revision, session.source.path)
         except OSError:
             current = None
         if current != session.source.revision:
@@ -485,7 +485,7 @@ class HlsManager:
             await asyncio.sleep(15)
             try:
                 await self.remove_idle()
-                await asyncio.to_thread(self.enforce_cache_limit)
+                await anyio.to_thread.run_sync(self.enforce_cache_limit)
             except Exception:
                 log.exception("HLS housekeeping failed")
 

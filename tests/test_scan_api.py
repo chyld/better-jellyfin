@@ -1,12 +1,14 @@
 """The Scan buttons: background scans, progress and errors."""
 import shutil
 import threading
+import time
 
 from fastapi.testclient import TestClient
 
 from reel.db import init_db
 from reel.main import create_app
 from reel.scan_manager import ScanManager
+from reel.scanner import ScanCancelled
 
 from conftest import make_files
 
@@ -86,11 +88,17 @@ class BlockingScan:
         self.release = threading.Event()
         self.runs = 0
 
-    def __call__(self, conn, library_id, *, workers, on_progress):
+    def __call__(self, conn, library_id, *, workers, on_progress, cancel=None):
         self.runs += 1
         on_progress(3, 10)
         self.started.set()
-        assert self.release.wait(10)
+        # Waits like a long scan, stopping when asked (as scan_library does).
+        deadline = time.monotonic() + 10
+        while not self.release.is_set():
+            if cancel is not None and cancel.is_set():
+                raise ScanCancelled("The scan was stopped.")
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
         on_progress(10, 10)
         return {"total": 10, "added": 10, "updated": 0, "removed": 0, "unchanged": 0, "failed": 0}
 
@@ -140,3 +148,30 @@ def test_scans_queue_one_at_a_time(settings, media_root):
         assert scan.runs == 2
         assert {lib["scan"]["state"] for lib in client.get("/api/libraries").json()} == {"done"}
         assert a["id"] != b["id"]
+
+
+def test_stopping_drops_queued_scans_and_stops_the_running_one(settings, media_root):
+    scan = BlockingScan()
+    manager = ScanManager(settings.db_path, scan_fn=scan)
+    init_db(settings.db_path)
+    manager.start()
+    manager._status = {1: {"state": "queued"}, 2: {"state": "queued"}}
+    manager._queue.put(1)
+    manager._queue.put(2)
+    assert scan.started.wait(5)
+    began = time.monotonic()
+    manager.stop()
+    assert time.monotonic() - began < 2
+    assert scan.runs == 1                                  # the queued one never ran
+    assert manager.status(1)["state"] == manager.status(2)["state"] == "cancelled"
+
+
+def test_shutting_down_during_a_scan_is_quick(settings, media_root):
+    scan = BlockingScan()
+    make_dir(media_root / "Tapes")
+    with blocking_client(settings, scan) as client:
+        lib = client.post("/api/libraries", json={"name": "Tapes", "path": str(media_root / "Tapes")}).json()["id"]
+        client.post(f"/api/libraries/{lib}/scan")
+        assert scan.started.wait(5)
+        began = time.monotonic()
+    assert time.monotonic() - began < 2                    # never released: it was stopped

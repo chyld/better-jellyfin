@@ -6,7 +6,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from .db import connect
-from .scanner import scan_library
+from .scanner import ScanCancelled, scan_library
 
 log = logging.getLogger(__name__)
 
@@ -22,6 +22,7 @@ class ScanManager:
         self._lock = threading.Lock()
         self._status: dict[int, dict] = {}
         self._thread: threading.Thread | None = None
+        self._cancel = threading.Event()
         # Called with the scan's connection after each successful scan.
         self.after_scan: Callable[[object], None] | None = None
 
@@ -29,10 +30,24 @@ class ScanManager:
         self._thread = threading.Thread(target=self._run, name="scanner", daemon=True)
         self._thread.start()
 
-    def stop(self) -> None:
+    def stop(self, timeout: float = 10) -> None:
+        """Stop soon: queued scans are dropped, a running one stops at its next
+        folder or file (keeping what it has recorded). Blocks until it has, so call
+        it from a thread, not the event loop."""
+        self._cancel.set()
+        while True:
+            try:
+                library_id = self._queue.get_nowait()
+            except queue.Empty:
+                break
+            if library_id is not None:
+                self._update(library_id, state="cancelled")
+            self._queue.task_done()
         if self._thread:
             self._queue.put(None)
-            self._thread.join(timeout=10)
+            self._thread.join(timeout)
+            if self._thread.is_alive():
+                log.warning("the scan didn't stop within %s seconds", timeout)
             self._thread = None
 
     def request(self, library_id: int) -> dict:
@@ -97,10 +112,15 @@ class ScanManager:
                 library_id,
                 workers=self._workers,
                 on_progress=lambda done, total: self._update(library_id, done=done, total=total),
+                cancel=self._cancel,
             )
             if self.after_scan:
                 self.after_scan(conn)
             self._update(library_id, state="done", result=result)
+        except ScanCancelled:
+            log.info("scan of library %s stopped", library_id)
+            self._update(library_id, state="cancelled")
+            conn.rollback()
         except Exception as exc:
             log.exception("scan of library %s failed", library_id)
             message = str(exc) or type(exc).__name__

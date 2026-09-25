@@ -215,6 +215,10 @@ the database, so **browsing never touches the NAS**.
 - Scans run one at a time on a background thread, and the Libraries page shows progress
   ("Scanning: 71 / 312"). Each file is committed as it's done, so a long scan never blocks
   other actions.
+- **Stopping Reel mid-scan is safe and quick.** Queued scans are dropped, and a running one stops
+  at its next folder or file. Videos it already recorded stay recorded. It stops *before* the
+  step that marks unseen videos missing, so a half-finished walk never hides anything. The next
+  scan picks up where it left off, since unchanged files aren't probed again.
 - A file ffprobe can't read is kept, marked *unsupported* with the error, and retried on the
   next scan.
 - After every scan, uploaded pictures whose video or folder no longer exists are deleted (see
@@ -566,7 +570,7 @@ changes how thumbnails are made.
 ### Tests
 
 ```sh
-uv run pytest              # backend: 472 tests
+uv run pytest              # backend: 476 tests
 node --test tests/js/      # frontend: 27 tests
 scripts/docker-smoke.sh    # builds the image and checks it end to end (needs Docker)
 ```

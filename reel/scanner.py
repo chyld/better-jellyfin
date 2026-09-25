@@ -3,6 +3,7 @@ import hashlib
 import os
 import re
 import sqlite3
+import threading
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -33,6 +34,16 @@ ProbeFn = Callable[[Path], ProbeResult]
 
 class ScanError(Exception):
     pass
+
+
+class ScanCancelled(Exception):
+    """The scan was asked to stop (Reel is shutting down). Work already committed
+    is kept; nothing is marked missing, since the walk may be incomplete."""
+
+
+def _check(cancel: threading.Event | None) -> None:
+    if cancel is not None and cancel.is_set():
+        raise ScanCancelled("The scan was stopped.")
 
 
 @dataclass
@@ -105,7 +116,7 @@ class Walk:
         return any(rel_path == d or rel_path.startswith(d + "/") for d in self.unreadable_folders)
 
 
-def walk_library(root: Path) -> Walk:
+def walk_library(root: Path, cancel: threading.Event | None = None) -> Walk:
     """Find all videos under root, noting anything that couldn't be read."""
     videos: list[FoundVideo] = []
     folder_art: dict[str, str] = {}
@@ -121,6 +132,7 @@ def walk_library(root: Path) -> Walk:
         unreadable_folders.append(Path(err.filename).relative_to(root).as_posix())
 
     for dirpath, dirnames, filenames in os.walk(root, onerror=on_error):
+        _check(cancel)
         # Skip hidden folders (.zfs snapshots, .Trash, etc.).
         dirnames[:] = sorted(d for d in dirnames if not d.startswith("."))
         rel_dir = Path(dirpath).relative_to(root)
@@ -234,6 +246,7 @@ def scan_library(
     workers: int = 4,
     on_progress: ProgressFn | None = None,
     missing_grace: timedelta = MISSING_GRACE,
+    cancel: threading.Event | None = None,
 ) -> dict:
     """Bring the catalog for one library in line with what's on disk.
 
@@ -244,6 +257,9 @@ def scan_library(
     unreadable folders, or that couldn't be read themselves, are left as they are.
     A video that's really gone is first marked missing (hidden, but its tags and
     images kept), and only removed once it has been missing for `missing_grace`.
+
+    Setting `cancel` stops the scan soon (between folders, or between files),
+    raising ScanCancelled; videos already recorded stay recorded.
     """
     lib = conn.execute("SELECT path FROM libraries WHERE id = ?", (library_id,)).fetchone()
     if lib is None:
@@ -253,7 +269,7 @@ def scan_library(
     if not root.is_dir():
         raise ScanError(f"Library folder is missing: {root}")
 
-    walk = walk_library(root)
+    walk = walk_library(root, cancel)
     videos = walk.videos
     existing = {
         row["rel_path"]: dict(row)
@@ -276,78 +292,84 @@ def scan_library(
         )
 
     pool = ThreadPoolExecutor(max_workers=max(1, workers))
-    seen = {v.rel_path for v in videos}
+    try:
+        seen = {v.rel_path for v in videos}
 
-    # Moved or renamed files: a new path whose contents match a vanished row
-    # takes over that row, keeping its id, tags, pictures (and later, progress).
-    new_videos = [v for v in videos if v.rel_path not in existing]
-    gone = [row for path, row in existing.items() if path not in seen and not walk.protects(path)]
-    prints: dict[str, str | None] = {}
-    if new_videos and any(row["fingerprint"] for row in gone):
-        prints = dict(zip(
-            (v.rel_path for v in new_videos),
-            pool.map(lambda v: fingerprint(root / v.rel_path, v.size), new_videos),
-        ))
-    moves = _match_moves(new_videos, prints, gone)
-    for row, video in moves:
-        conn.execute(
-            """
-            UPDATE media_items SET rel_path = ?, title = ?, year = ?, poster_path = ?,
-                size = ?, mtime = ?, missing_since = NULL, parent_dir = ?, title_key = ?
-            WHERE id = ?
-            """,
-            (video.rel_path, video.title, video.year, video.poster_path, video.size, video.mtime,
-             parent_dir(video.rel_path), sort_key(video.title, video.rel_path), row["id"]),
+        # Moved or renamed files: a new path whose contents match a vanished row
+        # takes over that row, keeping its id, tags, pictures (and later, progress).
+        new_videos = [v for v in videos if v.rel_path not in existing]
+        gone = [row for path, row in existing.items() if path not in seen and not walk.protects(path)]
+        prints: dict[str, str | None] = {}
+        if new_videos and any(row["fingerprint"] for row in gone):
+            prints = dict(zip(
+                (v.rel_path for v in new_videos),
+                pool.map(lambda v: fingerprint(root / v.rel_path, v.size), new_videos),
+            ))
+        moves = _match_moves(new_videos, prints, gone)
+        for row, video in moves:
+            conn.execute(
+                """
+                UPDATE media_items SET rel_path = ?, title = ?, year = ?, poster_path = ?,
+                    size = ?, mtime = ?, missing_since = NULL, parent_dir = ?, title_key = ?
+                WHERE id = ?
+                """,
+                (video.rel_path, video.title, video.year, video.poster_path, video.size, video.mtime,
+                 parent_dir(video.rel_path), sort_key(video.title, video.rel_path), row["id"]),
+            )
+            del existing[row["rel_path"]]
+            existing[video.rel_path] = {**row, "rel_path": video.rel_path, "size": video.size,
+                                        "mtime": video.mtime, "missing_since": None}
+        folder_renames = _renamed_folders([(row["rel_path"], video.rel_path) for row, video in moves])
+        conn.commit()
+
+        unchanged, to_probe = [], []
+        for video in videos:
+            row = existing.get(video.rel_path)
+            if (
+                row and row["size"] == video.size and row["mtime"] == video.mtime
+                and not row["probe_error"] and row["probe_version"] >= PROBE_VERSION
+            ):
+                unchanged.append(video)
+            else:
+                to_probe.append(video)
+
+        total = len(videos)
+        done = len(unchanged)
+        if on_progress:
+            on_progress(done, total)
+
+        # Rows from before fingerprints get one (a quick read, not a re-probe), so a
+        # later move can be recognised.
+        backfill = [v for v in unchanged if not existing[v.rel_path]["fingerprint"]]
+        backfill_prints = list(pool.map(
+            lambda v: None if cancel is not None and cancel.is_set() else fingerprint(root / v.rel_path, v.size),
+            backfill))
+        _check(cancel)
+        conn.executemany(
+            "UPDATE media_items SET fingerprint = ? WHERE library_id = ? AND rel_path = ?",
+            [(fp, library_id, v.rel_path) for v, fp in zip(backfill, backfill_prints)],
         )
-        del existing[row["rel_path"]]
-        existing[video.rel_path] = {**row, "rel_path": video.rel_path, "size": video.size,
-                                    "mtime": video.mtime, "missing_since": None}
-    folder_renames = _renamed_folders([(row["rel_path"], video.rel_path) for row, video in moves])
-    conn.commit()
 
-    unchanged, to_probe = [], []
-    for video in videos:
-        row = existing.get(video.rel_path)
-        if (
-            row and row["size"] == video.size and row["mtime"] == video.mtime
-            and not row["probe_error"] and row["probe_version"] >= PROBE_VERSION
-        ):
-            unchanged.append(video)
-        else:
-            to_probe.append(video)
+        # Titles and posters are cheap to recompute, so refresh them for unchanged files
+        # too; that picks up a poster added next to an existing video.
+        conn.executemany(
+            """
+            UPDATE media_items SET title = ?, year = ?, poster_path = ?, missing_since = NULL, title_key = ?
+            WHERE library_id = ? AND rel_path = ?
+            """,
+            [(v.title, v.year, v.poster_path, sort_key(v.title, v.rel_path), library_id, v.rel_path) for v in unchanged],
+        )
+        conn.commit()
 
-    total = len(videos)
-    done = len(unchanged)
-    if on_progress:
-        on_progress(done, total)
+        def examine(video: FoundVideo):
+            if cancel is not None and cancel.is_set():
+                return video, None, None  # skipped; the loop below stops
+            fp = prints.get(video.rel_path) or fingerprint(root / video.rel_path, video.size)
+            return video, _safe_probe(probe_fn, root / video.rel_path), fp
 
-    # Rows from before fingerprints get one (a quick read, not a re-probe), so a
-    # later move can be recognised.
-    backfill = [v for v in unchanged if not existing[v.rel_path]["fingerprint"]]
-    conn.executemany(
-        "UPDATE media_items SET fingerprint = ? WHERE library_id = ? AND rel_path = ?",
-        [(fp, library_id, v.rel_path) for v, fp in zip(backfill, pool.map(
-            lambda v: fingerprint(root / v.rel_path, v.size), backfill))],
-    )
-
-    # Titles and posters are cheap to recompute, so refresh them for unchanged files
-    # too; that picks up a poster added next to an existing video.
-    conn.executemany(
-        """
-        UPDATE media_items SET title = ?, year = ?, poster_path = ?, missing_since = NULL, title_key = ?
-        WHERE library_id = ? AND rel_path = ?
-        """,
-        [(v.title, v.year, v.poster_path, sort_key(v.title, v.rel_path), library_id, v.rel_path) for v in unchanged],
-    )
-    conn.commit()
-
-    def examine(video: FoundVideo):
-        fp = prints.get(video.rel_path) or fingerprint(root / video.rel_path, video.size)
-        return video, _safe_probe(probe_fn, root / video.rel_path), fp
-
-    added = updated = failed = 0
-    with pool:
+        added = updated = failed = 0
         for video, result, fp in pool.map(examine, to_probe):
+            _check(cancel)
             conn.execute(
                 """
                 INSERT INTO media_items (
@@ -388,6 +410,10 @@ def scan_library(
             done += 1
             if on_progress:
                 on_progress(done, total)
+    finally:
+        # On a stop, drop the probes not started yet (the running ones finish).
+        pool.shutdown(wait=True, cancel_futures=True)
+    _check(cancel)
 
     # Videos the walk didn't see: missing first, removed after the grace period.
     # Anything hidden by an unreadable folder or file is left exactly as it is.

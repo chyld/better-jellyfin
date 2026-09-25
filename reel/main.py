@@ -95,7 +95,8 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
         housekeeping.cancel()
         await hls_sessions.shutdown()
         await streams.shutdown()
-        scans.stop()
+        # A scan stops between files; wait for it off the event loop.
+        await run_in_threadpool(scans.stop)
 
     app = FastAPI(title="Reel", lifespan=lifespan)
     # Docker's health check polls /api/health; keep it out of the access log.
