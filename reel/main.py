@@ -152,7 +152,10 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
         return out
 
     def one_library(conn: sqlite3.Connection, library_id: int) -> dict:
-        return library_out(next(r for r in libraries.list_libraries(conn) if r["id"] == library_id))
+        row = next((r for r in libraries.list_libraries(conn) if r["id"] == library_id), None)
+        if row is None:  # removed in the meantime
+            raise catalog.NotFound("Library not found.")
+        return library_out(row)
 
     def library_pk(conn: sqlite3.Connection, library_uid: str) -> int:
         library_id = libraries.library_pk(conn, library_uid)

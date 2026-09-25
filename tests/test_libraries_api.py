@@ -292,3 +292,13 @@ def test_number_settings_are_checked_and_kept_in_range(monkeypatch):
     monkeypatch.setenv("REEL_MISSING_GRACE_DAYS", "a week")
     with pytest.raises(SystemExit, match="REEL_MISSING_GRACE_DAYS must be a number"):
         Settings.from_env()
+
+
+def test_a_library_removed_mid_request_is_not_found(client, media_root, monkeypatch):
+    from reel import libraries
+
+    make_files(media_root, "Tapes/a.mpg")
+    lib = client.post("/api/libraries", json={"name": "Tapes", "path": str(media_root / "Tapes")}).json()["id"]
+    monkeypatch.setattr(libraries, "list_libraries", lambda conn: [])   # gone by the time it's listed
+    res = client.patch(f"/api/libraries/{lib}", json={"name": "Old tapes"})
+    assert res.status_code == 404

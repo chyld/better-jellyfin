@@ -1,4 +1,9 @@
-"""Read a video's technical details with ffprobe and decide how it can be played."""
+"""Read a video's technical details with ffprobe (the facts the catalog stores).
+
+How a video is played is decided later, per browser, by plan.py. Only the first
+real video stream and the first audio stream are recorded (the player has no
+track picker); recording more is a PROBE_VERSION bump.
+"""
 import json
 import subprocess
 import threading
