@@ -499,10 +499,11 @@ data/
     └── folders/<uuid>-<version>.jpg
 ```
 
-- **Stopping or killing Reel can't corrupt the database.** SQLite runs in WAL mode with
-  `synchronous=NORMAL`: a crash or `docker compose stop` loses nothing that was saved, and a
-  power cut can at most lose the very last save (a video or two is probed again on the next
-  scan).
+- **Stopping or killing Reel can't corrupt the database.** SQLite runs in WAL mode: a crash or
+  `docker compose stop` loses nothing that was saved. Your edits (tags, pictures, libraries)
+  are saved with `synchronous=FULL`, so they survive a power cut too. Scans save with
+  `synchronous=NORMAL` (no disk flush per file): a power cut may roll back recent scan results,
+  which just means those files are probed again on the next scan.
 - **Back up** `reel.db` and `images/`. `thumbs/` and `hls/` are only caches. Don't copy
   `reel.db` while Reel runs: recent changes can still be in `reel.db-wal`, so the copy may miss
   them. Either:
@@ -649,7 +650,7 @@ version); bump `THUMBS` when the server changes how thumbnails are made.
 ### Tests
 
 ```sh
-uv run pytest              # backend: 537 tests
+uv run pytest              # backend: 538 tests
 node --test tests/js/      # frontend: 30 tests
 uv run pytest -m browser   # browser: 15 tests (about 2 minutes; needs Chromium and ffmpeg)
 scripts/docker-smoke.sh    # builds the image and checks it end to end (needs Docker)

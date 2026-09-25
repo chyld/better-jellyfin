@@ -43,10 +43,28 @@ def test_database_is_closed_before_a_file_is_sent(client, media_root, monkeypatc
     assert opened and open_while_sending == [0]
 
 
-def test_connections_use_wal_with_normal_sync(tmp_path):
-    from reel.db import connect
+def test_edits_are_fully_durable_and_scans_use_normal_sync(tmp_path, monkeypatch):
+    """Your edits (FULL) survive a power cut; scan results (NORMAL) may be redone."""
+    from reel import scan_manager
+    from reel.db import connect, init_db
 
     conn = connect(tmp_path / "r.db")
     assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
-    assert conn.execute("PRAGMA synchronous").fetchone()[0] == 1       # NORMAL
+    assert conn.execute("PRAGMA synchronous").fetchone()[0] == 2       # FULL
     assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+
+    init_db(tmp_path / "r.db")
+    seen = {}
+
+    def scan(c, library_id, **kwargs):
+        seen["scan"] = c.execute("PRAGMA synchronous").fetchone()[0]
+        return {}
+
+    manager = scan_manager.ScanManager(tmp_path / "r.db", scan_fn=scan)
+    manager.after_scan = lambda c: seen.setdefault("clean-up", c.execute("PRAGMA synchronous").fetchone()[0])
+    manager.start()
+    manager._status[1] = {"state": "queued"}
+    manager._queue.put(1)
+    manager.wait_idle()
+    manager.stop()
+    assert seen == {"scan": 1, "clean-up": 2}                          # NORMAL, then FULL

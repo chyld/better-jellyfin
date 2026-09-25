@@ -225,12 +225,12 @@ class FlakyDatabase:
     def __init__(self, failures):
         self.failures = failures
 
-    def __call__(self, path):
+    def __call__(self, path, **kwargs):
         from reel.db import connect
         if self.failures:
             self.failures -= 1
             raise sqlite3.OperationalError("unable to open database file")
-        return connect(path)
+        return connect(path, **kwargs)
 
 
 def test_a_database_failure_doesnt_stop_the_scanner(client, media_root, monkeypatch):

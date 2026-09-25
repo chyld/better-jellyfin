@@ -148,7 +148,7 @@ class ScanManager:
         self._update(library_id, state="scanning")
         conn = None
         try:
-            conn = connect(self._db_path)
+            conn = connect(self._db_path, synchronous="NORMAL")   # scan results can be redone
             result = self._scan_fn(
                 conn,
                 library_id,
@@ -159,6 +159,8 @@ class ScanManager:
             # The scan is saved by now: a failing clean-up afterwards doesn't undo it.
             if self.after_scan:
                 try:
+                    # Clean-up deletes picture rows and then files: those commits must last.
+                    conn.execute("PRAGMA synchronous = FULL")
                     self.after_scan(conn)
                 except Exception:
                     log.exception("clean-up after scanning library %s failed", library_id)
