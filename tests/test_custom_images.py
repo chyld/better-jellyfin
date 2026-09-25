@@ -184,6 +184,16 @@ def test_images_of_deleted_videos_and_folders_are_removed(client, lib, picture, 
     for name in ("a.mpg", "b.mpg"):
         (media_root / "Tapes" / name).unlink()  # the whole Tapes folder is emptied
     rescan(client, lib)
+    # Missing, not yet removed: the images are kept in case the files come back.
+    assert len(images_on_disk(settings, "videos")) == 1
+    assert len(images_on_disk(settings, "folders")) == 1
+    # Once the grace period has passed, the next scan removes them for good.
+    import sqlite3
+    db = sqlite3.connect(settings.db_path)
+    db.execute("UPDATE media_items SET missing_since = datetime('now', '-30 days') WHERE missing_since IS NOT NULL")
+    db.commit()
+    db.close()
+    rescan(client, lib)
     assert images_on_disk(settings, "videos") == []
     assert images_on_disk(settings, "folders") == []
 

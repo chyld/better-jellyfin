@@ -412,13 +412,15 @@ export async function renderItem(view, itemId) {
     item.year && h("span", { class: "pill" }, item.year),
     item.duration && h("span", { class: "pill" }, formatDuration(item.duration)),
     item.height && h("span", { class: "pill" }, resolutionLabel(item)),
-    h(
-      "span",
-      { class: `pill mode ${tone}`, title: item.probe_error ? `${modeText}: ${item.probe_error}` : modeText },
-      modeLabel,
-    ),
+    item.missing
+      ? h("span", { class: "pill mode err", title: "The last scan couldn't find this file. It's kept for a while in case it comes back." }, "Missing from the library")
+      : h(
+          "span",
+          { class: `pill mode ${tone}`, title: item.probe_error ? `${modeText}: ${item.probe_error}` : modeText },
+          modeLabel,
+        ),
   ];
-  const playable = item.play_mode !== "unsupported";
+  const playable = item.play_mode !== "unsupported" && !item.missing;
   const playUrl = `#/play/${item.id}`;
   const facts = [
     ["Length", formatDuration(item.duration) || "unknown"],

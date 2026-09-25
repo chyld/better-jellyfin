@@ -10,7 +10,8 @@ CREATE TABLE IF NOT EXISTS libraries (
     path             TEXT NOT NULL UNIQUE,
     created_at       TEXT NOT NULL DEFAULT (datetime('now')),
     last_scan_at     TEXT,
-    last_scan_error  TEXT
+    last_scan_error  TEXT,
+    last_scan_warning TEXT                    -- e.g. folders the last scan couldn't read
 );
 
 CREATE TABLE IF NOT EXISTS media_items (
@@ -34,6 +35,7 @@ CREATE TABLE IF NOT EXISTS media_items (
     play_mode    TEXT NOT NULL,            -- direct | remux | transcode | unsupported
     probe_error  TEXT,
     custom_image TEXT,                     -- version of an uploaded image (when there's none on the NAS)
+    missing_since TEXT,                    -- set when a scan no longer finds the file; removed after a grace period
     scanned_at   TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (library_id, rel_path)
 );
@@ -85,7 +87,12 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute(f"CREATE UNIQUE INDEX {table}_uid ON {table} (uid)")
         conn.commit()
     # Tags gained uploadable images, then videos did.
-    for table, column in (("tags", "image_version"), ("media_items", "custom_image")):
+    for table, column in (
+        ("tags", "image_version"),
+        ("media_items", "custom_image"),
+        ("media_items", "missing_since"),
+        ("libraries", "last_scan_warning"),
+    ):
         if column not in {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT")
             conn.commit()

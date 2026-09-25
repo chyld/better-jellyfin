@@ -5,6 +5,7 @@ import sqlite3
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 
 from .db import new_uid
@@ -18,6 +19,9 @@ IMAGE_EXTENSIONS = ("jpg", "jpeg", "png", "webp")
 # Filenames that say nothing about the video, so the folder name is used instead.
 GENERIC_STEMS = {"movie", "video", "film", "main", "feature"}
 YEAR_PREFIX = re.compile(r"^((?:19|20)\d{2})[.\s_-]+(.+)$")
+# How long a video that's no longer found stays in the catalog (hidden, with its
+# tags and images) before it's removed. Covers a NAS that was briefly unmounted.
+MISSING_GRACE = timedelta(days=7)
 
 ProgressFn = Callable[[int, int], None]
 ProbeFn = Callable[[Path], ProbeResult]
@@ -77,15 +81,36 @@ def find_poster(video_name: str, names_lower: dict[str, str]) -> str | None:
     return _find_image(names_lower, Path(video_name).stem)
 
 
-def walk_library(root: Path) -> tuple[list[FoundVideo], dict[str, str]]:
-    """Find all videos under root. Returns (videos, folder art by relative folder)."""
+@dataclass
+class Walk:
+    """What a walk over a library found, and what it couldn't read."""
+    videos: list[FoundVideo]
+    folder_art: dict[str, str]
+    unreadable_folders: list[str]   # folders that couldn't be listed (relative)
+    unreadable_files: set[str]      # videos listed but not readable (relative)
+
+    def protects(self, rel_path: str) -> bool:
+        """Was this path hidden from the walk by something it couldn't read?
+
+        Such paths may well still exist, so the scan must leave them alone.
+        """
+        if rel_path in self.unreadable_files:
+            return True
+        return any(rel_path == d or rel_path.startswith(d + "/") for d in self.unreadable_folders)
+
+
+def walk_library(root: Path) -> Walk:
+    """Find all videos under root, noting anything that couldn't be read."""
     videos: list[FoundVideo] = []
     folder_art: dict[str, str] = {}
+    unreadable_folders: list[str] = []
+    unreadable_files: set[str] = set()
 
     def on_error(err: OSError) -> None:
-        # A folder we can't read shouldn't abort the whole scan, except the root.
         if Path(err.filename) == root:
             raise ScanError(f"Can't read library folder: {err.strerror}")
+        # Keep going, but remember: nothing below this folder may be treated as gone.
+        unreadable_folders.append(Path(err.filename).relative_to(root).as_posix())
 
     for dirpath, dirnames, filenames in os.walk(root, onerror=on_error):
         # Skip hidden folders (.zfs snapshots, .Trash, etc.).
@@ -99,11 +124,14 @@ def walk_library(root: Path) -> tuple[list[FoundVideo], dict[str, str]]:
             folder_art[rel_dir.as_posix() if rel_dir.parts else ""] = (rel_dir / art).as_posix()
 
         for name in video_names:
+            rel_path = (rel_dir / name).as_posix()
             try:
                 st = os.stat(os.path.join(dirpath, name))
+            except FileNotFoundError:
+                continue  # deleted while we were scanning: really gone
             except OSError:
-                continue  # vanished or unreadable mid-scan
-            rel_path = (rel_dir / name).as_posix()
+                unreadable_files.add(rel_path)  # there, but unreadable right now
+                continue
             # A lone video in a leaf folder (Drama/0902/rough-cut.mp4) is named after the folder;
             # a lone video beside other folders (Personal/loose.mp4) keeps its own name.
             alone = len(video_names) == 1 and not dirnames
@@ -117,7 +145,7 @@ def walk_library(root: Path) -> tuple[list[FoundVideo], dict[str, str]]:
                 size=st.st_size,
                 mtime=st.st_mtime,
             ))
-    return videos, folder_art
+    return Walk(videos, folder_art, sorted(unreadable_folders), unreadable_files)
 
 
 def _safe_probe(probe_fn: ProbeFn, path: Path) -> ProbeResult:
@@ -134,11 +162,17 @@ def scan_library(
     probe_fn: ProbeFn = ffprobe,
     workers: int = 4,
     on_progress: ProgressFn | None = None,
+    missing_grace: timedelta = MISSING_GRACE,
 ) -> dict:
     """Bring the catalog for one library in line with what's on disk.
 
     Only new or changed files (by size and modified time) are probed again, as are
     files whose last probe failed. Returns counts of what changed.
+
+    Nothing is thrown away because of something the scan couldn't read: videos in
+    unreadable folders, or that couldn't be read themselves, are left as they are.
+    A video that's really gone is first marked missing (hidden, but its tags and
+    images kept), and only removed once it has been missing for `missing_grace`.
     """
     lib = conn.execute("SELECT path FROM libraries WHERE id = ?", (library_id,)).fetchone()
     if lib is None:
@@ -148,14 +182,24 @@ def scan_library(
     if not root.is_dir():
         raise ScanError(f"Library folder is missing: {root}")
 
-    videos, folder_art = walk_library(root)
+    walk = walk_library(root)
+    videos = walk.videos
     existing = {
         row["rel_path"]: row
         for row in conn.execute(
-            "SELECT id, rel_path, size, mtime, probe_error FROM media_items WHERE library_id = ?",
+            "SELECT id, rel_path, size, mtime, probe_error, missing_since FROM media_items WHERE library_id = ?",
             (library_id,),
         )
     }
+    # A library that used to have videos but now reads as completely empty is
+    # almost always an unmounted NAS (an empty mount point), not a real deletion.
+    present = sum(1 for row in existing.values() if not row["missing_since"])
+    if present and not videos and not walk.unreadable_folders and not walk.unreadable_files:
+        raise ScanError(
+            f"The library folder {root} is empty, but {present} videos were in it. "
+            "Is the NAS mounted? Nothing was changed. "
+            "(If you really deleted everything, remove the library instead.)"
+        )
 
     unchanged, to_probe = [], []
     for video in videos:
@@ -173,7 +217,10 @@ def scan_library(
     # Titles and posters are cheap to recompute, so refresh them for unchanged files
     # too; that picks up a poster added next to an existing video.
     conn.executemany(
-        "UPDATE media_items SET title = ?, year = ?, poster_path = ? WHERE library_id = ? AND rel_path = ?",
+        """
+        UPDATE media_items SET title = ?, year = ?, poster_path = ?, missing_since = NULL
+        WHERE library_id = ? AND rel_path = ?
+        """,
         [(v.title, v.year, v.poster_path, library_id, v.rel_path) for v in unchanged],
     )
     conn.commit()
@@ -198,7 +245,8 @@ def scan_library(
                     pix_fmt = excluded.pix_fmt, width = excluded.width,
                     height = excluded.height, duration = excluded.duration,
                     interlaced = excluded.interlaced, play_mode = excluded.play_mode,
-                    probe_error = excluded.probe_error, scanned_at = excluded.scanned_at
+                    probe_error = excluded.probe_error, scanned_at = excluded.scanned_at,
+                    missing_since = NULL
                 """,
                 (
                     new_uid(), library_id, video.rel_path, video.title, video.year, video.poster_path,
@@ -219,25 +267,63 @@ def scan_library(
             if on_progress:
                 on_progress(done, total)
 
+    # Videos the walk didn't see: missing first, removed after the grace period.
+    # Anything hidden by an unreadable folder or file is left exactly as it is.
     seen = {v.rel_path for v in videos}
-    gone = [row["id"] for path, row in existing.items() if path not in seen]
-    conn.executemany("DELETE FROM media_items WHERE id = ?", [(i,) for i in gone])
-
-    conn.execute("DELETE FROM folder_art WHERE library_id = ?", (library_id,))
+    newly_missing, to_remove = [], []
+    grace = f"-{int(missing_grace.total_seconds())} seconds"
+    for path, row in existing.items():
+        if path in seen or walk.protects(path):
+            continue
+        if not row["missing_since"]:
+            newly_missing.append(row["id"])
     conn.executemany(
-        "INSERT INTO folder_art (library_id, rel_dir, art_path) VALUES (?, ?, ?)",
-        [(library_id, d, art) for d, art in folder_art.items()],
+        "UPDATE media_items SET missing_since = datetime('now') WHERE id = ?", [(i,) for i in newly_missing]
     )
+    for path, row in existing.items():
+        if path in seen or walk.protects(path):
+            continue
+        expired = conn.execute(
+            "SELECT missing_since <= datetime('now', ?) FROM media_items WHERE id = ?", (grace, row["id"])
+        ).fetchone()[0]
+        if expired:
+            to_remove.append(row["id"])
+    conn.executemany("DELETE FROM media_items WHERE id = ?", [(i,) for i in to_remove])
+
+    # Folder art is rebuilt from the walk, except under folders it couldn't read.
+    for row in conn.execute("SELECT rel_dir FROM folder_art WHERE library_id = ?", (library_id,)).fetchall():
+        if not walk.protects(row["rel_dir"]):
+            conn.execute("DELETE FROM folder_art WHERE library_id = ? AND rel_dir = ?", (library_id, row["rel_dir"]))
+    conn.executemany(
+        "INSERT OR REPLACE INTO folder_art (library_id, rel_dir, art_path) VALUES (?, ?, ?)",
+        [(library_id, d, art) for d, art in walk.folder_art.items()],
+    )
+
+    warning = None
+    if walk.unreadable_folders or walk.unreadable_files:
+        parts = []
+        if walk.unreadable_folders:
+            names = ", ".join(walk.unreadable_folders[:5]) + ("…" if len(walk.unreadable_folders) > 5 else "")
+            parts.append(f"couldn't read {len(walk.unreadable_folders)} folder(s): {names}")
+        if walk.unreadable_files:
+            parts.append(f"couldn't read {len(walk.unreadable_files)} video file(s)")
+        warning = "The scan " + " and ".join(parts) + ". Their videos were kept as they were."
     conn.execute(
-        "UPDATE libraries SET last_scan_at = datetime('now'), last_scan_error = NULL WHERE id = ?",
-        (library_id,),
+        """
+        UPDATE libraries SET last_scan_at = datetime('now'), last_scan_error = NULL, last_scan_warning = ?
+        WHERE id = ?
+        """,
+        (warning, library_id),
     )
     conn.commit()
     return {
         "total": total,
         "added": added,
         "updated": updated,
-        "removed": len(gone),
         "unchanged": len(unchanged),
         "failed": failed,
+        "missing": len(newly_missing) - len([i for i in to_remove if i in newly_missing]),
+        "removed": len(to_remove),
+        "unreadable_folders": walk.unreadable_folders,
+        "unreadable_files": len(walk.unreadable_files),
     }

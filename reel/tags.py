@@ -186,6 +186,7 @@ def list_tags(conn: sqlite3.Connection) -> list[dict]:
         """
         SELECT t.uid, t.name, t.image_version, COUNT(*) AS count
         FROM tags t JOIN item_tags it ON it.tag_id = t.id
+        JOIN media_items m ON m.id = it.item_id AND m.missing_since IS NULL
         GROUP BY t.id ORDER BY t.name COLLATE NOCASE
         """
     )
@@ -198,7 +199,7 @@ def tag_videos(conn: sqlite3.Connection, tag_uid: str) -> dict:
     rows = conn.execute(
         """
         SELECT m.* FROM item_tags it JOIN media_items m ON m.id = it.item_id
-        WHERE it.tag_id = ? ORDER BY it.rowid
+        WHERE it.tag_id = ? AND m.missing_since IS NULL ORDER BY it.rowid
         """,
         (tag["id"],),
     )

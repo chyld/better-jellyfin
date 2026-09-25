@@ -4,6 +4,7 @@ import sqlite3
 import subprocess
 from collections.abc import Iterator
 from contextlib import asynccontextmanager
+from functools import partial
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
@@ -17,6 +18,7 @@ from .config import Settings
 from .db import connect, init_db
 from .images import MAX_UPLOAD_BYTES, Thumbnailer, ThumbnailError
 from .scan_manager import ScanManager
+from .scanner import scan_library
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -62,7 +64,11 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
     settings = settings or Settings.from_env()
     settings.check_data_dir()
     init_db(settings.db_path)
-    scans = scan_manager or ScanManager(settings.db_path, workers=settings.probe_workers)
+    scans = scan_manager or ScanManager(
+        settings.db_path,
+        workers=settings.probe_workers,
+        scan_fn=partial(scan_library, missing_grace=settings.missing_grace),
+    )
     thumbs = Thumbnailer(settings.thumbs_dir)
     # Uploaded images whose video, folder or tag is gone are cleaned up at
     # startup and after every scan.

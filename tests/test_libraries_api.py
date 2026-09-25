@@ -201,3 +201,13 @@ def test_favicon(client):
     res = client.get("/favicon.svg")
     assert res.status_code == 200 and "svg" in res.headers["content-type"]
     assert 'rel="icon"' in client.get("/").text
+
+
+def test_missing_grace_from_environment(monkeypatch):
+    from datetime import timedelta
+    from reel.config import Settings
+
+    monkeypatch.setenv("REEL_MISSING_GRACE_DAYS", "0.5")
+    assert Settings.from_env().missing_grace == timedelta(hours=12)
+    monkeypatch.delenv("REEL_MISSING_GRACE_DAYS")
+    assert Settings.from_env().missing_grace == timedelta(days=7)

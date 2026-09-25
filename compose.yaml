@@ -25,6 +25,7 @@ services:
       - "${REEL_PORT:-8000}:8000"
     environment:
       REEL_PROBE_WORKERS: "${REEL_PROBE_WORKERS:-4}"
+      REEL_MISSING_GRACE_DAYS: "${REEL_MISSING_GRACE_DAYS:-7}"
     volumes:
       # Your videos, read-only: Reel never writes to them.
       - "${MEDIA_PATH:-/mnt/nas/videos}:/media:ro"

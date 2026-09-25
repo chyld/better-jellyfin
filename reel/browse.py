@@ -71,7 +71,8 @@ def browse(conn: sqlite3.Connection, library_id: int, rel_dir: str | None, sort:
 
     prefix = f"{rel_dir}/" if rel_dir else ""
     rows = conn.execute(
-        "SELECT * FROM media_items WHERE library_id = ? AND substr(rel_path, 1, ?) = ?",
+        # Videos a scan couldn't find any more are hidden (kept for a grace period).
+        "SELECT * FROM media_items WHERE library_id = ? AND substr(rel_path, 1, ?) = ? AND missing_since IS NULL",
         (library_id, len(prefix), prefix),
     ).fetchall()
     if rel_dir and not rows:
@@ -141,4 +142,5 @@ def item_detail(conn: sqlite3.Connection, item_uid: str) -> dict:
         "pix_fmt": row["pix_fmt"],
         "interlaced": bool(row["interlaced"]),
         "probe_error": row["probe_error"],
+        "missing": row["missing_since"] is not None,
     }

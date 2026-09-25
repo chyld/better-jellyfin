@@ -1,6 +1,7 @@
 import os
 import tempfile
 from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 
 
@@ -12,6 +13,8 @@ class Settings:
     data_dir: Path
     # How many ffprobe processes run at once during a scan.
     probe_workers: int = 4
+    # How long a video a scan can't find stays (hidden) before it's removed.
+    missing_grace: timedelta = timedelta(days=7)
 
     @property
     def db_path(self) -> Path:
@@ -53,4 +56,5 @@ class Settings:
             media_root=Path(os.environ.get("REEL_MEDIA_ROOT", "/media")).resolve(),
             data_dir=Path(os.environ.get("REEL_DATA_DIR", "./data")).resolve(),
             probe_workers=int(os.environ.get("REEL_PROBE_WORKERS", "4")),
+            missing_grace=timedelta(days=float(os.environ.get("REEL_MISSING_GRACE_DAYS", "7"))),
         )

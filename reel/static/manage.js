@@ -32,11 +32,16 @@ function statusLine(lib) {
   if (scan?.state === "error") return { text: `Scan failed: ${scan.error}`, cls: "err" };
   if (scan?.state === "done") {
     const r = scan.result;
-    const parts = [`${r.added} added`, `${r.updated} updated`, `${r.removed} removed`];
-    if (r.failed) parts.push(`${r.failed} unreadable`);
-    return { text: `Scan finished: ${parts.join(", ")}`, cls: r.failed ? "err" : "ok" };
+    const parts = [`${r.added} added`, `${r.updated} updated`];
+    if (r.missing) parts.push(`${r.missing} missing`);
+    if (r.removed) parts.push(`${r.removed} removed`);
+    if (r.failed) parts.push(`${r.failed} unplayable`);
+    const warned = Boolean(lib.last_scan_warning);
+    const text = `Scan finished: ${parts.join(", ")}${warned ? `. ${lib.last_scan_warning}` : ""}`;
+    return { text, cls: r.failed || warned ? "err" : "ok" };
   }
   if (lib.last_scan_error) return { text: `Last scan failed: ${lib.last_scan_error}`, cls: "err" };
+  if (lib.last_scan_warning) return { text: `Last scanned ${timeAgo(lib.last_scan_at)}. ${lib.last_scan_warning}`, cls: "err" };
   if (lib.last_scan_at) return { text: `Last scanned ${timeAgo(lib.last_scan_at)}` };
   return { text: "Not scanned yet" };
 }

@@ -118,7 +118,7 @@ def list_libraries(conn: sqlite3.Connection) -> list[dict]:
         SELECT l.*, COUNT(m.id) AS item_count,
             EXISTS (SELECT 1 FROM folder_art a WHERE a.library_id = l.id AND a.rel_dir = '') AS has_art,
             (SELECT version FROM folder_images f WHERE f.library_id = l.id AND f.rel_dir = '') AS custom_art
-        FROM libraries l LEFT JOIN media_items m ON m.library_id = l.id
+        FROM libraries l LEFT JOIN media_items m ON m.library_id = l.id AND m.missing_since IS NULL
         GROUP BY l.id ORDER BY l.name COLLATE NOCASE
         """
     ).fetchall()
