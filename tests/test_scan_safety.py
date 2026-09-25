@@ -73,12 +73,12 @@ def test_unreadable_folder_keeps_folder_art(conn, lib, media_root, fake_probe):
 def test_file_that_cannot_be_read_is_kept(conn, lib, media_root, fake_probe, monkeypatch):
     import reel.scanner
 
-    real_stat = os.stat
-    def flaky_stat(path, *args, **kwargs):
+    real_lstat = os.lstat
+    def flaky_lstat(path, *args, **kwargs):
         if str(path).endswith("a.mpg"):
             raise PermissionError(13, "Permission denied", str(path))
-        return real_stat(path, *args, **kwargs)
-    monkeypatch.setattr(reel.scanner.os, "stat", flaky_stat)
+        return real_lstat(path, *args, **kwargs)
+    monkeypatch.setattr(reel.scanner.os, "lstat", flaky_lstat)
     result = scan_library(conn, lib, probe_fn=fake_probe)
     assert rows(conn, lib)["Tapes/a.mpg"]["missing_since"] is None
     assert result["unreadable_files"] == 1

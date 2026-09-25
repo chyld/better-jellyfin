@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import sqlite3
+import stat
 import threading
 import time
 from collections.abc import Callable
@@ -13,7 +14,6 @@ from datetime import timedelta
 from pathlib import Path
 
 from .db import new_uid
-from .images import picture_rev
 from .paths import is_inside
 from .sorting import parent_dir, sort_key
 from .probe import PROBE_VERSION, ProbeError, ProbeResult, probe as ffprobe
@@ -130,6 +130,11 @@ class Walk:
         return any(rel_path == d or rel_path.startswith(d + "/") for d in self.unreadable_folders)
 
 
+def _rev(st: os.stat_result) -> str:
+    """A picture's version from a stat we already have (the same as images.picture_rev)."""
+    return f"{st.st_size}-{st.st_mtime_ns}"
+
+
 def _as_finished(pool, fn, items, *, window: int, busy: Callable[[], bool] | None = None):
     """fn(item) for each item on the pool, at most `window` at a time (one while
     `busy()`), yielded as each finishes (not in input order). Stopping early leaves
@@ -180,27 +185,39 @@ def walk_library(root: Path, cancel: threading.Event | None = None) -> Walk:
         # Only videos and pictures are used; everything else (.nfo, .srt, ...) is
         # skipped before any per-file check, each of which is a round trip on SMB.
         filenames = [f for f in filenames if _matters(f)]
-        # Symlinks leading out of the library are ignored, videos and pictures alike.
-        escaping = {f for f in filenames if os.path.islink(os.path.join(dirpath, f)) and not is_inside(root, rel_dir / f)}
-        outside += sum(1 for f in escaping if is_video(f))
-        filenames = [f for f in filenames if f not in escaping]
+        # One look at each (lstat): its size and time, and whether it's a link. Only a
+        # link needs another (to follow it), and one leading out of the library is
+        # ignored, videos and pictures alike. Each call is a round trip on SMB.
+        stats: dict[str, os.stat_result] = {}
+        kept = []
+        for f in filenames:
+            full = os.path.join(dirpath, f)
+            try:
+                st = os.lstat(full)
+                if stat.S_ISLNK(st.st_mode):
+                    if not is_inside(root, rel_dir / f):
+                        outside += is_video(f)
+                        continue
+                    st = os.stat(full)
+            except FileNotFoundError:
+                continue  # deleted while we were scanning: really gone
+            except OSError:
+                if is_video(f):
+                    unreadable_files.add((rel_dir / f).as_posix())  # there, but unreadable right now
+                continue
+            stats[f] = st
+            kept.append(f)
+        filenames = kept
         names_lower = {f.lower(): f for f in filenames}
         video_names = sorted(f for f in filenames if is_video(f))
 
         art = _find_image(names_lower, "folder")
         if art:
-            folder_art[rel_dir.as_posix() if rel_dir.parts else ""] = (
-                (rel_dir / art).as_posix(), picture_rev(os.path.join(dirpath, art)))
+            folder_art[rel_dir.as_posix() if rel_dir.parts else ""] = ((rel_dir / art).as_posix(), _rev(stats[art]))
 
         for name in video_names:
             rel_path = (rel_dir / name).as_posix()
-            try:
-                st = os.stat(os.path.join(dirpath, name))
-            except FileNotFoundError:
-                continue  # deleted while we were scanning: really gone
-            except OSError:
-                unreadable_files.add(rel_path)  # there, but unreadable right now
-                continue
+            st = stats[name]
             # A lone video in a leaf folder (Drama/0902/rough-cut.mp4) is named after the folder;
             # a lone video beside other folders (Personal/loose.mp4) keeps its own name.
             alone = len(video_names) == 1 and not dirnames
@@ -211,7 +228,7 @@ def walk_library(root: Path, cancel: threading.Event | None = None) -> Walk:
                 title=title,
                 year=year,
                 poster_path=(rel_dir / poster).as_posix() if poster else None,
-                poster_rev=picture_rev(os.path.join(dirpath, poster)) if poster else None,
+                poster_rev=_rev(stats[poster]) if poster else None,
                 size=st.st_size,
                 mtime=st.st_mtime,
             ))

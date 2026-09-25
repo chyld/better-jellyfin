@@ -299,18 +299,32 @@ def test_one_slow_probe_doesnt_hold_back_the_others(conn, media_root, fake_probe
     assert seen[-1] == 6
 
 
-def test_the_walk_only_checks_videos_and_pictures(conn, media_root, fake_probe, monkeypatch):
-    """Sidecar files (.nfo, .srt, ...) cost nothing: each check is a round trip on SMB."""
+def test_the_walk_looks_at_each_video_and_picture_once(conn, media_root, fake_probe, monkeypatch):
+    """One stat per video or picture (its size, time and whether it's a link), none
+    for sidecar files (.nfo, .srt, ...): each is a round trip on SMB."""
     import os
-    make_files(media_root, "Tapes/a.mpg", "Tapes/a.png", *[f"Tapes/extra{i}.nfo" for i in range(40)],
-               *[f"Tapes/extra{i}.srt" for i in range(40)])
+    make_files(media_root, "Tapes/a.mpg", "Tapes/a.png", "Tapes/folder.jpg",
+               *[f"Tapes/extra{i}.nfo" for i in range(40)], *[f"Tapes/extra{i}.srt" for i in range(40)])
     lib = create_library(conn, media_root, "Media", str(media_root))
-    checked = []
-    real = os.path.islink
-    monkeypatch.setattr(os.path, "islink", lambda p: checked.append(os.path.basename(p)) or real(p))
+    looked = []
+    from reel import scanner
+    real_lstat, real_stat = os.lstat, os.stat
+    monkeypatch.setattr(scanner.os, "lstat", lambda p, *a, **k: looked.append(os.path.basename(p)) or real_lstat(p, *a, **k))
+    monkeypatch.setattr(scanner.os, "stat", lambda p, *a, **k: looked.append(os.path.basename(p)) or real_stat(p, *a, **k))
     scan_library(conn, lib, probe_fn=fake_probe)
-    files = [name for name in checked if "." in name]      # (os.walk checks the folders itself)
-    assert sorted(files) == ["a.mpg", "a.png"]
+    files = [name for name in looked if "." in name]
+    assert sorted(files) == ["a.mpg", "a.png", "folder.jpg"]
+    row = conn.execute("SELECT poster_rev FROM media_items").fetchone()
+    assert row["poster_rev"] and conn.execute("SELECT art_rev FROM folder_art").fetchone()[0]
+
+
+def test_a_link_inside_the_library_is_followed(conn, media_root, fake_probe):
+    make_files(media_root, "Tapes/real/a.mpg")
+    (media_root / "Tapes/a-link.mpg").symlink_to(media_root / "Tapes/real/a.mpg")
+    lib = create_library(conn, media_root, "Media", str(media_root))
+    scan_library(conn, lib, probe_fn=fake_probe)
+    paths = sorted(r[0] for r in conn.execute("SELECT rel_path FROM media_items"))
+    assert paths == ["Tapes/a-link.mpg", "Tapes/real/a.mpg"]
 
 
 def test_expired_missing_videos_are_removed_in_bulk(conn, media_root, fake_probe):
