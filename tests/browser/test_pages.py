@@ -48,3 +48,33 @@ def test_a_slow_replaced_player_leaves_the_current_one_alone(server, page):
     assert page.js("document.body.classList.contains('playing')")
     assert page.js("document.querySelectorAll('video.screen').length") == 1
     assert page.video_state()["paused"] is False
+
+
+def test_a_failed_page_of_videos_offers_a_retry(server, page):
+    """Pages of 2 (the test forces it); the second page fails once: the folder says
+    so and loads it on Retry, instead of silently stopping."""
+    page.goto(f"{server.base}/#/")
+    page.wait_for("!!document.querySelector('.card')", message="home")
+    page.js("""(() => {
+        const real = window.fetch; let failed = false;
+        window.fetch = (url, ...rest) => {
+            url = String(url);
+            if (url.includes('/browse?')) {
+                url += '&limit=2';
+                if (!failed && url.includes('offset=2')) {
+                    failed = true;
+                    return Promise.resolve(new Response(JSON.stringify({detail: 'Server hiccup'}), {status: 500}));
+                }
+            }
+            return real(url, ...rest);
+        };
+        return true;
+    })()""")
+    page.js(f"location.hash = '#/library/{server.library}'")
+    page.wait_for("(document.querySelector('.load-error') || {hidden: true}).hidden === false", message="the error")
+    assert "Server hiccup" in page.js("document.querySelector('.load-error').textContent")
+    assert page.js("document.querySelectorAll('.grid.videos li').length") == 2
+    page.js("document.querySelector('.load-error button').click()")
+    total = len(server.videos)
+    page.wait_for(f"document.querySelectorAll('.grid.videos li').length === {total}", message="all videos")
+    assert page.js("document.querySelector('.load-error').hidden")

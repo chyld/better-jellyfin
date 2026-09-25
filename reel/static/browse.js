@@ -352,6 +352,7 @@ function folderCard(libraryId, folder) {
 function pagedVideoGrid(first, fetchPage) {
   const list = h("ul", { class: "grid videos" }, first.items.map(videoCard));
   const sentinel = h("div", { class: "load-more", "aria-hidden": "true" });
+  const failure = h("p", { class: "load-error", role: "status", hidden: true });
   let loaded = first.items.length;
   let total = first.total_items ?? loaded;
   let busy = false;
@@ -361,8 +362,16 @@ function pagedVideoGrid(first, fetchPage) {
   async function more() {
     if (busy || stopped || loaded >= total) return;
     busy = true;
+    failure.hidden = true;
     try {
-      const page = await fetchPage(loaded);
+      let page;
+      try {
+        page = await fetchPage(loaded);
+      } catch (err) {
+        // Say so, instead of silently stopping: scrolling alone won't try again.
+        if (!stopped) showFailure(err);
+        return;
+      }
       if (stopped) return;
       list.append(...page.items.map(videoCard));
       loaded += page.items.length;
@@ -374,6 +383,13 @@ function pagedVideoGrid(first, fetchPage) {
     if (loaded >= total) finish();
     else if (nearEnd()) more(); // a tall screen may still show the end
   }
+  function showFailure(err) {
+    failure.replaceChildren(
+      `Couldn't load more videos (${err.message}). `,
+      h("button", { type: "button", class: "btn", onclick: () => more() }, "Retry"),
+    );
+    failure.hidden = false;
+  }
   function finish() {
     observer.disconnect();
     sentinel.remove();
@@ -384,7 +400,7 @@ function pagedVideoGrid(first, fetchPage) {
   if (loaded < total) observer.observe(sentinel);
   else sentinel.remove();
   return {
-    element: h("div", { class: "paged" }, list, sentinel),
+    element: h("div", { class: "paged" }, list, failure, sentinel),
     stop() {
       stopped = true;
       observer.disconnect();
