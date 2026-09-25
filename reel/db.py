@@ -15,6 +15,9 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
+# The version-1 baseline, as it was then. The live tables are this plus every
+# entry in MIGRATIONS (e.g. play_mode is created here and dropped by migration 5),
+# so read the migrations too when you want the current shape.
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS libraries (
     id               INTEGER PRIMARY KEY,     -- internal only; never shown
@@ -69,7 +72,7 @@ CREATE TABLE IF NOT EXISTS item_tags (
 );
 CREATE INDEX IF NOT EXISTS item_tags_tag ON item_tags (tag_id);
 
--- Images uploaded for folders that have no folder.<ext> on the NAS.
+-- Images uploaded for folders (they win over a folder.<ext> on the NAS).
 CREATE TABLE IF NOT EXISTS folder_images (
     uid         TEXT NOT NULL UNIQUE,      -- names the file: images/folders/<uid>.jpg
     library_id  INTEGER NOT NULL REFERENCES libraries(id) ON DELETE CASCADE,
@@ -87,9 +90,23 @@ CREATE TABLE IF NOT EXISTS folder_art (
 """
 
 
+def _statements(script: str) -> Iterator[str]:
+    """The SQL statements in a script (semicolons in comments are fine)."""
+    buffer = ""
+    for line in script.splitlines(keepends=True):
+        buffer += line
+        if sqlite3.complete_statement(buffer):
+            yield buffer
+            buffer = ""
+    if buffer.strip():
+        yield buffer
+
+
 def _upgrade_unversioned(conn: sqlite3.Connection) -> None:
-    """Version 0 -> 1: create the baseline, and patch databases from before versioning."""
-    conn.executescript(SCHEMA)
+    """Version 0 -> 1: create the baseline, and patch databases from before versioning.
+    Runs inside init_db's transaction (so it doesn't use executescript, which commits)."""
+    for statement in _statements(SCHEMA):
+        conn.execute(statement)
     # Libraries and videos used to be addressed by their integer id; give each a UUID.
     for table in ("libraries", "media_items"):
         columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
@@ -99,7 +116,6 @@ def _upgrade_unversioned(conn: sqlite3.Connection) -> None:
         ids = [row[0] for row in conn.execute(f"SELECT id FROM {table}")]
         conn.executemany(f"UPDATE {table} SET uid = ? WHERE id = ?", [(new_uid(), i) for i in ids])
         conn.execute(f"CREATE UNIQUE INDEX {table}_uid ON {table} (uid)")
-        conn.commit()
     # Tags gained uploadable images, then videos did.
     for table, column in (
         ("tags", "image_version"),
@@ -109,7 +125,6 @@ def _upgrade_unversioned(conn: sqlite3.Connection) -> None:
     ):
         if column not in {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT")
-            conn.commit()
 
 
 def new_uid() -> str:
@@ -240,14 +255,10 @@ def init_db(db_path: Path) -> None:
                 f"The database {db_path} is from a newer version of Reel (schema {version}); "
                 f"this one understands up to schema {latest_version()}. Update Reel."
             )
-        if version == 0:
-            _upgrade_unversioned(conn)
-            conn.execute("PRAGMA user_version = 1")
-            version = 1
-        for number, _description, migrate in MIGRATIONS:
-            if number <= version:
-                continue
-            # All or nothing: a failed migration leaves the database as it was.
+        # Each step is all or nothing: a failed one leaves the database as it was.
+        steps = [(1, _upgrade_unversioned)] if version == 0 else []
+        steps += [(number, migrate) for number, _description, migrate in MIGRATIONS if number > version]
+        for number, migrate in steps:
             conn.execute("BEGIN")
             try:
                 migrate(conn)
@@ -256,6 +267,5 @@ def init_db(db_path: Path) -> None:
             except BaseException:
                 conn.rollback()
                 raise
-            version = number
     finally:
         conn.close()

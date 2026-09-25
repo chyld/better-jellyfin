@@ -72,7 +72,7 @@ def test_item_fields(client, lib):
     item = browse(client, lib, "Personal/Tapes", sort="year")["items"][1]
     assert item == {
         "id": item["id"], "title": "zoo-trip", "year": 1992, "duration": 60.0,
-        "width": 720, "height": 480, "play_mode": "transcode", "has_poster": False, "custom_image": None,
+        "width": 720, "height": 480, "has_poster": False, "custom_image": None,
     }
 
 

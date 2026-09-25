@@ -12,6 +12,17 @@ def _choice(name: str, allowed: tuple[str, ...], default: str) -> str:
     return value
 
 
+def _number(name: str, default: str, *, whole: bool = True, minimum: float = 0):
+    """A number from the environment, at least `minimum`; a clear message if it isn't one."""
+    raw = os.environ.get(name, default).strip()
+    try:
+        value = int(raw) if whole else float(raw)
+    except ValueError:
+        kind = "a whole number" if whole else "a number"
+        raise SystemExit(f"{name} must be {kind} (got {raw!r}).")
+    return max(minimum, value)
+
+
 @dataclass(frozen=True)
 class Settings:
     # Libraries must live under this folder; the folder picker can't leave it.
@@ -76,11 +87,11 @@ class Settings:
         return cls(
             media_root=Path(os.environ.get("REEL_MEDIA_ROOT", "/media")).resolve(),
             data_dir=Path(os.environ.get("REEL_DATA_DIR", "./data")).resolve(),
-            probe_workers=int(os.environ.get("REEL_PROBE_WORKERS", "4")),
-            missing_grace=timedelta(days=float(os.environ.get("REEL_MISSING_GRACE_DAYS", "7"))),
+            probe_workers=_number("REEL_PROBE_WORKERS", "4", minimum=1),
+            missing_grace=timedelta(days=_number("REEL_MISSING_GRACE_DAYS", "7", whole=False)),
             image_urls=_choice("REEL_IMAGE_URLS", ("internet", "lan", "off"), "internet"),
-            max_streams=max(1, int(os.environ.get("REEL_MAX_STREAMS", "3"))),
-            hls_cache_mb=max(100, int(os.environ.get("REEL_HLS_CACHE_MB", "2048"))),
+            max_streams=_number("REEL_MAX_STREAMS", "3", minimum=1),
+            hls_cache_mb=_number("REEL_HLS_CACHE_MB", "2048", minimum=100),
         )
 
 

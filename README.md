@@ -98,13 +98,17 @@ Docker needs a real mount on the host. A desktop GVFS mount (`/run/user/1000/gvf
 **Option 1: mount on the host (recommended).** Add the share to `/etc/fstab`:
 
 ```
-//nas.local/videos  /mnt/nas/videos  cifs  ro,credentials=/etc/nas.cred,uid=1000,gid=1000,vers=3.0,iocharset=utf8,_netdev,nofail,x-systemd.automount  0 0
+//nas.local/videos  /mnt/nas/videos  cifs  ro,soft,echo_interval=15,credentials=/etc/nas.cred,uid=1000,gid=1000,vers=3.0,iocharset=utf8,_netdev,nofail,x-systemd.automount  0 0
 ```
 
 - `ro`: read-only; Reel never needs to write to your videos.
 - `uid`/`gid`: match `PUID`/`PGID` in `.env`, so the container can read the files.
 - `iocharset=utf8`: shows file names with accents or other non-English characters correctly.
 - `x-systemd.automount`: mounts on first use, so boot doesn't hang if the NAS is down.
+- `soft,echo_interval=15`: if the NAS stops answering, file reads fail after a while instead of
+  waiting forever, and the client notices a dead connection sooner. `soft` is the CIFS default;
+  it's written out so it isn't lost. This is what lets Reel (and a scan) actually stop when the
+  NAS hangs: a read stuck in the kernel can't be interrupted from Python.
 
 Create the mount point and a root-only credentials file, then mount it. `cifs-utils` must be
 installed (`mount.cifs`).
@@ -145,6 +149,10 @@ documents each one.
 | `REEL_MISSING_GRACE_DAYS` | `7` | How long a video a scan can no longer find stays in the catalog (hidden, with its tags and pictures) before it's removed. |
 | `REEL_IMAGE_URLS` | `internet` | Where pictures may be downloaded from when you paste a URL: `internet` (public addresses only), `lan` (also your local network) or `off`. |
 | `FORWARDED_ALLOW_IPS` | `127.0.0.1` | *(uvicorn)* Behind a reverse proxy, set this to the proxy's address so its forwarded headers are trusted. Nothing else's are. |
+
+Numbers are checked when Reel starts: something that isn't a number stops it with a message
+naming the setting, and values below the minimum are raised to it (at least 1 probe worker and 1
+stream, a 100 MB HLS cache, and a grace period of 0 days).
 
 If the data folder isn't writable, Reel stops at startup with a message saying how to fix the
 permissions. The usual cause is a `./data` that Docker created owned by root.
@@ -477,7 +485,24 @@ data/
     └── folders/<uuid>-<version>.jpg
 ```
 
-- **Back up** `reel.db` and `images/`. `thumbs/` is only a cache.
+- **Back up** `reel.db` and `images/`. `thumbs/` and `hls/` are only caches. Don't copy
+  `reel.db` while Reel runs: recent changes can still be in `reel.db-wal`, so the copy may miss
+  them. Either:
+  - **stop Reel first** (simplest and fully consistent):
+    ```sh
+    docker compose stop
+    tar czf reel-backup.tgz -C data reel.db images
+    docker compose start
+    ```
+  - or, **while it runs**, snapshot the database with SQLite, then copy the pictures:
+    ```sh
+    sqlite3 data/reel.db ".backup 'reel-backup.db'"
+    tar czf reel-backup.tgz reel-backup.db -C data images
+    ```
+    A picture changed in the moment between the two steps may be missing from the backup (the
+    video then shows its NAS picture or a placeholder); nothing else is affected.
+  - To restore, stop Reel, put `reel.db` (renamed from `reel-backup.db` if needed) and
+    `images/` back in the data folder, delete any `reel.db-wal` and `reel.db-shm`, and start it.
 - Uploaded images whose tag, video, folder or library is gone are cleaned up at startup, after
   every scan, and when a library is removed.
 - **Upgrades are automatic.** The schema version is kept in the database (`PRAGMA user_version`),
@@ -606,7 +631,7 @@ changes how thumbnails are made.
 ### Tests
 
 ```sh
-uv run pytest              # backend: 507 tests
+uv run pytest              # backend: 510 tests
 node --test tests/js/      # frontend: 30 tests
 uv run pytest -m browser   # browser: 13 tests (about 2 minutes; needs Chromium and ffmpeg)
 scripts/docker-smoke.sh    # builds the image and checks it end to end (needs Docker)

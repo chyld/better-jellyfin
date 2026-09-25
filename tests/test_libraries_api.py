@@ -274,3 +274,21 @@ def test_image_url_policy_from_environment(monkeypatch):
     monkeypatch.setenv("REEL_IMAGE_URLS", "everything")
     with pytest.raises(SystemExit, match="REEL_IMAGE_URLS must be one of"):
         Settings.from_env()
+
+
+def test_number_settings_are_checked_and_kept_in_range(monkeypatch):
+    from reel.config import Settings
+
+    monkeypatch.setenv("REEL_PROBE_WORKERS", "0")
+    monkeypatch.setenv("REEL_MAX_STREAMS", "-2")
+    monkeypatch.setenv("REEL_HLS_CACHE_MB", "5")
+    monkeypatch.setenv("REEL_MISSING_GRACE_DAYS", "-1")
+    s = Settings.from_env()
+    assert (s.probe_workers, s.max_streams, s.hls_cache_mb, s.missing_grace.days) == (1, 1, 100, 0)
+    monkeypatch.setenv("REEL_PROBE_WORKERS", "four")
+    with pytest.raises(SystemExit, match="REEL_PROBE_WORKERS must be a whole number \\(got 'four'\\)"):
+        Settings.from_env()
+    monkeypatch.setenv("REEL_PROBE_WORKERS", "4")
+    monkeypatch.setenv("REEL_MISSING_GRACE_DAYS", "a week")
+    with pytest.raises(SystemExit, match="REEL_MISSING_GRACE_DAYS must be a number"):
+        Settings.from_env()

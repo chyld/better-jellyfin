@@ -1,8 +1,8 @@
-"""Users. For now there's only the built-in local user; login will add more.
+"""Users: only the built-in local user.
 
-Everything that belongs to a person (watch progress, next) is stored against a
-user from the start, and requests find theirs through current_user() in
-main.py, so adding login means changing that one place.
+Nothing is stored per user (watch progress was decided against). The users
+table and current_user() in main.py are just where login would plug in, if it's
+ever added: GET /api/me is the only thing that uses them.
 """
 import sqlite3
 

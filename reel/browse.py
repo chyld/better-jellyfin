@@ -5,7 +5,6 @@ Everything here comes from the database, so browsing never touches the NAS.
 import sqlite3
 from pathlib import PurePosixPath
 
-from .plan import plan
 from .sorting import natural_text
 
 SORTS = ("name", "year")
@@ -33,8 +32,6 @@ def item_out(row: sqlite3.Row) -> dict:
         "duration": row["duration"],
         "width": row["width"],
         "height": row["height"],
-        # For a typical browser; the player asks /plan with its real capabilities.
-        "play_mode": plan(row).mode,
         "has_poster": row["poster_path"] is not None,  # an image on the NAS
         "custom_image": row["custom_image"],            # version of an uploaded one, if any
     }

@@ -158,3 +158,31 @@ def test_tag_order_survives_a_rebuild(client, media_root):
     conn.execute("VACUUM")
     conn.close()
     assert [i["title"] for i in client.get(f"/api/tags/{tag['id']}").json()["items"]] == ["c", "a", "b"]
+
+
+def test_a_failed_upgrade_from_before_versioning_changes_nothing(tmp_path, monkeypatch):
+    """The first upgrade is all or nothing too (it used to commit as it went)."""
+    path = tmp_path / "old.db"
+    old = sqlite3.connect(path)
+    old.executescript("""
+        CREATE TABLE libraries (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+            path TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            last_scan_at TEXT, last_scan_error TEXT);
+        INSERT INTO libraries (name, path) VALUES ('Tapes', '/media/Tapes');
+    """)
+    old.close()
+
+    def broken():
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(db, "new_uid", broken)
+    with pytest.raises(RuntimeError):
+        init_db(path)
+    assert tables(path) == {"libraries"}                           # no baseline tables left behind
+    conn = sqlite3.connect(path)
+    assert "uid" not in {r[1] for r in conn.execute("PRAGMA table_info(libraries)")}
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 0
+    conn.close()
+    monkeypatch.undo()
+    init_db(path)                                                  # and it works later
+    assert version_of(path) == latest_version()

@@ -359,9 +359,11 @@ def test_plan_for_unplayable_and_unknown(client, items):
 
 
 @requires_ffmpeg
-def test_listing_shows_the_mode_for_a_typical_browser(client, items):
+def test_only_plan_says_how_a_video_plays(client, items):
+    """Listings and details don't guess a mode for a typical browser; /plan knows this one."""
     detail = client.get(f"/api/items/{items['h264_ac3.mkv']}").json()
-    assert detail["play_mode"] == "audio"
+    assert "play_mode" not in detail
+    assert client.get(f"/api/items/{items['h264_ac3.mkv']}/plan").json()["mode"] == "audio"
 
 
 @requires_ffmpeg
