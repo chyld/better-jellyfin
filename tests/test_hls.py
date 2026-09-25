@@ -261,4 +261,48 @@ def test_safari_gets_hls_even_for_copyable_video(client, media_root, clips):
     chrome = client.get(f"/api/items/{video}/plan", params={"hls_support": "mse"}).json()
     safari = client.get(f"/api/items/{video}/plan", params={"hls_support": "native"}).json()
     assert (chrome["mode"], chrome["delivery"]) == ("remux", "progressive")   # copy: keep it cheap
-    assert (safari["mode"], safari["delivery"]) == ("remux", "hls")           # Safari needs HLS
+    # Safari needs HLS, whose segments must start on exact keyframes: the video is encoded.
+    assert (safari["mode"], safari["video"], safari["audio"], safari["delivery"]) == ("transcode", "encode", "copy", "hls")
+    assert "re-encoded" in safari["note"] and chrome["note"] is None
+    assert "hls_support=native" in safari["url"]
+    playlist_text = client.get(safari["url"]).text
+    seg = client.get(f"/api/items/{video}/" + next(line for line in playlist_text.splitlines() if line.endswith(".ts")))
+    assert seg.status_code == 200
+
+
+@requires_ffmpeg
+def test_flac_audio_is_converted_for_hls(client, media_root, clips, tmp_path, monkeypatch):
+    """MP4 can carry FLAC but MPEG-TS can't: the HLS plan converts it, and the segment has AAC."""
+    from conftest import FakeProbe
+    from reel.probe import ProbeResult
+
+    folder = media_root / "Old"
+    folder.mkdir()
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=320x240:rate=25:duration=8",
+                    "-f", "lavfi", "-i", "sine=duration=8", "-c:v", "mpeg4", "-c:a", "flac", "-shortest",
+                    str(folder / "old.mkv")], check=True)
+    monkeypatch.setitem(FakeProbe.PROFILES, ".mkv",
+                        ProbeResult("matroska,webm", "mpeg4", "flac", "yuv420p", 320, 240, 8.0))
+    lib = client.post("/api/libraries", json={"name": "O", "path": str(folder)}).json()["id"]
+    client.post(f"/api/libraries/{lib}/scan")
+    client.scans.wait_idle()
+    video = client.get(f"/api/libraries/{lib}/browse").json()["items"][0]["id"]
+
+    assert client.get(f"/api/items/{video}/plan").json()["audio"] == "copy"          # progressive MP4
+    plan = client.get(f"/api/items/{video}/plan", params={"hls_support": "mse"}).json()
+    assert (plan["delivery"], plan["audio"]) == ("hls", "encode") and "FLAC" in plan["note"]
+    first = next(line for line in client.get(plan["url"]).text.splitlines() if line.endswith(".ts"))
+    seg = client.get(f"/api/items/{video}/" + first)
+    assert seg.status_code == 200
+    (tmp_path / "seg.ts").write_bytes(seg.content)
+    assert codecs(tmp_path / "seg.ts") == ["h264", "aac"]
+
+
+def test_playlist_refuses_a_video_that_isnt_hls(client, media_root):
+    make_files(media_root, "V/clip.mkv")
+    lib = client.post("/api/libraries", json={"name": "V", "path": str(media_root / "V")}).json()["id"]
+    client.post(f"/api/libraries/{lib}/scan")
+    client.scans.wait_idle()
+    video = client.get(f"/api/libraries/{lib}/browse").json()["items"][0]["id"]
+    # H.264 + AAC for hls.js: copied into the progressive stream, not HLS.
+    assert client.get(f"/api/items/{video}/hls.m3u8", params={"hls_support": "mse"}).status_code == 409

@@ -17,7 +17,7 @@ from pydantic import BaseModel
 
 from . import browse, custom_images, fetch, hls, libraries, playback, tags, users
 from .paths import OutsideRoot, resolve_inside
-from .plan import Capabilities, Plan, plan as make_plan
+from .plan import HLS_SUPPORT, Capabilities, Plan, plan as make_plan
 from .config import Settings
 from .db import connect, init_db
 from .images import MAX_UPLOAD_BYTES, Thumbnailer, ThumbnailError
@@ -375,39 +375,34 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
         row = conn.execute("SELECT * FROM media_items WHERE uid = ?", (item_uid,)).fetchone()
         if row is None:
             raise HTTPException(404, "Video not found.")
+        if hls_support not in HLS_SUPPORT:
+            hls_support = "none"
         caps = Capabilities.from_query(video, audio)
-        p = make_plan(row, caps)
+        p = make_plan(row, caps, hls_support)
         query = urlencode({"video": ",".join(sorted(caps.video)), "audio": ",".join(sorted(caps.audio))})
-        delivery, url = choose_delivery(item_uid, p, row["duration"], hls_support, query)
+        url = {
+            "file": f"/api/items/{item_uid}/file",
+            "progressive": f"/api/items/{item_uid}/stream?{query}",
+            "hls": f"/api/items/{item_uid}/hls.m3u8?{query}&hls_support={hls_support}",
+        }.get(p.delivery)
         return {"mode": p.mode, "video": p.video, "audio": p.audio, "streamed": p.streamed,
-                "delivery": delivery, "url": url}
-
-    def choose_delivery(item_uid: str, p: Plan, duration: float | None, hls_support: str, query: str):
-        """file for direct play; HLS for converted video (exact segments, cheap seeking)
-        and for anything streamed to Safari (which can't play the progressive stream);
-        otherwise the progressive stream, which copies video untouched."""
-        if p.mode == "unsupported":
-            return None, None
-        if not p.streamed:
-            return "file", f"/api/items/{item_uid}/file"
-        wants_hls = hls_support == "native" or (hls_support == "mse" and p.mode == "transcode")
-        if wants_hls and duration:
-            return "hls", f"/api/items/{item_uid}/hls.m3u8?{query}"
-        return "progressive", f"/api/items/{item_uid}/stream?{query}"
+                "delivery": p.delivery, "note": p.note, "url": url}
 
     # ---- HLS ----
 
     @app.get("/api/items/{item_uid}/hls.m3u8")
-    async def get_hls_playlist(item_uid: str, video: str | None = None, audio: str | None = None):
+    async def get_hls_playlist(item_uid: str, video: str | None = None, audio: str | None = None,
+                               hls_support: str = "mse"):
         """The whole video as an HLS playlist of 6-second segments (video converted)."""
         row, path = await run_in_threadpool(stream_source, item_uid)
-        p = make_plan(row, Capabilities.from_query(video, audio))
+        p = make_plan(row, Capabilities.from_query(video, audio), hls_support)
         if p.mode == "unsupported":
             raise HTTPException(409, "This video can't be played.")
         if not row["duration"]:
             raise HTTPException(409, "This video's length is unknown, so it can't be split into segments.")
-        # HLS segments must cut at exact times, so the video is always encoded here.
-        source = hls.Source(path, Plan("transcode", "encode", p.audio), row["duration"],
+        if p.delivery != "hls":
+            raise HTTPException(409, f"This video is played as {p.delivery}, not HLS.")
+        source = hls.Source(path, p, row["duration"],
                             bool(row["interlaced"]), row["height"], row["audio_codec"])
         sid = hls_sessions.open(item_uid, source)
         return Response(hls.playlist(row["duration"], sid), media_type="application/vnd.apple.mpegurl",
@@ -442,7 +437,8 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
             raise HTTPException(409, "This video can't be played.")
         if not p.streamed:
             # The browser could play the file itself; stream it as a straight copy anyway.
-            p = type(p)("remux", video="copy", audio=None if row["audio_codec"] is None else "copy")
+            p = Plan("remux", video="copy", audio=None if row["audio_codec"] is None else "copy",
+                     delivery="progressive")
         if start < 0 or (row["duration"] and start >= row["duration"]):
             raise HTTPException(416, "Start time is outside the video.")
         cmd = playback.stream_command(

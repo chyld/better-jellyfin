@@ -480,7 +480,7 @@ export async function renderItem(view, itemId) {
       ? h("span", { class: "pill mode err", title: "The last scan couldn't find this file. It's kept for a while in case it comes back." }, "Missing from the library")
       : h(
           "span",
-          { class: `pill mode ${tone}`, title: item.probe_error ? `${modeText}: ${item.probe_error}` : modeText },
+          { class: `pill mode ${tone}`, title: item.probe_error ? `${modeText}: ${item.probe_error}` : [modeText, plan.note].filter(Boolean).join(" ") },
           modeLabel,
         ),
   ];

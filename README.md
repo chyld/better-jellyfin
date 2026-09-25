@@ -291,6 +291,16 @@ bundled [hls.js](https://github.com/video-dev/hls.js) (light build, Apache-2.0).
 MPEG-TS rather than fragmented MP4 because ffmpeg restarts fMP4 timestamps at zero on each run,
 which would misplace segments from a restarted encoder.)
 
+**The plan covers both.** The tracks and the delivery are decided together, so what `/plan`
+reports is what actually runs:
+- HLS segments must start on exact keyframes, so **HLS always encodes the video**. When the
+  video alone could have been copied (Safari, for an MKV with H.264), the plan says `transcode`
+  and gives a `note` explaining why; the video page shows it on the mode's tooltip.
+- MPEG-TS segments only carry some audio: **AAC and MP3** are copied (plus **AC-3/E-AC-3** for
+  Safari's own player). FLAC, Opus and Vorbis, which the MP4 stream would copy, are converted
+  to AAC for HLS (ffmpeg would otherwise write FLAC into TS as an unplayable data stream, and
+  the video would be silent).
+
 Details:
 - **HEVC** is converted unless the browser reports it can decode it (which depends on its
   hardware); then it's played or copied as is.
@@ -489,8 +499,8 @@ JSON over HTTP. Every ID is a UUID. There's no authentication yet (see
 | GET | `/api/items/{id}` | Details: codecs, size, path, breadcrumbs, tags. |
 | GET | `/api/items/{id}/thumb` | The video's picture (landscape JPEG). |
 | GET, HEAD | `/api/items/{id}/file` | The original file, with range requests (direct play). |
-| GET | `/api/items/{id}/plan?video=&audio=&hls_support=` | How this browser should play it: `video`/`audio` list the codecs it decodes (e.g. `video=h264,hevc&audio=aac,ac3`), `hls_support` is `native`, `mse` or `none`. Returns the mode, what happens to each track, the delivery (`file`, `progressive`, `hls`) and the URL to load. |
-| GET | `/api/items/{id}/hls.m3u8?video=&audio=` | The whole video as an HLS playlist of 6-second segments (video converted). |
+| GET | `/api/items/{id}/plan?video=&audio=&hls_support=` | How this browser should play it: `video`/`audio` list the codecs it decodes (e.g. `video=h264,hevc&audio=aac,ac3`), `hls_support` is `native`, `mse` or `none`. Returns the mode, what happens to each track, the delivery (`file`, `progressive`, `hls`), a `note` when more work is done than the codecs alone need, and the URL to load. An empty `video=`/`audio=` means none; leaving one out means a typical browser. |
+| GET | `/api/items/{id}/hls.m3u8?video=&audio=&hls_support=` | The whole video as an HLS playlist of 6-second segments (video converted). 409 if the plan for this browser isn't HLS. |
 | GET | `/api/items/{id}/hls/{session}/{n}.ts` | Segment `n`, encoded on demand. |
 | GET | `/api/items/{id}/stream?start=&video=&audio=` | A fragmented MP4 from `start` seconds, each track copied or converted per the plan for those codecs. |
 | PUT | `/api/items/{id}/image` | Upload a picture (request body = the image). |
@@ -540,7 +550,7 @@ changes how thumbnails are made.
 ### Tests
 
 ```sh
-uv run pytest              # backend: 449 tests
+uv run pytest              # backend: 460 tests
 node --test tests/js/      # frontend: 26 tests
 scripts/docker-smoke.sh    # builds the image and checks it end to end (needs Docker)
 ```

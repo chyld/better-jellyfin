@@ -70,10 +70,10 @@ def video_args(plan: Plan, *, interlaced: bool, height: int | None, keyframe_eve
     ]
 
 
-def audio_args(plan: Plan, audio_codec: str | None) -> list[str]:
+def audio_args(plan: Plan, audio_codec: str | None, *, container: str = "mp4") -> list[str]:
     if plan.audio == "copy":
         args = ["-c:a", "copy"]
-        if audio_codec == "aac":
+        if audio_codec == "aac" and container == "mp4":
             # AAC from MPEG-TS files is in ADTS framing, which MP4 can't hold as-is.
             args += ["-bsf:a", "aac_adtstoasc"]
         return args

@@ -197,7 +197,7 @@ class HlsManager:
         return [
             *input_args(src.path, offset),
             *video_args(src.plan, interlaced=src.interlaced, height=src.height, keyframe_every=SEGMENT),
-            *audio_args(src.plan, src.audio_codec),
+            *audio_args(src.plan, src.audio_codec, container="mpegts"),
             # Timestamps continue from where this segment sits in the playlist.
             "-output_ts_offset", f"{offset:.3f}",
             "-f", "hls", "-hls_time", f"{SEGMENT:g}", "-hls_playlist_type", "vod",
