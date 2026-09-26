@@ -261,7 +261,10 @@ def test_mark_a_spot_then_jump_to_it_from_the_video_page(server, page):
     assert state["t"] < marked[0]["time"] + 5
 
     page.goto(f"{server.base}/#/item/{video}")
-    page.wait_for("!!document.querySelector('.marks-section .chip-x')", message="the delete button")
+    page.wait_for("!!document.querySelector('.marks-section a')", message="the marks list")
+    assert page.js("document.querySelectorAll('.marks-section .chip-x').length") == 0   # no delete until Edit
+    page.js("document.querySelector('.marks-section .text-btn').click()")               # Edit
+    assert page.js("document.querySelector('.marks-section .text-btn').textContent") == "Done"
     page.js("document.querySelector('.marks-section .chip-x').click()")
     page.wait_for("document.querySelector('.marks-section').hidden", message="the empty list hidden")
     assert server.call("GET", f"/api/items/{video}/marks") == []

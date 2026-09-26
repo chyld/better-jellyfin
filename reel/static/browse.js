@@ -211,15 +211,46 @@ export async function renderTag(view, tagId) {
 }
 
 /** The tag chips on a video's page, with a box to add more. */
-/** The video's marks (saved in the player): each opens the player there; × deletes it.
- *  Nothing shows when there are none. */
+/** The video's marks (saved in the player): each opens the player there. Deleting
+ *  needs "Edit" first, so a stray tap can't remove one. Nothing shows when there
+ *  are none. */
 function marksSection(item) {
+  let marks = item.marks || [];
+  let editing = false;
   const list = h("ul", { class: "tag-cloud marks" });
   const error = h("p", { class: "error", hidden: true });
-  const section = h("section", { class: "tags-section marks-section" }, h("h3", {}, "Marks"), list, error);
+  const toggle = h("button", {
+    type: "button",
+    class: "text-btn",
+    onclick: () => {
+      editing = !editing;
+      show();
+    },
+  });
+  const section = h(
+    "section",
+    { class: "tags-section marks-section" },
+    h("div", { class: "section-head" }, h("h3", {}, "Marks"), toggle),
+    list,
+    error,
+  );
   const label = (t) => formatDuration(t) || "0:00";
-  const show = (marks) => {
+  const remove = async (mark) => {
+    try {
+      marks = await api("DELETE", `/api/items/${item.id}/marks/${mark.id}`);
+      error.hidden = true;
+      if (!marks.length) editing = false;
+      show();
+    } catch (err) {
+      error.textContent = err.message;
+      error.hidden = false;
+    }
+  };
+  function show() {
     section.hidden = marks.length === 0;
+    toggle.textContent = editing ? "Done" : "Edit";
+    toggle.setAttribute("aria-pressed", String(editing));
+    toggle.title = editing ? "Stop editing marks" : "Edit marks (delete some)";
     fill(
       list,
       marks.map((mark) =>
@@ -227,30 +258,23 @@ function marksSection(item) {
           "li",
           { class: "chip" },
           h("a", { href: `#/play/${item.id}?t=${mark.time}`, title: `Play from ${label(mark.time)}` }, label(mark.time)),
-          h(
-            "button",
-            {
-              type: "button",
-              class: "chip-x",
-              "aria-label": `Delete the mark at ${label(mark.time)}`,
-              title: "Delete mark",
-              onclick: async () => {
-                try {
-                  show(await api("DELETE", `/api/items/${item.id}/marks/${mark.id}`));
-                  error.hidden = true;
-                } catch (err) {
-                  error.textContent = err.message;
-                  error.hidden = false;
-                }
+          editing &&
+            h(
+              "button",
+              {
+                type: "button",
+                class: "chip-x",
+                "aria-label": `Delete the mark at ${label(mark.time)}`,
+                title: "Delete mark",
+                onclick: () => remove(mark),
               },
-            },
-            "×",
-          ),
+              "×",
+            ),
         ),
       ),
     );
-  };
-  show(item.marks || []);
+  }
+  show();
   return section;
 }
 

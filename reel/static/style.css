@@ -291,6 +291,14 @@ a.chip:hover, .chip:has(a:hover) { border-color: rgb(56 189 248 / 0.5); backgrou
 .tags-section .tag-cloud:empty { display: none; }
 .marks-section[hidden] { display: none; }
 .marks-section { margin-top: 20px; }
+.section-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.section-head h3 { margin: 0 0 12px; }
+.text-btn {
+  padding: 2px 4px; border: 0; background: none; color: var(--muted); cursor: pointer;
+  font: inherit; font-size: 13px; font-weight: 600;
+}
+.text-btn:hover, .text-btn:focus-visible { color: var(--text); }
+.text-btn[aria-pressed="true"] { color: #fbbf24; }
 .marks .chip a { font-variant-numeric: tabular-nums; }
 .tag-add { display: flex; gap: 8px; margin-bottom: 8px; }
 .tag-add input { flex: 1; min-width: 0; }

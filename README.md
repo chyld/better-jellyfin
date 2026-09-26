@@ -48,7 +48,8 @@ ffmpeg converts on the fly.
 - **A modern player.** A frosted-glass control dock, a gradient seek bar with a time preview,
   ±1 minute jumps, a go-to-beginning button, keyboard shortcuts and full screen.
 - **Marks.** A bookmark button in the player saves the spot you're at (just the time). Marks
-  show as ticks on the seek bar, and on the video's page as a list you can jump to or delete.
+  show as ticks on the seek bar, and on the video's page as a list you can jump to (and delete,
+  after tapping **Edit**).
 - **Snap a preview.** The camera button in the player (or **P**) makes the frame on screen the
   video's picture, replacing any it had.
 - **Pictures from your files.** `movie.png` beside `movie.mp4` and `folder.png` in a folder are
@@ -199,7 +200,8 @@ show a pulsing **CONVERTING** badge, and repackaged ones show **REPACKAGING**.
 position, also in a converted stream), a note says "Marked 5:35", and an amber tick appears on
 the seek bar; click a tick to go there. A video can have any number of marks. Marking within a
 second of an existing one does nothing. On the video's page, **Marks** lists them in order:
-click one to play from there (`#/play/<id>?t=335`), or × to delete it. Marks belong to the
+click one to play from there (`#/play/<id>?t=335`). To delete marks, tap **Edit** beside the
+heading: each mark then shows an ×; **Done** hides them again, so a stray tap never deletes one. Marks belong to the
 video, so they follow a moved or renamed file, like tags.
 
 **Use this frame as the preview** pauses the video and asks the server for the frame at that
