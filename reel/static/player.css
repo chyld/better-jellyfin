@@ -107,9 +107,11 @@ body.playing main { padding: 0; max-width: none; }
 .seek-knob {
   position: absolute; top: 50%; left: 0; width: 14px; height: 14px; margin-left: -7px; margin-top: -7px;
   border-radius: 50%; background: #fff; box-shadow: 0 0 0 3px rgb(167 139 250 / 0.45), 0 0 14px rgb(56 189 248 / 0.8);
-  transform: scale(0); transition: transform 0.15s;
+  pointer-events: none;   /* clicks go to the seek bar (or a mark's tick) underneath */
+  transition: transform 0.15s;
 }
-.seek:hover .seek-knob, .seek.dragging .seek-knob, .seek:focus-visible .seek-knob { transform: scale(1); }
+/* Always shown where the video is; a little bigger while you hover or drag. */
+.seek:hover .seek-knob, .seek.dragging .seek-knob, .seek:focus-visible .seek-knob { transform: scale(1.2); }
 .seek-tip {
   position: absolute; bottom: 24px; left: 0; transform: translateX(-50%);
   font: 600 12px/1 ui-monospace, "JetBrains Mono", "SF Mono", Menlo, monospace; letter-spacing: 0.04em;
