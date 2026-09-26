@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 280" width="880" height="280" role="img" aria-labelledby="title desc">
+  <title id="title">Reel</title>
+  <desc id="desc">A glowing film reel with a play button, and the word Reel.</desc>
+  <defs>
+    <linearGradient id="neon" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#38bdf8"/>
+      <stop offset="0.55" stop-color="#818cf8"/>
+      <stop offset="1" stop-color="#c084fc"/>
+    </linearGradient>
+    <linearGradient id="word" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#e0f2fe"/>
+      <stop offset="0.5" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#ede9fe"/>
+    </linearGradient>
+    <radialGradient id="bg" cx="0.22" cy="0.2" r="1">
+      <stop offset="0" stop-color="#161a2e"/>
+      <stop offset="0.6" stop-color="#0b0d18"/>
+      <stop offset="1" stop-color="#07080d"/>
+    </radialGradient>
+    <radialGradient id="aura" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#6366f1" stop-opacity="0.55"/>
+      <stop offset="0.55" stop-color="#38bdf8" stop-opacity="0.18"/>
+      <stop offset="1" stop-color="#38bdf8" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="glow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="6" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="soft" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="2.2"/>
+    </filter>
+    <clipPath id="badge"><rect width="880" height="280" rx="44"/></clipPath>
+  </defs>
+
+  <!-- A dark rounded badge, so it looks the same on light and dark pages. -->
+  <g clip-path="url(#badge)">
+    <rect width="880" height="280" fill="url(#bg)"/>
+    <!-- faint scan lines, a nod to old tapes -->
+    <g stroke="#ffffff" stroke-opacity="0.025" stroke-width="1">
+      <path d="M0 40H880M0 80H880M0 120H880M0 160H880M0 200H880M0 240H880"/>
+    </g>
+    <circle cx="150" cy="140" r="150" fill="url(#aura)"/>
+  </g>
+  <rect x="1" y="1" width="878" height="278" rx="43" fill="none" stroke="#ffffff" stroke-opacity="0.08" stroke-width="2"/>
+
+  <!-- The reel -->
+  <g transform="translate(150 140)">
+    <!-- film leaving the reel -->
+    <path d="M58 70 C 110 104, 150 104, 196 96" fill="none" stroke="url(#neon)" stroke-width="16" stroke-linecap="round" opacity="0.28"/>
+    <path d="M58 70 C 110 104, 150 104, 196 96" fill="none" stroke="#07080d" stroke-width="6" stroke-dasharray="6 9" stroke-linecap="round" opacity="0.9"/>
+    <!-- outer ring, glowing -->
+    <circle r="92" fill="none" stroke="url(#neon)" stroke-width="12" filter="url(#glow)"/>
+    <circle r="76" fill="#0b0d18" stroke="url(#neon)" stroke-opacity="0.35" stroke-width="2"/>
+    <!-- five holes around the hub -->
+    <g fill="#07080d" stroke="url(#neon)" stroke-width="3">
+      <circle cx="0" cy="-48" r="15"/>
+      <circle cx="45.65" cy="-14.83" r="15"/>
+      <circle cx="28.21" cy="38.83" r="15"/>
+      <circle cx="-28.21" cy="38.83" r="15"/>
+      <circle cx="-45.65" cy="-14.83" r="15"/>
+    </g>
+    <!-- the play button in the middle -->
+    <circle r="26" fill="url(#neon)" filter="url(#glow)"/>
+    <path d="M-7 -12.5 L14.5 0 L-7 12.5 Z" fill="#07080d" stroke="#07080d" stroke-width="3" stroke-linejoin="round"/>
+    <!-- a glint -->
+    <path d="M-64 -52 A 84 84 0 0 1 -20 -82" fill="none" stroke="#ffffff" stroke-opacity="0.7" stroke-width="4" stroke-linecap="round" filter="url(#soft)"/>
+  </g>
+
+  <!-- The name -->
+  <g font-family="Inter, 'Segoe UI', 'Helvetica Neue', Helvetica, Arial, sans-serif">
+    <text x="300" y="158" font-size="124" font-weight="800" letter-spacing="-4" fill="url(#word)">Reel</text>
+    <rect x="304" y="178" width="92" height="6" rx="3" fill="url(#neon)" filter="url(#glow)"/>
+    <text x="304" y="222" font-size="26" font-weight="500" letter-spacing="1.5" fill="#9aa3bd">your videos · any format · any browser</text>
+  </g>
+</svg>

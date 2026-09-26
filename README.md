@@ -1,4 +1,6 @@
-# Reel
+<h1 align="center">
+  <img src="docs/logo.svg" alt="Reel" width="640">
+</h1>
 
 A small, self-hosted video server for a homelab, in the spirit of Jellyfin. Point it at a
 folder of videos (for example a NAS share), click **Scan**, and browse and watch everything
@@ -753,6 +755,7 @@ reel/
 scripts/
   fetch-ffmpeg.sh    download and verify the newest ffmpeg build
   docker-smoke.sh    build and test the Docker image end to end
+docs/logo.svg        the logo at the top of this README
 tests/               pytest suite, plus tests/js for the frontend and tests/browser (real Chromium)
 Dockerfile, compose.yaml, .env.example
 ```
