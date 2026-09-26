@@ -16,7 +16,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import browse, catalog, fetch, hls, libraries, pictures, playback, tags, users
+from . import browse, catalog, fetch, hls, libraries, marks, pictures, playback, tags, users
 from .paths import OutsideRoot, resolve_inside
 from .plan import HLS_SUPPORT, Capabilities, Plan, plan as make_plan
 from .config import DataLock, Settings
@@ -57,6 +57,10 @@ class TagAdd(BaseModel):
 
 class TagRename(BaseModel):
     name: str
+
+
+class MarkAdd(BaseModel):
+    time: float = Field(ge=0, allow_inf_nan=False)   # seconds into the video
 
 
 class Snapshot(BaseModel):
@@ -236,7 +240,21 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
     @app.get("/api/items/{item_uid}")
     def get_item(item_uid: str, conn: sqlite3.Connection = Db):
         item = browse.item_detail(conn, item_uid)
-        return {**item, "tags": tags.item_tags(conn, tags.item_pk(conn, item_uid))}
+        return {**item, "tags": tags.item_tags(conn, tags.item_pk(conn, item_uid)),
+                "marks": marks.list_marks(conn, item_uid)}
+
+    @app.get("/api/items/{item_uid}/marks")
+    def get_marks(item_uid: str, conn: sqlite3.Connection = Db):
+        return marks.list_marks(conn, item_uid)
+
+    @app.post("/api/items/{item_uid}/marks")
+    def add_mark(item_uid: str, body: MarkAdd, conn: sqlite3.Connection = Db):
+        """Mark a spot, `time` seconds in. Returns the video's marks, earliest first."""
+        return marks.add_mark(conn, item_uid, body.time)
+
+    @app.delete("/api/items/{item_uid}/marks/{mark_uid}")
+    def delete_mark(item_uid: str, mark_uid: str, conn: sqlite3.Connection = Db):
+        return marks.remove_mark(conn, item_uid, mark_uid)
 
     @app.post("/api/items/{item_uid}/tags")
     def add_item_tag(item_uid: str, body: TagAdd, conn: sqlite3.Connection = Db):

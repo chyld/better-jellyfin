@@ -247,6 +247,22 @@ def _v7_picture_versions(conn: sqlite3.Connection) -> None:
     conn.execute("ALTER TABLE folder_art ADD COLUMN art_rev TEXT")
 
 
+def _v8_marks(conn: sqlite3.Connection) -> None:
+    # Spots in a video you marked in the player (no names, just the time).
+    conn.execute(
+        """
+        CREATE TABLE marks (
+            id         INTEGER PRIMARY KEY,
+            uid        TEXT NOT NULL UNIQUE,
+            item_id    INTEGER NOT NULL REFERENCES media_items(id) ON DELETE CASCADE,
+            seconds    REAL NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    conn.execute("CREATE INDEX marks_item ON marks (item_id, seconds)")
+
+
 # (version, what it does, function). Append only; functions must not commit.
 MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (2, "fingerprints and probe versions for media items", _v2_identity),
@@ -255,6 +271,7 @@ MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (5, "stop storing the play mode; it's decided at play time", _v5_no_stored_play_mode),
     (6, "index each video's folder and name order for fast browsing", _v6_folder_index),
     (7, "versions of NAS pictures, so thumbnails are found without the NAS", _v7_picture_versions),
+    (8, "marks: spots in a video to jump back to", _v8_marks),
 ]
 
 

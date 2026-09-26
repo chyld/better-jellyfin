@@ -236,3 +236,41 @@ def test_snapshot_button_takes_the_frame_on_screen(server, page, tmp_path):
     page.goto(f"{server.base}/#/item/{video}")          # the video page shows the new picture
     src = page.wait_for("(document.querySelector('.hero-wrap img') || {}).src", message="the preview")
     assert f"v={second}" in src
+
+
+# ---- Marks -----------------------------------------------------------------------------
+
+
+def test_mark_a_spot_then_jump_to_it_from_the_video_page(server, page):
+    video = server.videos["remux.mkv"]                     # a progressive stream: starting at t matters
+    page.play(server, "remux.mkv")
+    page.playing_past(3)
+    page.js("document.querySelector('button[aria-label=\"Mark this spot\"]').click()")
+    page.wait_for("/Marked/.test((document.querySelector('.player-toast') || {}).textContent || '')",
+                  message="the mark's note")
+    assert page.js("document.querySelectorAll('.seek-mark').length") == 1      # a tick on the seek bar
+    marked = server.call("GET", f"/api/items/{video}/marks")
+    assert len(marked) == 1 and marked[0]["time"] >= 3
+
+    page.goto(f"{server.base}/#/item/{video}")
+    link = page.wait_for("(document.querySelector('.marks-section a') || {}).getAttribute?.('href')",
+                         message="the marks list")
+    assert link == f"#/play/{video}?t={marked[0]['time']}"
+    page.js("document.querySelector('.marks-section a').click()")
+    state = page.playing_past(marked[0]["time"] - 0.5)       # starts at the mark, not at 0
+    assert state["t"] < marked[0]["time"] + 5
+
+    page.goto(f"{server.base}/#/item/{video}")
+    page.wait_for("!!document.querySelector('.marks-section .chip-x')", message="the delete button")
+    page.js("document.querySelector('.marks-section .chip-x').click()")
+    page.wait_for("document.querySelector('.marks-section').hidden", message="the empty list hidden")
+    assert server.call("GET", f"/api/items/{video}/marks") == []
+
+
+def test_a_play_link_with_a_start_time(server, page):
+    video = server.videos["long.avi"]                       # HLS
+    page.goto(f"{server.base}/#/play/{video}?t=125")
+    page.wait_for("!!document.querySelector('video.screen')", message="the player")
+    page.cdp("Page.bringToFront")
+    state = page.playing_past(125)
+    assert state["t"] < 140

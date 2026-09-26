@@ -47,6 +47,8 @@ ffmpeg converts on the fly.
   converted live by ffmpeg, starting in about half a second.
 - **A modern player.** A frosted-glass control dock, a gradient seek bar with a time preview,
   ±1 minute jumps, a go-to-beginning button, keyboard shortcuts and full screen.
+- **Marks.** A bookmark button in the player saves the spot you're at (just the time). Marks
+  show as ticks on the seek bar, and on the video's page as a list you can jump to or delete.
 - **Snap a preview.** The camera button in the player (or **P**) makes the frame on screen the
   video's picture, replacing any it had.
 - **Pictures from your files.** `movie.png` beside `movie.mp4` and `folder.png` in a folder are
@@ -187,9 +189,18 @@ Going **Back** returns you to the same scroll position in long grids.
 | Mute / volume | Speaker button; the slider appears on hover | **M** |
 | Full screen | ⛶ button, or double-click the video (on iPhone: iOS's own full-screen player, since Safari there can only put the video itself full screen) | **F** |
 | Use this frame as the preview | Camera button | **P** |
+| Mark this spot | Bookmark button | |
+| Go to a mark | Click its tick on the seek bar | |
 
 The controls fade out after 3 seconds without mouse movement while playing. Converted videos
 show a pulsing **CONVERTING** badge, and repackaged ones show **REPACKAGING**.
+
+**Marks** save spots to come back to: the bookmark button records where you are (the true
+position, also in a converted stream), a note says "Marked 5:35", and an amber tick appears on
+the seek bar; click a tick to go there. A video can have any number of marks. Marking within a
+second of an existing one does nothing. On the video's page, **Marks** lists them in order:
+click one to play from there (`#/play/<id>?t=335`), or × to delete it. Marks belong to the
+video, so they follow a moved or renamed file, like tags.
 
 **Use this frame as the preview** pauses the video and asks the server for the frame at that
 exact moment, taken from the **original file** (full quality, whatever the player was sent;
@@ -609,6 +620,9 @@ JSON over HTTP. Every ID is a UUID. There's no authentication yet (see
 | PUT | `/api/items/{id}/image` | Upload a picture (request body = the image). |
 | POST | `/api/items/{id}/image-url` | `{url}`: set a picture from a URL. |
 | POST | `/api/items/{id}/snapshot` | `{time}`: use the frame at `time` seconds (from the original file) as the picture, replacing any. |
+| GET | `/api/items/{id}/marks` | The video's marks, earliest first: `[{id, time}]` (also in `GET /api/items/{id}` as `marks`). |
+| POST | `/api/items/{id}/marks` | `{time}`: mark a spot (kept inside the video; nothing new within a second of a mark). Returns the marks. |
+| DELETE | `/api/items/{id}/marks/{mark}` | Delete a mark. Returns the marks left. |
 | DELETE | `/api/items/{id}/image` | Remove the uploaded picture (the NAS one, if any, shows again). |
 | POST | `/api/items/{id}/tags` | `{name}`: tag the video. Returns its tags. |
 | DELETE | `/api/items/{id}/tags/{tag}` | Untag. Returns its remaining tags. |
@@ -658,9 +672,9 @@ version); bump `THUMBS` when the server changes how thumbnails are made.
 ### Tests
 
 ```sh
-uv run pytest              # backend: 555 tests
-node --test tests/js/      # frontend: 35 tests
-uv run pytest -m browser   # browser: 15 tests (about 2 minutes; needs Chromium and ffmpeg)
+uv run pytest              # backend: 562 tests
+node --test tests/js/      # frontend: 36 tests
+uv run pytest -m browser   # browser: 17 tests (about 2 minutes; needs Chromium and ffmpeg)
 scripts/docker-smoke.sh    # builds the image and checks it end to end (needs Docker)
 ```
 
@@ -710,6 +724,7 @@ reel/
   images.py          shrinking/cropping thumbnails; processing uploads
   pictures.py        your pictures for tags, videos and folders: one way to set, remove and clean up
   thumbnails.py      pictures on cards: finding, thumbnailing (limited), and after-scan warming/cleanup
+  marks.py           marks: spots in a video saved from the player
   tags.py            tags: add/remove, rename/merge, delete
   fetch.py           safe image downloads from URLs
   browse.py          read-only views: folders (indexed, paged), video details

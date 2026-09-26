@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-const { clampSeek, enterFullscreen, exitFullscreen, isFullscreen } = await import("../../reel/static/player.js");
+const { clampSeek, enterFullscreen, exitFullscreen, isFullscreen, startTime } = await import("../../reel/static/player.js");
 
 test("jumping a minute moves by 60 seconds", () => {
   assert.equal(clampSeek(600 + 60, 3600), 660);
@@ -81,4 +81,13 @@ test("full screen: a refused request falls back to the video", async () => {
   player.requestFullscreen = () => Promise.reject(new Error("not allowed"));
   await enterFullscreen(player, video);
   assert.deepEqual(calls, ["video"]);
+});
+
+test("a play link can say where to start (?t=seconds)", () => {
+  assert.equal(startTime("t=335"), 335);
+  assert.equal(startTime("t=12.5"), 12.5);
+  assert.equal(startTime(""), 0);
+  assert.equal(startTime(undefined), 0);
+  assert.equal(startTime("t=-4"), 0);
+  assert.equal(startTime("t=soon"), 0);
 });

@@ -38,10 +38,11 @@ def test_live_schema(tmp_path):
         "folder_images": ["uid", "library_id", "rel_dir", "version"],
         "folder_art": ["library_id", "rel_dir", "art_path", "art_rev"],
         "users": ["id", "uid", "name", "is_local", "created_at"],
+        "marks": ["id", "uid", "item_id", "seconds", "created_at"],
     }
     # Browsing, tag order, move detection and the one local user depend on these.
     assert indexes == {"media_items_browse", "item_tags_order", "item_tags_tag", "media_items_fingerprint",
-                       "users_one_local"}
+                       "users_one_local", "marks_item"}
 
 
 @pytest.mark.skipif(not shutil.which("node"), reason="node not installed")

@@ -211,6 +211,49 @@ export async function renderTag(view, tagId) {
 }
 
 /** The tag chips on a video's page, with a box to add more. */
+/** The video's marks (saved in the player): each opens the player there; × deletes it.
+ *  Nothing shows when there are none. */
+function marksSection(item) {
+  const list = h("ul", { class: "tag-cloud marks" });
+  const error = h("p", { class: "error", hidden: true });
+  const section = h("section", { class: "tags-section marks-section" }, h("h3", {}, "Marks"), list, error);
+  const label = (t) => formatDuration(t) || "0:00";
+  const show = (marks) => {
+    section.hidden = marks.length === 0;
+    fill(
+      list,
+      marks.map((mark) =>
+        h(
+          "li",
+          { class: "chip" },
+          h("a", { href: `#/play/${item.id}?t=${mark.time}`, title: `Play from ${label(mark.time)}` }, label(mark.time)),
+          h(
+            "button",
+            {
+              type: "button",
+              class: "chip-x",
+              "aria-label": `Delete the mark at ${label(mark.time)}`,
+              title: "Delete mark",
+              onclick: async () => {
+                try {
+                  show(await api("DELETE", `/api/items/${item.id}/marks/${mark.id}`));
+                  error.hidden = true;
+                } catch (err) {
+                  error.textContent = err.message;
+                  error.hidden = false;
+                }
+              },
+            },
+            "×",
+          ),
+        ),
+      ),
+    );
+  };
+  show(item.marks || []);
+  return section;
+}
+
 function tagEditor(item) {
   const list = h("ul", { class: "tag-cloud" });
   const error = h("p", { class: "error", hidden: true });
@@ -555,6 +598,7 @@ export async function renderItem(view, itemId) {
           ? h("a", { class: "btn primary play", href: playUrl }, "▶ Play")
           : h("button", { class: "btn primary play", disabled: true }, "▶ Play"),
         tagEditor(item),
+        marksSection(item),
         h("dl", { class: "facts" }, facts.map(([k, v]) => [h("dt", {}, k), h("dd", {}, v)])),
       ),
     ),

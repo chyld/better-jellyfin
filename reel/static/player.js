@@ -66,6 +66,7 @@ const ICONS = {
   expand: '<path d="M4 9V5.5A1.5 1.5 0 0 1 5.5 4H9M15 4h3.5A1.5 1.5 0 0 1 20 5.5V9M20 15v3.5a1.5 1.5 0 0 1-1.5 1.5H15M9 20H5.5A1.5 1.5 0 0 1 4 18.5V15"/>',
   shrink: '<path d="M9 4v3.5A1.5 1.5 0 0 1 7.5 9H4M20 9h-3.5A1.5 1.5 0 0 1 15 7.5V4M15 20v-3.5a1.5 1.5 0 0 1 1.5-1.5H20M4 15h3.5A1.5 1.5 0 0 1 9 16.5V20"/>',
   chevron: '<path d="M14.5 5.5L8 12l6.5 6.5"/>',
+  mark: '<path d="M7 4.5h10a1 1 0 0 1 1 1v14l-6-3.8-6 3.8v-14a1 1 0 0 1 1-1z"/><path d="M12 8v5M9.5 10.5h5"/>',
   camera: '<path d="M4 8.5A1.5 1.5 0 0 1 5.5 7h2.2l1.5-2h5.6l1.5 2h2.2A1.5 1.5 0 0 1 20 8.5v9a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 17.5z"/><circle cx="12" cy="13" r="3.3"/>',
 };
 
@@ -83,7 +84,13 @@ function iconButton(name, label, shortcut, extraClass = "") {
   );
 }
 
-export async function renderPlayer(page, itemId) {
+/** "#/play/<id>?t=335": where to start, in seconds (0 if not given). */
+export function startTime(query) {
+  const t = Number(new URLSearchParams(query || "").get("t"));
+  return Number.isFinite(t) && t > 0 ? t : 0;
+}
+
+export async function renderPlayer(page, itemId, start = 0) {
   // Ask the server how *this* browser should play it (see plan.py).
   const caps = await capabilities();
   const [item, plan] = await Promise.all([
@@ -108,6 +115,7 @@ export async function renderPlayer(page, itemId) {
   const muteBtn = iconButton("volume", "Mute", "M");
   const fullBtn = iconButton("expand", "Full screen", "F");
   const snapBtn = iconButton("camera", "Use this frame as the preview", "P");
+  const markBtn = iconButton("mark", "Mark this spot");
   const toast = h("div", { class: "player-toast", role: "status", "aria-live": "polite", hidden: true });
   const volume = h("input", { type: "range", class: "volume", min: 0, max: 1, step: 0.05, value: 1, "aria-label": "Volume" });
 
@@ -119,10 +127,13 @@ export async function renderPlayer(page, itemId) {
   const fillBar = h("div", { class: "seek-fill" });
   const knob = h("div", { class: "seek-knob" });
   const tip = h("div", { class: "seek-tip" });
+  // Your marks, as ticks on the seek bar: click one to go there.
+  const ticks = h("div", { class: "seek-marks" });
   const seekBar = h(
     "div",
     { class: "seek", role: "slider", tabindex: 0, "aria-label": "Seek", "aria-valuemin": 0 },
     h("div", { class: "seek-rail" }, buffered, fillBar),
+    ticks,
     knob,
     tip,
   );
@@ -136,7 +147,7 @@ export async function renderPlayer(page, itemId) {
       { class: "dock-row" },
       h("div", { class: "dock-side" }, timeNow),
       h("div", { class: "dock-center" }, startBtn, backBtn, playBtn, forwardBtn),
-      h("div", { class: "dock-side right" }, timeTotal, h("div", { class: "vol" }, muteBtn, volume), snapBtn, fullBtn),
+      h("div", { class: "dock-side right" }, timeTotal, h("div", { class: "vol" }, muteBtn, volume), markBtn, snapBtn, fullBtn),
     ),
   );
   const backLink = h("a", { class: "pbtn glass", href: `#/item/${item.id}`, "aria-label": "Back", title: "Back" }, icon("chevron"));
@@ -250,6 +261,47 @@ export async function renderPlayer(page, itemId) {
     }
   }
 
+  // ---- Marks: spots to jump back to (deleted from the video's page) ----
+  let marks = item.marks || [];
+  function showMarks() {
+    const total = duration();
+    ticks.replaceChildren(
+      ...(total ? marks : []).map((m) =>
+        h(
+          "button",
+          {
+            type: "button",
+            class: "seek-mark",
+            style: `left:${pct(m.time)}`,
+            title: `Go to ${formatDuration(m.time) || "0:00"}`,
+            "aria-label": `Go to mark at ${formatDuration(m.time) || "0:00"}`,
+            // Its own click, not the seek bar's drag: go exactly to the mark.
+            onpointerdown: (e) => e.stopPropagation(),
+            onclick: (e) => {
+              e.stopPropagation();
+              seek(m.time);
+            },
+          },
+        ),
+      ),
+    );
+  }
+  let marking = false;
+  async function addMark() {
+    if (marking) return;
+    marking = true;
+    const time = Math.max(0, position());
+    try {
+      marks = await api("POST", `/api/items/${item.id}/marks`, { time });
+      showMarks();
+      showToast(`Marked ${formatDuration(time) || "0:00"}`, "ok");
+    } catch (err) {
+      showToast(err.message, "err");
+    } finally {
+      marking = false;
+    }
+  }
+
   function flashIcon(name) {
     flash.replaceChildren(icon(name));
     flash.classList.remove("show");
@@ -360,6 +412,8 @@ export async function renderPlayer(page, itemId) {
   forwardBtn.addEventListener("click", () => seek(position() + JUMP_SECONDS));
   fullBtn.addEventListener("click", toggleFullscreen);
   snapBtn.addEventListener("click", takeSnapshot);
+  markBtn.addEventListener("click", addMark);
+  video.addEventListener("durationchange", showMarks);
   muteBtn.addEventListener("click", () => (video.muted = !video.muted));
   volume.addEventListener("input", () => {
     video.volume = Number(volume.value);
@@ -389,8 +443,9 @@ export async function renderPlayer(page, itemId) {
   document.addEventListener("keydown", onKey);
 
   spinner.hidden = false;
-  load(0);
+  load(start);
   updateTime();
+  showMarks();
 
   return () => {
     document.removeEventListener("keydown", onKey);

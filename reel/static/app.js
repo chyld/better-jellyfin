@@ -1,6 +1,6 @@
 import { renderBrowse, renderHome, renderItem, renderTag } from "./browse.js";
 import { renderManage } from "./manage.js";
-import { renderPlayer } from "./player.js";
+import { renderPlayer, startTime } from "./player.js";
 import { createRouter } from "./router.js";
 import { renderTags } from "./tags.js";
 
@@ -15,7 +15,7 @@ const router = createRouter({
     [/^#\/tags$/, (page) => renderTags(page)],
     [/^#\/library\/([0-9a-f-]{36})(?:\/(.*))?$/, (page, uid, path) => renderBrowse(page, uid, decodeURIComponent(path || ""))],
     [/^#\/item\/([0-9a-f-]{36})$/, (page, uid) => renderItem(page, uid)],
-    [/^#\/play\/([0-9a-f-]{36})$/, (page, uid) => renderPlayer(page, uid)],
+    [/^#\/play\/([0-9a-f-]{36})(\?.*)?$/, (page, uid, query) => renderPlayer(page, uid, startTime(query?.slice(1)))],
     [/^#\/tag\/([0-9a-f-]{36})$/, (page, uid) => renderTag(page, uid)],
   ],
   // Each visit renders into a fresh element, so a slow page that finishes after
