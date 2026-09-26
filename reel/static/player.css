@@ -171,7 +171,8 @@ body.playing main { padding: 0; max-width: none; }
 .player-toast[hidden] { display: none; }
 .player-toast.ok { box-shadow: 0 0 0 1px var(--glass-edge), 0 0 22px rgb(56 189 248 / 0.35); }
 .player-toast.err { box-shadow: 0 0 0 1px rgb(248 113 113 / 0.7); }
-.pbtn:disabled { opacity: 0.45; cursor: progress; }
+.pbtn:disabled { opacity: 0.35; cursor: default; }
+.pbtn[hidden] { display: none; }
 
 @media (max-width: 640px) {
   .player-top { padding: 14px 14px; }
@@ -181,9 +182,10 @@ body.playing main { padding: 0; max-width: none; }
   .pbtn.primary { width: 50px; height: 50px; }
   .vol .volume { display: none; }
   .clock.total { padding-right: 2px; }
-}
-@media (max-width: 420px) {
-  .dock-row { grid-template-columns: auto 1fr auto; }
+  /* Two rows on a phone: the time and the play controls, then the tools
+     (total time, sound, marks, snapshot, full screen), spread across. */
+  .dock-row { grid-template-columns: auto 1fr; row-gap: 2px; }
   .dock-center { justify-content: center; }
+  .dock-side.right { grid-column: 1 / -1; justify-content: space-between; }
 }
 

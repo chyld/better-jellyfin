@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-const { clampSeek, enterFullscreen, exitFullscreen, isFullscreen, startTime } = await import("../../reel/static/player.js");
+const { clampSeek, enterFullscreen, exitFullscreen, isFullscreen, nextMark, prevMark, startTime } =
+  await import("../../reel/static/player.js");
 
 test("jumping a minute moves by 60 seconds", () => {
   assert.equal(clampSeek(600 + 60, 3600), 660);
@@ -90,4 +91,16 @@ test("a play link can say where to start (?t=seconds)", () => {
   assert.equal(startTime(undefined), 0);
   assert.equal(startTime("t=-4"), 0);
   assert.equal(startTime("t=soon"), 0);
+});
+
+test("next and previous mark", () => {
+  const marks = [{ time: 45 }, { time: 335 }, { time: 372 }];
+  assert.equal(nextMark(marks, 0).time, 45);
+  assert.equal(nextMark(marks, 45).time, 335);           // at a mark: the one after
+  assert.equal(nextMark(marks, 400), null);              // none left
+  assert.equal(prevMark(marks, 400).time, 372);
+  assert.equal(prevMark(marks, 336).time, 45);           // just after a mark: the one before it
+  assert.equal(prevMark(marks, 340).time, 335);          // well after it: back to it
+  assert.equal(prevMark(marks, 30), null);
+  assert.equal(nextMark([], 10), null);
 });

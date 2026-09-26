@@ -277,3 +277,31 @@ def test_a_play_link_with_a_start_time(server, page):
     page.cdp("Page.bringToFront")
     state = page.playing_past(125)
     assert state["t"] < 140
+
+
+def test_next_and_previous_mark_buttons(server, page):
+    video = server.videos["remux.mkv"]                      # 90 s, progressive
+    button = lambda label: f"document.querySelector('button[aria-label=\"{label}\"]')"
+    page.play(server, "remux.mkv")
+    page.playing_past(1)
+    assert page.js(f"{button('Next mark')}.hidden")          # no marks yet: no buttons
+    for t in (20, 60):
+        server.call("POST", f"/api/items/{video}/marks", {"time": t})
+    page.goto(f"{server.base}/#/")                            # leave, then reopen with the marks
+    page.wait_for("!document.querySelector('video.screen')", message="the player closed")
+    page.play(server, "remux.mkv")
+    page.playing_past(1)
+    assert not page.js(f"{button('Next mark')}.hidden")
+    assert page.js(f"{button('Previous mark')}.disabled")     # none before the start
+    page.js(f"{button('Next mark')}.click()")
+    state = page.playing_past(20)
+    assert state["t"] < 26
+    page.js(f"{button('Next mark')}.click()")
+    state = page.playing_past(60)
+    assert state["t"] < 66
+    page.wait_for(f"{button('Next mark')}.disabled", message="no mark after the last")
+    page.js(f"{button('Previous mark')}.click()")            # just after 60: back to 20
+    page.wait_for("(() => { const s = document.querySelector('.seek[role=slider]');"
+                  " return Number(s.getAttribute('aria-valuenow')) < 30; })()", message="back at 20")
+    state = page.playing_past(19)
+    assert state["t"] < 30

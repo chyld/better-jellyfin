@@ -191,14 +191,16 @@ Going **Back** returns you to the same scroll position in long grids.
 | Full screen | ⛶ button, or double-click the video (on iPhone: iOS's own full-screen player, since Safari there can only put the video itself full screen) | **F** |
 | Use this frame as the preview | Camera button | **P** |
 | Mark this spot | Bookmark button | |
-| Go to a mark | Click its tick on the seek bar | |
+| Go to a mark | Click its tick on the seek bar, or the ⇤ / ⇥ buttons beside the bookmark for the previous / next mark | |
 
 The controls fade out after 3 seconds without mouse movement while playing. Converted videos
 show a pulsing **CONVERTING** badge, and repackaged ones show **REPACKAGING**.
 
 **Marks** save spots to come back to: the bookmark button records where you are (the true
 position, also in a converted stream), a note says "Marked 5:35", and an amber tick appears on
-the seek bar; click a tick to go there. A video can have any number of marks. Marking within a
+the seek bar; click a tick to go there, or use the **previous / next mark** buttons beside the
+bookmark (hidden when a video has no marks; "previous" just after a mark goes to the one
+before, like a music player). A video can have any number of marks. Marking within a
 second of an existing one does nothing. On the video's page, **Marks** lists them in order:
 click one to play from there (`#/play/<id>?t=335`). To delete marks, tap **Edit** beside the
 heading: each mark then shows an ×; **Done** hides them again, so a stray tap never deletes one. Marks belong to the
@@ -675,8 +677,8 @@ version); bump `THUMBS` when the server changes how thumbnails are made.
 
 ```sh
 uv run pytest              # backend: 562 tests
-node --test tests/js/      # frontend: 36 tests
-uv run pytest -m browser   # browser: 17 tests (about 2 minutes; needs Chromium and ffmpeg)
+node --test tests/js/      # frontend: 37 tests
+uv run pytest -m browser   # browser: 18 tests (about 2 minutes; needs Chromium and ffmpeg)
 scripts/docker-smoke.sh    # builds the image and checks it end to end (needs Docker)
 ```
 

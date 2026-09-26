@@ -66,6 +66,8 @@ const ICONS = {
   expand: '<path d="M4 9V5.5A1.5 1.5 0 0 1 5.5 4H9M15 4h3.5A1.5 1.5 0 0 1 20 5.5V9M20 15v3.5a1.5 1.5 0 0 1-1.5 1.5H15M9 20H5.5A1.5 1.5 0 0 1 4 18.5V15"/>',
   shrink: '<path d="M9 4v3.5A1.5 1.5 0 0 1 7.5 9H4M20 9h-3.5A1.5 1.5 0 0 1 15 7.5V4M15 20v-3.5a1.5 1.5 0 0 1 1.5-1.5H20M4 15h3.5A1.5 1.5 0 0 1 9 16.5V20"/>',
   chevron: '<path d="M14.5 5.5L8 12l6.5 6.5"/>',
+  prevMark: '<path d="M6 5v14"/><path d="M19 12h-9M13.5 8l-4 4 4 4"/>',
+  nextMark: '<path d="M18 5v14"/><path d="M5 12h9M10.5 8l4 4-4 4"/>',
   mark: '<path d="M7 4.5h10a1 1 0 0 1 1 1v14l-6-3.8-6 3.8v-14a1 1 0 0 1 1-1z"/><path d="M12 8v5M9.5 10.5h5"/>',
   camera: '<path d="M4 8.5A1.5 1.5 0 0 1 5.5 7h2.2l1.5-2h5.6l1.5 2h2.2A1.5 1.5 0 0 1 20 8.5v9a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 17.5z"/><circle cx="12" cy="13" r="3.3"/>',
 };
@@ -82,6 +84,17 @@ function iconButton(name, label, shortcut, extraClass = "") {
     { type: "button", class: `pbtn ${extraClass}`.trim(), "aria-label": label, title: shortcut ? `${label} (${shortcut})` : label },
     icon(name),
   );
+}
+
+/** The first mark after `position` (marks are {time}, earliest first), or null. */
+export function nextMark(marks, position) {
+  return marks.find((m) => m.time > position + 0.5) || null;
+}
+
+/** The mark before `position`, or null. Just after a mark (within 2 s), it's the
+ *  one before that, so pressing again keeps going back (like a music player). */
+export function prevMark(marks, position) {
+  return [...marks].reverse().find((m) => m.time < position - 2) || null;
 }
 
 /** "#/play/<id>?t=335": where to start, in seconds (0 if not given). */
@@ -116,6 +129,8 @@ export async function renderPlayer(page, itemId, start = 0) {
   const fullBtn = iconButton("expand", "Full screen", "F");
   const snapBtn = iconButton("camera", "Use this frame as the preview", "P");
   const markBtn = iconButton("mark", "Mark this spot");
+  const prevMarkBtn = iconButton("prevMark", "Previous mark");
+  const nextMarkBtn = iconButton("nextMark", "Next mark");
   const toast = h("div", { class: "player-toast", role: "status", "aria-live": "polite", hidden: true });
   const volume = h("input", { type: "range", class: "volume", min: 0, max: 1, step: 0.05, value: 1, "aria-label": "Volume" });
 
@@ -147,7 +162,7 @@ export async function renderPlayer(page, itemId, start = 0) {
       { class: "dock-row" },
       h("div", { class: "dock-side" }, timeNow),
       h("div", { class: "dock-center" }, startBtn, backBtn, playBtn, forwardBtn),
-      h("div", { class: "dock-side right" }, timeTotal, h("div", { class: "vol" }, muteBtn, volume), markBtn, snapBtn, fullBtn),
+      h("div", { class: "dock-side right" }, timeTotal, h("div", { class: "vol" }, muteBtn, volume), prevMarkBtn, markBtn, nextMarkBtn, snapBtn, fullBtn),
     ),
   );
   const backLink = h("a", { class: "pbtn glass", href: `#/item/${item.id}`, "aria-label": "Back", title: "Back" }, icon("chevron"));
@@ -263,7 +278,22 @@ export async function renderPlayer(page, itemId, start = 0) {
 
   // ---- Marks: spots to jump back to (deleted from the video's page) ----
   let marks = item.marks || [];
+  // Previous/next: hidden without marks; disabled when there's none that way.
+  function updateMarkButtons() {
+    prevMarkBtn.hidden = nextMarkBtn.hidden = marks.length === 0;
+    const at = position();
+    prevMarkBtn.disabled = !prevMark(marks, at);
+    nextMarkBtn.disabled = !nextMark(marks, at);
+  }
+  function goToMark(mark) {
+    if (!mark) return;
+    seek(mark.time);
+    showToast(`Mark ${formatDuration(mark.time) || "0:00"}`);
+    updateMarkButtons();
+  }
+
   function showMarks() {
+    updateMarkButtons();
     const total = duration();
     ticks.replaceChildren(
       ...(total ? marks : []).map((m) =>
@@ -413,6 +443,9 @@ export async function renderPlayer(page, itemId, start = 0) {
   fullBtn.addEventListener("click", toggleFullscreen);
   snapBtn.addEventListener("click", takeSnapshot);
   markBtn.addEventListener("click", addMark);
+  prevMarkBtn.addEventListener("click", () => goToMark(prevMark(marks, position())));
+  nextMarkBtn.addEventListener("click", () => goToMark(nextMark(marks, position())));
+  video.addEventListener("timeupdate", updateMarkButtons);
   video.addEventListener("durationchange", showMarks);
   muteBtn.addEventListener("click", () => (video.muted = !video.muted));
   volume.addEventListener("input", () => {
