@@ -140,6 +140,9 @@ input.invalid, input.invalid:focus { border-color: var(--danger); box-shadow: 0 
 select { padding: 7px 30px 7px 12px; appearance: none; cursor: pointer;
   background: rgb(255 255 255 / 0.04) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%238d92a3' stroke-width='2' stroke-linecap='round'%3E%3Cpath d='M7 10l5 5 5-5'/%3E%3C/svg%3E") no-repeat right 9px center / 16px; }
 .head-tools { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+/* Prev / next on a video's page, when it was opened from a "Show all" list. */
+.list-nav { display: flex; align-items: center; gap: 10px; }
+.list-pos { color: var(--muted); font-size: 13px; font-weight: 500; font-variant-numeric: tabular-nums; }
 .sort { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; font-weight: 500; }
 
 .field { display: grid; gap: 7px; margin-bottom: 14px; }

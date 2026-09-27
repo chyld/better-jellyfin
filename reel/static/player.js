@@ -103,7 +103,8 @@ export function startTime(query) {
   return Number.isFinite(t) && t > 0 ? t : 0;
 }
 
-export async function renderPlayer(page, itemId, start = 0) {
+/** `backUrl`: where the back button goes (the video's page, keeping the list it was opened from). */
+export async function renderPlayer(page, itemId, start = 0, backUrl = `#/item/${itemId}`) {
   // Ask the server how *this* browser should play it (see plan.py).
   const caps = await capabilities();
   const [item, plan] = await Promise.all([
@@ -165,7 +166,7 @@ export async function renderPlayer(page, itemId, start = 0) {
       h("div", { class: "dock-side right" }, timeTotal, h("div", { class: "vol" }, muteBtn, volume), prevMarkBtn, markBtn, nextMarkBtn, snapBtn, fullBtn),
     ),
   );
-  const backLink = h("a", { class: "pbtn glass", href: `#/item/${item.id}`, "aria-label": "Back", title: "Back" }, icon("chevron"));
+  const backLink = h("a", { class: "pbtn glass", href: backUrl, "aria-label": "Back", title: "Back" }, icon("chevron"));
   const top = h(
     "div",
     { class: "player-top" },

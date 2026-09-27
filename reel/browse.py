@@ -140,16 +140,13 @@ def browse(
     }
 
 
-def browse_all(conn: sqlite3.Connection, library_id: int, lib: sqlite3.Row, rel_dir: str,
-               limit: int, offset: int) -> dict:
-    """One page of every video at or below `rel_dir`, sorted by its path in the
-    library (file name included), naturally. There's no other sort: the cards
-    show that path, so the order is the one on screen.
+def _all_below(library_id: int, rel_dir: str) -> tuple[str, list]:
+    """SQL for the videos a "Show all" list of `rel_dir` holds: (WHERE clause, its args).
 
-    Paged from the path_key index: a folder's videos are one range of it, since
-    their keys all start with the folder's key and "\x01" (see sorting.path_key).
-    Keys fold case and number padding ("Show 7" and "Show 07" share one), so the
-    range is also checked against the exact folder names.
+    They're one range of the path_key index, since their keys all start with the
+    folder's key and "\x01" (see sorting.path_key). Keys fold case and number
+    padding ("Show 7" and "Show 07" share one), so the range is also checked
+    against the exact folder names.
     """
     where, args = "library_id = ? AND missing_since IS NULL", [library_id]
     if rel_dir:
@@ -157,6 +154,16 @@ def browse_all(conn: sqlite3.Connection, library_id: int, lib: sqlite3.Row, rel_
         dirs_low, dirs_high = descendants(rel_dir)
         where += " AND path_key >= ? AND path_key < ? AND (parent_dir = ? OR (parent_dir >= ? AND parent_dir < ?))"
         args += [low, low[:-1] + "\x02", rel_dir, dirs_low, dirs_high]
+    return where, args
+
+
+def browse_all(conn: sqlite3.Connection, library_id: int, lib: sqlite3.Row, rel_dir: str,
+               limit: int, offset: int) -> dict:
+    """One page of every video at or below `rel_dir`, sorted by its path in the
+    library (file name included), naturally, and paged from the path_key index.
+    There's no other sort: the cards show that path, so the order is the one on screen.
+    """
+    where, args = _all_below(library_id, rel_dir)
     total = conn.execute(f"SELECT COUNT(*) FROM media_items WHERE {where}", args).fetchone()[0]
     if rel_dir and not total:
         raise NotFound("Folder not found.")
@@ -177,6 +184,32 @@ def browse_all(conn: sqlite3.Connection, library_id: int, lib: sqlite3.Row, rel_
         "offset": offset,
         "limit": limit,
     }
+
+
+def neighbors(conn: sqlite3.Connection, library_id: int, rel_dir: str | None, item_uid: str) -> dict:
+    """Where a video is in the "Show all" list of `rel_dir`, for the prev/next
+    buttons on its page: its position (from 1), the list's length, and the videos
+    just before and after it (None at either end). Each is one step along the
+    path_key index. NotFound if the video isn't in that list (any more).
+    """
+    rel_dir = clean_dir(rel_dir)
+    where, args = _all_below(library_id, rel_dir)
+    here = conn.execute(f"SELECT path_key FROM media_items WHERE {where} AND uid = ?", (*args, item_uid)).fetchone()
+    if here is None:
+        raise NotFound("That video isn't in this list.")
+    key = here["path_key"]
+
+    def step(op: str, direction: str) -> dict | None:
+        row = conn.execute(
+            f"SELECT uid, title, rel_path FROM media_items WHERE {where} AND path_key {op} ? "
+            f"ORDER BY path_key {direction} LIMIT 1",
+            (*args, key),
+        ).fetchone()
+        return {"id": row["uid"], "title": row["title"], "rel_path": row["rel_path"]} if row else None
+
+    before = conn.execute(f"SELECT COUNT(*) FROM media_items WHERE {where} AND path_key < ?", (*args, key)).fetchone()[0]
+    total = conn.execute(f"SELECT COUNT(*) FROM media_items WHERE {where}", args).fetchone()[0]
+    return {"position": before + 1, "total": total, "prev": step("<", "DESC"), "next": step(">", "ASC")}
 
 
 def item_detail(conn: sqlite3.Connection, item_uid: str) -> dict:

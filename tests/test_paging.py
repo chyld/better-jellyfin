@@ -145,6 +145,43 @@ def test_show_all_hides_missing_videos(conn, media_root, fake_probe):
     assert [i["title"] for i in browse(conn, lib, "A", show_all=True)["items"]] == ["a"]
 
 
+def neighbors(client, lib, item, path="Many"):
+    return client.get(f"/api/libraries/{lib}/neighbors", params={"path": path, "item": item})
+
+
+def test_neighbors_step_through_the_show_all_list(client, big):
+    items = get(client, big, all="true")["items"]
+    ids = [i["id"] for i in items]
+    first = neighbors(client, big, ids[0]).json()
+    assert first["position"] == 1 and first["total"] == 26 and first["prev"] is None
+    assert first["next"] == {"id": ids[1], "title": items[1]["title"], "rel_path": items[1]["rel_path"]}
+    middle = neighbors(client, big, ids[12]).json()
+    assert middle["position"] == 13 and middle["prev"]["id"] == ids[11] and middle["next"]["id"] == ids[13]
+    last = neighbors(client, big, ids[-1]).json()
+    assert last["position"] == 26 and last["next"] is None and last["prev"]["id"] == ids[-2]
+
+
+def test_neighbors_of_a_video_outside_the_list(client, big):
+    deep = next(i for i in get(client, big, all="true")["items"] if i["rel_path"] == "Many/Sub/deep.mp4")
+    assert neighbors(client, big, deep["id"], path="Many/Sub").json()["total"] == 1
+    outside = get(client, big, all="true")["items"][0]["id"]
+    assert neighbors(client, big, outside, path="Many/Sub").status_code == 404   # not below that folder
+    assert neighbors(client, big, "nope").status_code == 404
+    assert neighbors(client, big, outside, path="").json()["total"] == 26       # the library's top
+
+
+def test_neighbors_skip_missing_videos(conn, media_root, fake_probe):
+    from reel.browse import neighbors as around
+    make_files(media_root, "A/1.mp4", "A/2.mp4", "A/3.mp4")
+    lib = create_library(conn, media_root, "Media", str(media_root))
+    scan_library(conn, lib, probe_fn=fake_probe)
+    (media_root / "A/2.mp4").unlink()
+    scan_library(conn, lib, probe_fn=fake_probe)
+    ids = {i["rel_path"]: i["id"] for i in browse(conn, lib, "A", show_all=True)["items"]}
+    result = around(conn, lib, "A", ids["A/1.mp4"])
+    assert result["next"]["rel_path"] == "A/3.mp4" and result["total"] == 2
+
+
 # ---- folders ---------------------------------------------------------------------------
 
 

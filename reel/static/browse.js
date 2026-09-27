@@ -111,6 +111,29 @@ function folderArtUrl(libraryId, path, version) {
   return version ? `${url}&v=${encodeURIComponent(version)}` : url;
 }
 
+/**
+ * A video opened from a folder's "Show all" list carries that folder in its URL
+ * (`?all=<folder>`, empty for a library's top), so its page can offer prev/next.
+ * fromList() reads it from a route's query ("?all=…"): the folder, or null.
+ */
+export function fromList(query) {
+  const params = new URLSearchParams(query?.slice(1));
+  return params.has("all") ? params.get("all") : null;
+}
+
+const listParam = (list) => (list === null ? "" : `all=${encodeURIComponent(list)}`);
+
+/** A video's page, remembering the "Show all" list it's in (`list`, or null). */
+export function itemUrl(id, list = null) {
+  return `#/item/${id}${list === null ? "" : `?${listParam(list)}`}`;
+}
+
+/** The player, from `t` seconds, remembering the list the video's in. */
+function playUrl(id, list, t = 0) {
+  const query = [t ? `t=${t}` : "", listParam(list)].filter(Boolean).join("&");
+  return `#/play/${id}${query ? `?${query}` : ""}`;
+}
+
 /** A folder's page; with `all`, every video in it and its subfolders ("Show all"). */
 function folderUrl(libraryId, path, { all = false } = {}) {
   return `#/library/${libraryId}${path ? "/" + encodePath(path) : ""}${all ? "?all" : ""}`;
@@ -215,7 +238,7 @@ export async function renderTag(view, tagId) {
 /** The video's marks (saved in the player): each opens the player there. Deleting
  *  needs "Edit" first, so a stray tap can't remove one. Nothing shows when there
  *  are none. */
-function marksSection(item) {
+function marksSection(item, inList) {
   let marks = item.marks || [];
   let editing = false;
   const list = h("ul", { class: "tag-cloud marks" });
@@ -258,7 +281,7 @@ function marksSection(item) {
         h(
           "li",
           { class: "chip" },
-          h("a", { href: `#/play/${item.id}?t=${mark.time}`, title: `Play from ${label(mark.time)}` }, label(mark.time)),
+          h("a", { href: playUrl(item.id, inList, mark.time), title: `Play from ${label(mark.time)}` }, label(mark.time)),
           editing &&
             h(
               "button",
@@ -377,17 +400,19 @@ function tagEditor(item) {
 
 // ---- Folder -------------------------------------------------------------------
 
-/** A video's card. In "Show all" lists (`withPath`) it also shows the video's path
- *  in the library, file name included: what the list is sorted by. */
-function videoCard(item, withPath = false) {
+/** A video's card. In a "Show all" list (`list`: its folder) it also shows the
+ *  video's path in the library, file name included (what the list is sorted by),
+ *  and opens the video's page with prev/next through the list. */
+function videoCard(item, list = null) {
   const meta = [item.year, formatDuration(item.duration)].filter(Boolean).join(" · ");
+  const withPath = list !== null;
   return h(
     "li",
     { class: "card-wrap" },
     videoImageButton(item),
     h(
       "a",
-      { class: "card", href: `#/item/${item.id}`, title: item.title },
+      { class: "card", href: itemUrl(item.id, list), title: item.title },
       artBox({ kind: "video", shape: "landscape", src: videoImageSrc(item) }),
       h("div", { class: "label" }, item.title),
       withPath && h("div", { class: "sub where" }, item.rel_path),
@@ -495,7 +520,7 @@ export async function renderBrowse(view, libraryId, path, showAll = false) {
   const showItems = () => {
     if (closed) return;
     grid?.stop();
-    grid = pagedVideoGrid(data, async (offset) => api("GET", url(offset)), (item) => videoCard(item, showAll));
+    grid = pagedVideoGrid(data, async (offset) => api("GET", url(offset)), (item) => videoCard(item, showAll ? path : null));
     itemsHolder.replaceChildren(grid.element);
   };
   showItems();
@@ -589,11 +614,53 @@ function codecLabel(codec) {
   return codec ? names[codec] || codec : "none";
 }
 
-export async function renderItem(view, itemId) {
+/**
+ * Prev / next through the "Show all" list a video was opened from, and where it
+ * is in it. They replace this page in the history, so Back returns to the list
+ * however many steps were taken.
+ */
+function listNav(around, list) {
+  const step = (video, label, text) => {
+    if (!video) return h("button", { type: "button", class: "btn small", disabled: true }, text);
+    const href = itemUrl(video.id, list);
+    return h(
+      "a",
+      {
+        class: "btn small",
+        href,
+        title: video.rel_path,
+        "aria-label": `${label}: ${video.rel_path}`,
+        onclick: (event) => {
+          event.preventDefault();
+          location.replace(href);
+        },
+      },
+      text,
+    );
+  };
+  return h(
+    "nav",
+    { class: "list-nav", "aria-label": "Show all list" },
+    step(around.prev, "Previous video", "‹ Prev"),
+    h("span", { class: "list-pos" }, `${around.position} of ${around.total}`),
+    step(around.next, "Next video", "Next ›"),
+  );
+}
+
+/** A video's page. `list`: the folder whose "Show all" list it was opened from
+ *  (prev/next buttons), or null. */
+export async function renderItem(view, itemId, list = null) {
   const caps = await capabilities();
-  const [item, plan] = await Promise.all([
-    api("GET", `/api/items/${itemId}`),
+  const itemRequest = api("GET", `/api/items/${itemId}`);
+  const [item, plan, around] = await Promise.all([
+    itemRequest,
     api("GET", `/api/items/${itemId}/plan?${capsQuery(caps)}&hls_support=${hlsSupport()}`),
+    // Not in that list (any more)? Then the page just has no prev/next.
+    list === null
+      ? null
+      : itemRequest
+          .then((it) => api("GET", `/api/libraries/${it.library_id}/neighbors?path=${encodeURIComponent(list)}&item=${itemId}`))
+          .catch(() => null),
   ]);
   // The mode for this browser (it may play more than a typical one, e.g. HEVC).
   item.play_mode = plan.mode;
@@ -612,7 +679,7 @@ export async function renderItem(view, itemId) {
         ),
   ];
   const playable = item.play_mode !== "unsupported" && !item.missing;
-  const playUrl = `#/play/${item.id}`;
+  const playHref = playUrl(item.id, around ? list : null);
   const facts = [
     ["Length", formatDuration(item.duration) || "unknown"],
     ["Resolution", item.width ? `${item.width} × ${item.height}${item.interlaced ? " (interlaced)" : ""}` : "unknown"],
@@ -625,7 +692,7 @@ export async function renderItem(view, itemId) {
   fill(view,
     // The video's picture, blurred, glowing behind the top of the page.
     image && h("div", { class: "backdrop", style: `background-image:url("${image}")`, "aria-hidden": "true" }),
-    h("div", { class: "page-head" }, crumbs(item.library_id, item.breadcrumbs, { linkLast: true })),
+    h("div", { class: "page-head" }, crumbs(item.library_id, item.breadcrumbs, { linkLast: true }), around && listNav(around, list)),
     h(
       "article",
       { class: "detail" },
@@ -636,7 +703,7 @@ export async function renderItem(view, itemId) {
           src: image,
           alt: item.title,
           tag: playable ? "a" : "div",
-          attrs: playable ? { href: playUrl, "aria-label": `Play ${item.title}` } : {},
+          attrs: playable ? { href: playHref, "aria-label": `Play ${item.title}` } : {},
         },
         playable && h("span", { class: "hero-play" }, "▶"),
       )),
@@ -646,10 +713,10 @@ export async function renderItem(view, itemId) {
         h("h2", {}, item.title),
         h("div", { class: "pills" }, pills),
         playable
-          ? h("a", { class: "btn primary play", href: playUrl }, "▶ Play")
+          ? h("a", { class: "btn primary play", href: playHref }, "▶ Play")
           : h("button", { class: "btn primary play", disabled: true }, "▶ Play"),
         tagEditor(item),
-        marksSection(item),
+        marksSection(item, around ? list : null),
         h("dl", { class: "facts" }, facts.map(([k, v]) => [h("dt", {}, k), h("dd", {}, v)])),
       ),
     ),

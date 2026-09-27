@@ -234,6 +234,11 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
         return browse.browse(conn, library_pk(conn, library_uid), path, sort, limit=limit, offset=offset,
                              show_all=all)
 
+    @app.get("/api/libraries/{library_uid}/neighbors")
+    def list_neighbors(library_uid: str, item: str, path: str = "", conn: sqlite3.Connection = Db):
+        """The videos before and after `item` in the "Show all" list of `path`, and its position."""
+        return browse.neighbors(conn, library_pk(conn, library_uid), path, item)
+
     @app.get("/api/libraries/{library_uid}/folder-art")
     async def get_folder_art(library_uid: str, path: str = "", v: str | None = None):
         """`v` is the picture's version (see the listing): it makes the answer cacheable for good."""

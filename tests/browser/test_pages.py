@@ -78,3 +78,30 @@ def test_a_failed_page_of_videos_offers_a_retry(server, page):
     total = len(server.videos)
     page.wait_for(f"document.querySelectorAll('.grid.videos li').length === {total}", message="all videos")
     assert page.js("document.querySelector('.load-error').hidden")
+
+
+def test_prev_next_through_a_show_all_list(server, page):
+    """A video opened from "Show all" steps through that list; Back then returns to
+    the list, however many steps were taken. Opened any other way: no prev/next."""
+    total = len(server.videos)
+    page.goto(f"{server.base}/#/library/{server.library}")
+    page.wait_for("!!document.querySelector('.grid.videos .card')", message="the folder")
+    first = page.js("document.querySelector('.grid.videos .card').getAttribute('href')")
+    assert "?" not in first                                                   # a plain folder
+    page.js(f"location.hash = '#/library/{server.library}?all'")
+    page.wait_for("!!document.querySelector('.grid.videos .card .where')", message="the show-all list")
+    page.js("document.querySelector('.grid.videos .card').click()")
+    page.wait_for("!!document.querySelector('.list-nav')", message="prev/next")
+    assert page.js("document.querySelector('.list-pos').textContent") == f"1 of {total}"
+    assert page.js("document.querySelector('.list-nav button').disabled")     # no previous
+    page.js("document.querySelector('.list-nav a').click()")                  # Next
+    page.wait_for(f"(document.querySelector('.list-pos') || {{}}).textContent === '2 of {total}'", message="the 2nd")
+    page.js("document.querySelectorAll('.list-nav a')[1].click()")            # Next again
+    page.wait_for(f"(document.querySelector('.list-pos') || {{}}).textContent === '3 of {total}'", message="the 3rd")
+    assert "all=" in page.js("document.querySelector('.btn.play').getAttribute('href')")
+    page.js("history.back()")
+    page.wait_for("location.hash.endsWith('?all') && !!document.querySelector('.grid.videos .card')",
+                  message="back at the list")
+    page.js(f"location.hash = {first!r}")                                      # the same video, directly
+    page.wait_for("!!document.querySelector('.detail')", message="the video's page")
+    assert page.js("document.querySelector('.list-nav')") is None

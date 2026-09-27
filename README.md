@@ -48,7 +48,8 @@ ffmpeg converts on the fly.
 - **Show all videos.** In a folder with subfolders, **Show all videos** flattens it: every video
   in the folder and all its subfolders in one grid, each card showing the video's path in the
   library (file name included), and sorted by that path (naturally, so each folder's videos
-  stay together).
+  stay together). A video opened from that list gets **‹ Prev** / **Next ›** buttons and its
+  place ("12 of 312"); Back returns to the list, however many steps you took.
 - **Playback of everything.** Browser-ready files play directly. Others are repackaged or
   converted live by ffmpeg, starting in about half a second.
 - **A modern player.** A frosted-glass control dock, a gradient seek bar with a time preview,
@@ -177,7 +178,7 @@ permissions. The usual cause is a `./data` that Docker created owned by root.
 | Home | `#/` | Library tiles, and a card for every tag. |
 | Library / folder | `#/library/<library-uuid>/<folder path>` | Subfolders as posters, then videos. Breadcrumbs and a Name/Year sort. |
 | Show all | `#/library/<library-uuid>/<folder path>?all` | Every video in the folder and its subfolders, each with its path (file name included), sorted by that path. **Show folders** goes back. |
-| Video | `#/item/<video-uuid>` | Picture, title, pills (year, length, resolution, play mode), **Play**, tags and file details. |
+| Video | `#/item/<video-uuid>` | Picture, title, pills (year, length, resolution, play mode), **Play**, tags and file details. Opened from a Show all list (`?all=<folder path>`), also prev/next through it. |
 | Player | `#/play/<video-uuid>` | Full-window player. |
 | Tags | `#/tags` | Every tag: set its image, rename or merge, delete. |
 | Tag | `#/tag/<tag-uuid>` | The videos with that tag. |
@@ -613,6 +614,7 @@ JSON over HTTP. Every ID is a UUID. There's no authentication yet (see
 | POST | `/api/libraries/{id}/scan` | Queue a scan (202). |
 | POST | `/api/libraries/scan` | Queue a scan of every library. |
 | GET | `/api/libraries/{id}/browse?path=&sort=name\|year&limit=&offset=&all=` | Subfolders and one page of the videos in a folder (`limit` defaults to 200, at most 500). `total_items` is how many videos the folder has. With `all=true`: no subfolders, and every video in the folder and below it, each with its `rel_path`, sorted by it (`sort` is ignored). |
+| GET | `/api/libraries/{id}/neighbors?path=&item=` | Where video `item` is in the Show all list of `path`: `position`, `total`, and the `prev` / `next` videos (`null` at the ends). 404 if it isn't in that list. |
 | GET | `/api/libraries/{id}/folder-art?path=` | A folder's picture (NAS `folder.<ext>`, else uploaded). |
 | PUT | `/api/libraries/{id}/folder-image?path=` | Upload a folder picture (request body = the image). |
 | POST | `/api/libraries/{id}/folder-image-url?path=` | `{url}`: set a folder picture from a URL. |

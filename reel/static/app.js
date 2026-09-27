@@ -1,4 +1,4 @@
-import { renderBrowse, renderHome, renderItem, renderTag } from "./browse.js";
+import { fromList, itemUrl, renderBrowse, renderHome, renderItem, renderTag } from "./browse.js";
 import { renderManage } from "./manage.js";
 import { renderPlayer, startTime } from "./player.js";
 import { createRouter } from "./router.js";
@@ -15,8 +15,10 @@ const router = createRouter({
     [/^#\/tags$/, (page) => renderTags(page)],
     [/^#\/library\/([0-9a-f-]{36})(?:\/([^?]*))?(\?.*)?$/, (page, uid, path, query) =>
       renderBrowse(page, uid, decodeURIComponent(path || ""), new URLSearchParams(query?.slice(1)).has("all"))],
-    [/^#\/item\/([0-9a-f-]{36})$/, (page, uid) => renderItem(page, uid)],
-    [/^#\/play\/([0-9a-f-]{36})(\?.*)?$/, (page, uid, query) => renderPlayer(page, uid, startTime(query?.slice(1)))],
+    // `?all=<folder>`: opened from that folder's "Show all" list (prev/next buttons).
+    [/^#\/item\/([0-9a-f-]{36})(\?.*)?$/, (page, uid, query) => renderItem(page, uid, fromList(query))],
+    [/^#\/play\/([0-9a-f-]{36})(\?.*)?$/, (page, uid, query) =>
+      renderPlayer(page, uid, startTime(query?.slice(1)), itemUrl(uid, fromList(query)))],
     [/^#\/tag\/([0-9a-f-]{36})$/, (page, uid) => renderTag(page, uid)],
   ],
   // Each visit renders into a fresh element, so a slow page that finishes after
