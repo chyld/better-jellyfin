@@ -6,7 +6,7 @@ import sqlite3
 from pathlib import PurePosixPath
 
 from .catalog import NotFound, clean_dir, descendants, page_bounds
-from .sorting import natural_text, path_key
+from .sorting import folder_range, natural_text
 
 SORTS = ("name", "year")
 
@@ -143,17 +143,12 @@ def browse(
 def _all_below(library_id: int, rel_dir: str) -> tuple[str, list]:
     """SQL for the videos a "Show all" list of `rel_dir` holds: (WHERE clause, its args).
 
-    They're one range of the path_key index, since their keys all start with the
-    folder's key and "\x01" (see sorting.path_key). Keys fold case and number
-    padding ("Show 7" and "Show 07" share one), so the range is also checked
-    against the exact folder names.
+    They're exactly one range of the path_key index (see sorting.folder_range).
     """
     where, args = "library_id = ? AND missing_since IS NULL", [library_id]
     if rel_dir:
-        low = path_key(rel_dir).split("\x00", 1)[0] + "\x01"
-        dirs_low, dirs_high = descendants(rel_dir)
-        where += " AND path_key >= ? AND path_key < ? AND (parent_dir = ? OR (parent_dir >= ? AND parent_dir < ?))"
-        args += [low, low[:-1] + "\x02", rel_dir, dirs_low, dirs_high]
+        where += " AND path_key >= ? AND path_key < ?"
+        args += folder_range(rel_dir)
     return where, args
 
 
@@ -175,7 +170,6 @@ def browse_all(conn: sqlite3.Connection, library_id: int, lib: sqlite3.Row, rel_
         "library": {"id": lib["uid"], "name": lib["name"]},
         "path": rel_dir,
         "breadcrumbs": breadcrumbs(lib["name"], rel_dir),
-        "sort": "path",
         "all": True,
         "folders": [],
         # Each video's path in the library, file name included: what the list is sorted by.
@@ -186,14 +180,17 @@ def browse_all(conn: sqlite3.Connection, library_id: int, lib: sqlite3.Row, rel_
     }
 
 
-def neighbors(conn: sqlite3.Connection, library_id: int, rel_dir: str | None, item_uid: str) -> dict:
-    """Where a video is in the "Show all" list of `rel_dir`, for the prev/next
-    buttons on its page: its position (from 1), the list's length, and the videos
-    just before and after it (None at either end). Each is one step along the
-    path_key index. NotFound if the video isn't in that list (any more).
+def neighbors(conn: sqlite3.Connection, item_uid: str, rel_dir: str | None) -> dict:
+    """Where a video is in the "Show all" list of `rel_dir` (in the video's own
+    library), for the prev/next buttons on its page: its position (from 1), the
+    list's length, and the videos just before and after it (None at either end).
+    Each is one step along the path_key index. NotFound if the video isn't in
+    that list (any more).
     """
-    rel_dir = clean_dir(rel_dir)
-    where, args = _all_below(library_id, rel_dir)
+    item = conn.execute("SELECT library_id FROM media_items WHERE uid = ?", (item_uid,)).fetchone()
+    if item is None:
+        raise NotFound("Video not found.")
+    where, args = _all_below(item["library_id"], clean_dir(rel_dir))
     here = conn.execute(f"SELECT path_key FROM media_items WHERE {where} AND uid = ?", (*args, item_uid)).fetchone()
     if here is None:
         raise NotFound("That video isn't in this list.")

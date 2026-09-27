@@ -234,11 +234,6 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
         return browse.browse(conn, library_pk(conn, library_uid), path, sort, limit=limit, offset=offset,
                              show_all=all)
 
-    @app.get("/api/libraries/{library_uid}/neighbors")
-    def list_neighbors(library_uid: str, item: str, path: str = "", conn: sqlite3.Connection = Db):
-        """The videos before and after `item` in the "Show all" list of `path`, and its position."""
-        return browse.neighbors(conn, library_pk(conn, library_uid), path, item)
-
     @app.get("/api/libraries/{library_uid}/folder-art")
     async def get_folder_art(library_uid: str, path: str = "", v: str | None = None):
         """`v` is the picture's version (see the listing): it makes the answer cacheable for good."""
@@ -249,6 +244,12 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
         item = browse.item_detail(conn, item_uid)
         return {**item, "tags": tags.item_tags(conn, tags.item_pk(conn, item_uid)),
                 "marks": marks.list_marks(conn, item_uid)}
+
+    @app.get("/api/items/{item_uid}/neighbors")
+    def get_neighbors(item_uid: str, path: str = "", conn: sqlite3.Connection = Db):
+        """The videos before and after this one in the "Show all" list of folder `path`
+        (in its library), and its position there."""
+        return browse.neighbors(conn, item_uid, path)
 
     @app.get("/api/items/{item_uid}/marks")
     def get_marks(item_uid: str, conn: sqlite3.Connection = Db):

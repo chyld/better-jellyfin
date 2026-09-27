@@ -567,8 +567,9 @@ data/
   missing videos. Opening a folder reads only that folder's rows, already sorted, one page at a
   time; its subfolders and their counts come from the same index. With 50,000 videos, a library's
   top level answers in under 10 ms. "Show all" lists page the same way from a second key
-  (`path_key`, the full path sorted naturally, with `/` sorting before any other character so a
-  folder's videos stay together).
+  (`path_key`: the full path sorted naturally, folder by folder, with look-alike names such as
+  `Show 7` / `Show 07` kept apart and `/` sorting before any other character, so each folder's
+  videos stay together and are exactly one range of the index).
 - **Users:** there's one built-in local user (`GET /api/me`). Nothing is per-user yet; the table is
   there so that, if login is ever added, per-person data has somewhere to attach.
 
@@ -614,7 +615,6 @@ JSON over HTTP. Every ID is a UUID. There's no authentication yet (see
 | POST | `/api/libraries/{id}/scan` | Queue a scan (202). |
 | POST | `/api/libraries/scan` | Queue a scan of every library. |
 | GET | `/api/libraries/{id}/browse?path=&sort=name\|year&limit=&offset=&all=` | Subfolders and one page of the videos in a folder (`limit` defaults to 200, at most 500). `total_items` is how many videos the folder has. With `all=true`: no subfolders, and every video in the folder and below it, each with its `rel_path`, sorted by it (`sort` is ignored). |
-| GET | `/api/libraries/{id}/neighbors?path=&item=` | Where video `item` is in the Show all list of `path`: `position`, `total`, and the `prev` / `next` videos (`null` at the ends). 404 if it isn't in that list. |
 | GET | `/api/libraries/{id}/folder-art?path=` | A folder's picture (NAS `folder.<ext>`, else uploaded). |
 | PUT | `/api/libraries/{id}/folder-image?path=` | Upload a folder picture (request body = the image). |
 | POST | `/api/libraries/{id}/folder-image-url?path=` | `{url}`: set a folder picture from a URL. |
@@ -627,6 +627,7 @@ JSON over HTTP. Every ID is a UUID. There's no authentication yet (see
 |---|---|---|
 | GET | `/api/items/{id}` | Details: codecs, size, path, breadcrumbs, tags. |
 | GET | `/api/items/{id}/thumb` | The video's picture (landscape JPEG). |
+| GET | `/api/items/{id}/neighbors?path=` | Where the video is in the Show all list of folder `path` (in its library): `position`, `total`, and the `prev` / `next` videos (`null` at the ends). 404 if it isn't in that list. |
 | GET, HEAD | `/api/items/{id}/file` | The original file, with range requests (direct play). |
 | GET | `/api/items/{id}/plan?video=&audio=&hls_support=` | How this browser should play it: `video`/`audio` list the codecs it decodes (e.g. `video=h264,hevc&audio=aac,ac3`), `hls_support` is `native`, `mse` or `none`. Returns the mode, what happens to each track, the delivery (`file`, `progressive`, `hls`), a `note` when more work is done than the codecs alone need, and the URL to load. An empty `video=`/`audio=` means none; leaving one out means a typical browser. |
 | GET | `/api/items/{id}/hls.m3u8?video=&audio=&hls_support=` | The whole video as an HLS playlist of 6-second segments (video converted). 409 if the plan for this browser isn't HLS. |

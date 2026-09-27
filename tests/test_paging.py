@@ -9,7 +9,7 @@ from reel.catalog import MAX_PAGE_SIZE
 from reel.db import connect, init_db
 from reel.libraries import create_library
 from reel.scanner import scan_library
-from reel.sorting import natural_key, parent_dir, path_key, sort_key
+from reel.sorting import folder_range, natural_key, parent_dir, path_key, sort_key
 
 from conftest import make_files
 
@@ -35,6 +35,25 @@ def test_path_key_keeps_each_folder_together_in_natural_order():
     assert sorted(paths, key=path_key) == [
         "A/clip9.mp4", "A/S2/clip2.mp4", "A/S2/clip10.mp4", "A/x.mp4", "A b/y.mp4", "a.mp4", "B/1.mp4",
     ]
+
+
+def test_look_alike_folders_stay_apart():
+    """Names equal once case and padding are folded still sort as separate folders."""
+    paths = ["Show 7/a.mp4", "Show 07/b.mp4", "Show 7/c.mp4", "Show 07/d.mp4", "beach/1.mp4", "Beach/2.mp4",
+             "beach/3.mp4"]
+    assert sorted(paths, key=path_key) == [
+        "Beach/2.mp4", "beach/1.mp4", "beach/3.mp4", "Show 07/b.mp4", "Show 07/d.mp4", "Show 7/a.mp4", "Show 7/c.mp4",
+    ]
+
+
+@pytest.mark.parametrize("folder", ["Show 7", "Show 07", "ΑΣ", "ΟΔΟΣ/Σ", "İstanbul", "ß", "ﬁle", "x" + "9" * 30, "a b"])
+def test_folder_range_holds_exactly_the_videos_below(folder):
+    low, high = folder_range(folder)
+    inside = [f"{folder}/v.mp4", f"{folder}/Σ/ς.mkv", f"{folder}/7/007.avi"]
+    outside = [f"{folder}.mp4", f"{folder} x/v.mp4", f"{folder}0/v.mp4", f"{folder.lower()}X/v.mp4", "Show 7 b/v.mp4",
+               ("show 7" if folder == "Show 7" else "Show 7") + "/v.mp4"]
+    assert all(low <= path_key(p) < high for p in inside)
+    assert not any(low <= path_key(p) < high for p in outside)
 
 
 def test_parent_dir():
@@ -113,7 +132,7 @@ def test_show_all_pages_every_video_below_by_path(client, big):
 def test_show_all_is_always_by_path(client, big):
     """There's no other order for it: sort=year is ignored."""
     by_year = get(client, big, all="true", sort="year")
-    assert by_year["sort"] == "path"
+    assert "sort" not in by_year
     assert [i["rel_path"] for i in by_year["items"]] == [i["rel_path"] for i in get(client, big, all="true")["items"]]
     plain = get(client, big)
     assert plain["all"] is False and "rel_path" not in plain["items"][0]
@@ -136,6 +155,15 @@ def test_show_all_keeps_similar_folders_apart(conn, media_root, fake_probe):
     assert browse(conn, lib, "", show_all=True)["total_items"] == 7
 
 
+def test_show_all_of_the_parent_keeps_look_alike_folders_apart(conn, media_root, fake_probe):
+    make_files(media_root, "P/Show 7/a.mp4", "P/Show 07/b.mp4", "P/Show 7/c.mp4", "P/Show 07/d.mp4")
+    lib = create_library(conn, media_root, "Media", str(media_root))
+    scan_library(conn, lib, probe_fn=fake_probe)
+    assert [i["rel_path"] for i in browse(conn, lib, "P", show_all=True)["items"]] == [
+        "P/Show 07/b.mp4", "P/Show 07/d.mp4", "P/Show 7/a.mp4", "P/Show 7/c.mp4",
+    ]
+
+
 def test_show_all_hides_missing_videos(conn, media_root, fake_probe):
     make_files(media_root, "A/a.mp4", "A/B/b.mp4")
     lib = create_library(conn, media_root, "Media", str(media_root))
@@ -145,29 +173,29 @@ def test_show_all_hides_missing_videos(conn, media_root, fake_probe):
     assert [i["title"] for i in browse(conn, lib, "A", show_all=True)["items"]] == ["a"]
 
 
-def neighbors(client, lib, item, path="Many"):
-    return client.get(f"/api/libraries/{lib}/neighbors", params={"path": path, "item": item})
+def neighbors(client, item, path="Many"):
+    return client.get(f"/api/items/{item}/neighbors", params={"path": path})
 
 
 def test_neighbors_step_through_the_show_all_list(client, big):
     items = get(client, big, all="true")["items"]
     ids = [i["id"] for i in items]
-    first = neighbors(client, big, ids[0]).json()
+    first = neighbors(client, ids[0]).json()
     assert first["position"] == 1 and first["total"] == 26 and first["prev"] is None
     assert first["next"] == {"id": ids[1], "title": items[1]["title"], "rel_path": items[1]["rel_path"]}
-    middle = neighbors(client, big, ids[12]).json()
+    middle = neighbors(client, ids[12]).json()
     assert middle["position"] == 13 and middle["prev"]["id"] == ids[11] and middle["next"]["id"] == ids[13]
-    last = neighbors(client, big, ids[-1]).json()
+    last = neighbors(client, ids[-1]).json()
     assert last["position"] == 26 and last["next"] is None and last["prev"]["id"] == ids[-2]
 
 
 def test_neighbors_of_a_video_outside_the_list(client, big):
     deep = next(i for i in get(client, big, all="true")["items"] if i["rel_path"] == "Many/Sub/deep.mp4")
-    assert neighbors(client, big, deep["id"], path="Many/Sub").json()["total"] == 1
+    assert neighbors(client, deep["id"], path="Many/Sub").json()["total"] == 1
     outside = get(client, big, all="true")["items"][0]["id"]
-    assert neighbors(client, big, outside, path="Many/Sub").status_code == 404   # not below that folder
-    assert neighbors(client, big, "nope").status_code == 404
-    assert neighbors(client, big, outside, path="").json()["total"] == 26       # the library's top
+    assert neighbors(client, outside, path="Many/Sub").status_code == 404   # not below that folder
+    assert neighbors(client, "nope").status_code == 404
+    assert neighbors(client, outside, path="").json()["total"] == 26       # the library's top
 
 
 def test_neighbors_skip_missing_videos(conn, media_root, fake_probe):
@@ -178,7 +206,7 @@ def test_neighbors_skip_missing_videos(conn, media_root, fake_probe):
     (media_root / "A/2.mp4").unlink()
     scan_library(conn, lib, probe_fn=fake_probe)
     ids = {i["rel_path"]: i["id"] for i in browse(conn, lib, "A", show_all=True)["items"]}
-    result = around(conn, lib, "A", ids["A/1.mp4"])
+    result = around(conn, ids["A/1.mp4"], "A")
     assert result["next"]["rel_path"] == "A/3.mp4" and result["total"] == 2
 
 
@@ -282,6 +310,27 @@ def test_upgrade_fills_path_order(tmp_path, monkeypatch):
         "Show/clip10.mp4", "Show/Sub/clip2.mp4"]
 
 
+def test_upgrade_recomputes_path_order_by_folder(tmp_path, monkeypatch):
+    path = tmp_path / "reel.db"
+    monkeypatch.setattr(db, "MIGRATIONS", [m for m in db.MIGRATIONS if m[0] < 10])
+    init_db(path)
+    conn = connect(path)
+    conn.execute("INSERT INTO libraries (uid, name, path) VALUES ('l', 'L', '/m')")
+    for rel in ("P/Show 7/a.mp4", "P/Show 07/b.mp4", "P/Show 7/c.mp4"):
+        # A version 9 key: case and padding folded across the whole path.
+        old = rel.lower().replace("07", "7").replace("/", "\x01") + "\x00" + rel
+        conn.execute("INSERT INTO media_items (uid, library_id, rel_path, title, size, mtime, parent_dir, path_key) "
+                     "VALUES (?, 1, ?, ?, 1, 1, ?, ?)", (rel, rel, rel, parent_dir(rel), old))
+    conn.commit()
+    conn.close()
+    monkeypatch.undo()
+    init_db(path)
+    conn = connect(path)
+    assert columns(conn, "P/Show 7/a.mp4")["path_key"] == path_key("P/Show 7/a.mp4")
+    assert [i["rel_path"] for i in browse(conn, 1, "P", show_all=True)["items"]] == [
+        "P/Show 07/b.mp4", "P/Show 7/a.mp4", "P/Show 7/c.mp4"]
+
+
 def test_browsing_uses_the_index(conn):
     def plan(sql, *args):
         return " ".join(r[3] for r in conn.execute("EXPLAIN QUERY PLAN " + sql, args))
@@ -293,6 +342,5 @@ def test_browsing_uses_the_index(conn):
                  "AND parent_dir < ? AND missing_since IS NULL GROUP BY parent_dir", 1, "A/", "A0")
     assert "media_items_browse" in below and "TEMP B-TREE" not in below
     everything = plan("SELECT * FROM media_items WHERE library_id = ? AND missing_since IS NULL "
-                      "AND path_key >= ? AND path_key < ? AND (parent_dir = ? OR (parent_dir >= ? AND parent_dir < ?)) "
-                      "ORDER BY path_key LIMIT 5", 1, "a\x01", "a\x02", "A", "A/", "A0")
+                      "AND path_key >= ? AND path_key < ? ORDER BY path_key LIMIT 5", 1, *folder_range("A"))
     assert "media_items_paths" in everything and "TEMP B-TREE" not in everything

@@ -509,8 +509,8 @@ function pagedVideoGrid(first, fetchPage, card = (item) => videoCard(item)) {
  *  its subfolders in one list, always sorted by path (so there's no sort menu). */
 export async function renderBrowse(view, libraryId, path, showAll = false) {
   const url = (offset = 0) =>
-    `/api/libraries/${libraryId}/browse?path=${encodeURIComponent(path)}&sort=${getSort()}&offset=${offset}` +
-    (showAll ? "&all=true" : "");
+    `/api/libraries/${libraryId}/browse?path=${encodeURIComponent(path)}&offset=${offset}` +
+    (showAll ? "&all=true" : `&sort=${getSort()}`);
   let data = await api("GET", url());
 
   const itemsHolder = h("div");
@@ -541,7 +541,7 @@ export async function renderBrowse(view, libraryId, path, showAll = false) {
     h("option", { value: "name" }, "Name"),
     h("option", { value: "year" }, "Year"),
   );
-  sortSelect.value = data.sort;
+  if (!showAll) sortSelect.value = data.sort;
 
   const counts = showAll
     ? [data.total_items && `${plural(data.total_items, "video")} in this folder and its subfolders`]
@@ -651,16 +651,11 @@ function listNav(around, list) {
  *  (prev/next buttons), or null. */
 export async function renderItem(view, itemId, list = null) {
   const caps = await capabilities();
-  const itemRequest = api("GET", `/api/items/${itemId}`);
   const [item, plan, around] = await Promise.all([
-    itemRequest,
+    api("GET", `/api/items/${itemId}`),
     api("GET", `/api/items/${itemId}/plan?${capsQuery(caps)}&hls_support=${hlsSupport()}`),
     // Not in that list (any more)? Then the page just has no prev/next.
-    list === null
-      ? null
-      : itemRequest
-          .then((it) => api("GET", `/api/libraries/${it.library_id}/neighbors?path=${encodeURIComponent(list)}&item=${itemId}`))
-          .catch(() => null),
+    list === null ? null : api("GET", `/api/items/${itemId}/neighbors?path=${encodeURIComponent(list)}`).catch(() => null),
   ]);
   // The mode for this browser (it may play more than a typical one, e.g. HEVC).
   item.play_mode = plan.mode;

@@ -28,11 +28,23 @@ def sort_key(title: str, rel_path: str) -> str:
 def path_key(rel_path: str) -> str:
     """How a video sorts by its full path, for "show all" lists.
 
-    "/" becomes "\x01", which sorts before any character in a name, so a folder's
-    videos follow the folder's own name at once ("A/x" before "A b/y"), matching
-    the order folders are listed in. The raw path breaks ties ("Clip" / "clip").
+    Each folder (and the file name) is its natural_text() then its exact name,
+    joined by "\x00"; the parts are joined by "\x01". So:
+    - names compare naturally ("clip2" before "clip10"), and names that differ
+      only in case or number padding ("Show 7" / "Show 07") by their exact text,
+      folder by folder, so such folders never interleave;
+    - "\x01" sorts before any character in a name, so a folder's videos follow
+      its own name at once ("A/x" before "A b/y"), the order folders are listed in;
+    - a folder's videos are exactly the keys starting with its key and "\x01"
+      (see folder_range), and every path's key is different.
     """
-    return natural_text(rel_path).replace("/", "\x01") + "\x00" + rel_path
+    return "\x01".join(natural_text(part) + "\x00" + part for part in rel_path.split("/"))
+
+
+def folder_range(rel_dir: str) -> tuple[str, str]:
+    """The path_key range holding every video at or below a folder: [low, high)."""
+    key = path_key(rel_dir)
+    return key + "\x01", key + "\x02"
 
 
 def parent_dir(rel_path: str) -> str:

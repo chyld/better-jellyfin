@@ -277,6 +277,16 @@ def _v9_path_order(conn: sqlite3.Connection) -> None:
     )
 
 
+def _v10_path_order_by_folder(conn: sqlite3.Connection) -> None:
+    # path_key now breaks ties folder by folder, so "Show 7" and "Show 07" (or
+    # "Beach" and "beach") no longer interleave in a show-all list of their parent.
+    from .sorting import path_key
+
+    rows = conn.execute("SELECT id, rel_path FROM media_items").fetchall()
+    conn.executemany("UPDATE media_items SET path_key = ? WHERE id = ?",
+                     [(path_key(r["rel_path"]), r["id"]) for r in rows])
+
+
 # (version, what it does, function). Append only; functions must not commit.
 MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (2, "fingerprints and probe versions for media items", _v2_identity),
@@ -287,6 +297,7 @@ MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (7, "versions of NAS pictures, so thumbnails are found without the NAS", _v7_picture_versions),
     (8, "marks: spots in a video to jump back to", _v8_marks),
     (9, "index each video's full-path order for show-all lists", _v9_path_order),
+    (10, "full-path order: folders with look-alike names stay apart", _v10_path_order_by_folder),
 ]
 
 
