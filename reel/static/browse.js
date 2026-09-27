@@ -1,5 +1,5 @@
 // Home (library tiles), folder browsing and the video details page.
-import { api, artBox, encodePath, fill, formatDuration, formatSize, h, parseTags, plural, tagError } from "./api.js";
+import { api, artBox, encodePath, fill, formatDuration, formatSize, h, parseTags, pathBelow, plural, tagError } from "./api.js";
 import { openImageDialog } from "./imagedialog.js";
 import { capabilities, capsQuery, hlsSupport } from "./caps.js";
 
@@ -401,8 +401,8 @@ function tagEditor(item) {
 // ---- Folder -------------------------------------------------------------------
 
 /** A video's card. In a "Show all" list (`list`: its folder) it also shows the
- *  video's path in the library, file name included (what the list is sorted by),
- *  and opens the video's page with prev/next through the list. */
+ *  video's path from that folder down, file name included (what the list is
+ *  sorted by), and opens the video's page with prev/next through the list. */
 function videoCard(item, list = null) {
   const meta = [item.year, formatDuration(item.duration)].filter(Boolean).join(" · ");
   const withPath = list !== null;
@@ -415,7 +415,7 @@ function videoCard(item, list = null) {
       { class: "card", href: itemUrl(item.id, list), title: item.title },
       artBox({ kind: "video", shape: "landscape", src: videoImageSrc(item) }),
       h("div", { class: "label" }, item.title),
-      withPath && h("div", { class: "sub where" }, item.rel_path),
+      withPath && h("div", { class: "sub where" }, pathBelow(item.rel_path, list)),
       meta && h("div", { class: "sub" }, meta),
     ),
   );
@@ -628,8 +628,8 @@ function listNav(around, list) {
       {
         class: "btn small",
         href,
-        title: video.rel_path,
-        "aria-label": `${label}: ${video.rel_path}`,
+        title: pathBelow(video.rel_path, list),
+        "aria-label": `${label}: ${pathBelow(video.rel_path, list)}`,
         onclick: (event) => {
           event.preventDefault();
           location.replace(href);

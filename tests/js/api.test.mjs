@@ -38,7 +38,7 @@ class FakeElement {
 }
 globalThis.document = { createElement: (tag) => new FakeElement(tag) };
 
-const { h, fill, artBox, parseTags, tagError, formatDuration, formatSize, encodePath, plural } = await import("../../reel/static/api.js");
+const { h, fill, artBox, parseTags, tagError, formatDuration, formatSize, encodePath, pathBelow, plural } = await import("../../reel/static/api.js");
 
 test("h() adds nested lists of children as elements, not text", () => {
   // Breadcrumbs and the details list build lists of pairs like this.
@@ -146,4 +146,11 @@ test("tagError() explains the length limit", () => {
   const msg = tagError(["x".repeat(51)]);
   assert.match(msg, /up to 50 characters/);
   assert.match(msg, /…/); // long tags are shortened in the message
+});
+
+test("pathBelow shows a path from the Show all folder down", () => {
+  assert.equal(pathBelow("Spicy/europe/001/movie.mp4", "Spicy"), "europe/001/movie.mp4");
+  assert.equal(pathBelow("Spicy/jav/001/movie.mp4", "Spicy/jav"), "001/movie.mp4");
+  assert.equal(pathBelow("Spicy/europe/001/movie.mp4", ""), "Spicy/europe/001/movie.mp4"); // the library's top
+  assert.equal(pathBelow("Spicy/jav/a.mp4", "Spicy/ja"), "Spicy/jav/a.mp4");               // a whole folder name only
 });

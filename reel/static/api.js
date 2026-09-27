@@ -97,6 +97,12 @@ export function encodePath(path) {
   return path.split("/").map(encodeURIComponent).join("/");
 }
 
+/** A video's path as seen from `folder` (both relative to the library): what's
+ *  below it. "" (the library's top) shows the whole path. */
+export function pathBelow(relPath, folder) {
+  return folder && relPath.startsWith(`${folder}/`) ? relPath.slice(folder.length + 1) : relPath;
+}
+
 export function plural(n, word) {
   return `${n} ${word}${n === 1 ? "" : "s"}`;
 }

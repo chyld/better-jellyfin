@@ -90,6 +90,8 @@ def test_prev_next_through_a_show_all_list(server, page):
     assert "?" not in first                                                   # a plain folder
     page.js(f"location.hash = '#/library/{server.library}?all'")
     page.wait_for("!!document.querySelector('.grid.videos .card .where')", message="the show-all list")
+    # At the library's top, a video's path from there is its whole path (the clips sit at the top).
+    assert page.js("document.querySelector('.grid.videos .card .where').textContent") in server.videos
     page.js("document.querySelector('.grid.videos .card').click()")
     page.wait_for("!!document.querySelector('.list-nav')", message="prev/next")
     assert page.js("document.querySelector('.list-pos').textContent") == f"1 of {total}"

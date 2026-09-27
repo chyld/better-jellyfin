@@ -46,8 +46,8 @@ ffmpeg converts on the fly.
   cards. Numbers sort naturally (`clip2` before `clip10`), and videos can be sorted by name or year.
   Big folders stay fast: videos load 200 at a time as you scroll.
 - **Show all videos.** In a folder with subfolders, **Show all videos** flattens it: every video
-  in the folder and all its subfolders in one grid, each card showing the video's path in the
-  library (file name included), and sorted by that path (naturally, so each folder's videos
+  in the folder and all its subfolders in one grid, each card showing the video's path from
+  that folder down (file name included), and sorted by that path (naturally, so each folder's videos
   stay together). A video opened from that list gets **‹ Prev** / **Next ›** buttons and its
   place ("12 of 312"); Back returns to the list, however many steps you took.
 - **Playback of everything.** Browser-ready files play directly. Others are repackaged or
@@ -177,7 +177,7 @@ permissions. The usual cause is a `./data` that Docker created owned by root.
 |---|---|---|
 | Home | `#/` | Library tiles, and a card for every tag. |
 | Library / folder | `#/library/<library-uuid>/<folder path>` | Subfolders as posters, then videos. Breadcrumbs and a Name/Year sort. |
-| Show all | `#/library/<library-uuid>/<folder path>?all` | Every video in the folder and its subfolders, each with its path (file name included), sorted by that path. **Show folders** goes back. |
+| Show all | `#/library/<library-uuid>/<folder path>?all` | Every video in the folder and its subfolders, each with its path from that folder down (file name included), sorted by that path. **Show folders** goes back. |
 | Video | `#/item/<video-uuid>` | Picture, title, pills (year, length, resolution, play mode), **Play**, tags and file details. Opened from a Show all list (`?all=<folder path>`), also prev/next through it. |
 | Player | `#/play/<video-uuid>` | Full-window player. |
 | Tags | `#/tags` | Every tag: set its image, rename or merge, delete. |
