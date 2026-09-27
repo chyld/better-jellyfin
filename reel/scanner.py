@@ -15,7 +15,7 @@ from pathlib import Path
 
 from .db import new_uid
 from .paths import is_inside
-from .sorting import parent_dir, sort_key
+from .sorting import parent_dir, path_key, sort_key
 from .probe import PROBE_VERSION, ProbeError, ProbeResult, probe as ffprobe
 
 VIDEO_EXTENSIONS = {
@@ -403,11 +403,13 @@ def scan_library(
             conn.execute(
                 """
                 UPDATE media_items SET rel_path = ?, title = ?, year = ?, poster_path = ?, poster_rev = ?,
-                    size = ?, mtime = ?, missing_since = NULL, parent_dir = ?, title_key = ?
+                    size = ?, mtime = ?, missing_since = NULL, parent_dir = ?, title_key = ?,
+                    path_key = ?
                 WHERE id = ?
                 """,
                 (video.rel_path, video.title, video.year, video.poster_path, video.poster_rev, video.size,
-                 video.mtime, parent_dir(video.rel_path), sort_key(video.title, video.rel_path), row["id"]),
+                 video.mtime, parent_dir(video.rel_path), sort_key(video.title, video.rel_path),
+                 path_key(video.rel_path), row["id"]),
             )
             del existing[row["rel_path"]]
             existing[video.rel_path] = {**row, "rel_path": video.rel_path, "size": video.size,
@@ -501,8 +503,8 @@ def scan_library(
                     uid, library_id, rel_path, title, year, poster_path, poster_rev, size, mtime,
                     container, video_codec, audio_codec, pix_fmt, width, height,
                     duration, interlaced, probe_error, fingerprint, probe_version, parent_dir, title_key,
-                    scanned_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                    path_key, scanned_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
                 ON CONFLICT (library_id, rel_path) DO UPDATE SET
                     title = excluded.title, year = excluded.year,
                     poster_path = excluded.poster_path, poster_rev = excluded.poster_rev, size = excluded.size,
@@ -514,7 +516,7 @@ def scan_library(
                     probe_error = excluded.probe_error, scanned_at = excluded.scanned_at,
                     fingerprint = excluded.fingerprint, probe_version = excluded.probe_version,
                     parent_dir = excluded.parent_dir, title_key = excluded.title_key,
-                    missing_since = NULL
+                    path_key = excluded.path_key, missing_since = NULL
                 """,
                 (
                     new_uid(), library_id, video.rel_path, video.title, video.year, video.poster_path,
@@ -522,6 +524,7 @@ def scan_library(
                     result.audio_codec, result.pix_fmt, result.width, result.height,
                     result.duration, int(result.interlaced), result.error,
                     fp, PROBE_VERSION, parent_dir(video.rel_path), sort_key(video.title, video.rel_path),
+                    path_key(video.rel_path),
                 ),
             )
             # Commit per file so a long scan never holds the database write lock.

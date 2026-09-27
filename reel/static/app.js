@@ -13,7 +13,8 @@ const router = createRouter({
     [/^#?\/?$/, (page) => renderHome(page)],
     [/^#\/manage$/, (page) => renderManage(page)],
     [/^#\/tags$/, (page) => renderTags(page)],
-    [/^#\/library\/([0-9a-f-]{36})(?:\/(.*))?$/, (page, uid, path) => renderBrowse(page, uid, decodeURIComponent(path || ""))],
+    [/^#\/library\/([0-9a-f-]{36})(?:\/([^?]*))?(\?.*)?$/, (page, uid, path, query) =>
+      renderBrowse(page, uid, decodeURIComponent(path || ""), new URLSearchParams(query?.slice(1)).has("all"))],
     [/^#\/item\/([0-9a-f-]{36})$/, (page, uid) => renderItem(page, uid)],
     [/^#\/play\/([0-9a-f-]{36})(\?.*)?$/, (page, uid, query) => renderPlayer(page, uid, startTime(query?.slice(1)))],
     [/^#\/tag\/([0-9a-f-]{36})$/, (page, uid) => renderTag(page, uid)],

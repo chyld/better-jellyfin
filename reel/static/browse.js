@@ -111,8 +111,9 @@ function folderArtUrl(libraryId, path, version) {
   return version ? `${url}&v=${encodeURIComponent(version)}` : url;
 }
 
-function folderUrl(libraryId, path) {
-  return `#/library/${libraryId}${path ? "/" + encodePath(path) : ""}`;
+/** A folder's page; with `all`, every video in it and its subfolders ("Show all"). */
+function folderUrl(libraryId, path, { all = false } = {}) {
+  return `#/library/${libraryId}${path ? "/" + encodePath(path) : ""}${all ? "?all" : ""}`;
 }
 
 function crumbs(libraryId, breadcrumbs, { linkLast = false } = {}) {
@@ -376,8 +377,11 @@ function tagEditor(item) {
 
 // ---- Folder -------------------------------------------------------------------
 
-function videoCard(item) {
+/** A video's card. `from` (in "Show all" lists) is the folder being shown: videos
+ *  from its subfolders say which one they're in. */
+function videoCard(item, from) {
   const meta = [item.year, formatDuration(item.duration)].filter(Boolean).join(" · ");
+  const where = from !== undefined && item.folder !== from ? item.folder.slice(from ? from.length + 1 : 0) : "";
   return h(
     "li",
     { class: "card-wrap" },
@@ -387,6 +391,7 @@ function videoCard(item) {
       { class: "card", href: `#/item/${item.id}`, title: item.title },
       artBox({ kind: "video", shape: "landscape", src: videoImageSrc(item) }),
       h("div", { class: "label" }, item.title),
+      where && h("div", { class: "sub where", title: item.folder }, where),
       meta && h("div", { class: "sub" }, meta),
     ),
   );
@@ -414,10 +419,11 @@ function folderCard(libraryId, folder) {
 /**
  * A grid of videos that loads the next page as you near its end.
  * `first` is the first page ({items, total_items}); fetchPage(offset) gets the next.
+ * `card` makes each video's card.
  * Returns { element, stop } — call stop() when leaving the page.
  */
-function pagedVideoGrid(first, fetchPage) {
-  const list = h("ul", { class: "grid videos" }, first.items.map(videoCard));
+function pagedVideoGrid(first, fetchPage, card = (item) => videoCard(item)) {
+  const list = h("ul", { class: "grid videos" }, first.items.map(card));
   const sentinel = h("div", { class: "load-more", "aria-hidden": "true" });
   const failure = h("p", { class: "load-error", role: "status", hidden: true });
   let loaded = first.items.length;
@@ -440,7 +446,7 @@ function pagedVideoGrid(first, fetchPage) {
         return;
       }
       if (stopped) return;
-      list.append(...page.items.map(videoCard));
+      list.append(...page.items.map(card));
       loaded += page.items.length;
       total = page.total_items ?? total;
       if (!page.items.length) total = loaded;
@@ -475,9 +481,12 @@ function pagedVideoGrid(first, fetchPage) {
   };
 }
 
-export async function renderBrowse(view, libraryId, path) {
+/** A folder: its subfolders and videos, or with `showAll`, every video in it and
+ *  its subfolders in one list, sorted by full path. */
+export async function renderBrowse(view, libraryId, path, showAll = false) {
   const url = (offset = 0) =>
-    `/api/libraries/${libraryId}/browse?path=${encodeURIComponent(path)}&sort=${getSort()}&offset=${offset}`;
+    `/api/libraries/${libraryId}/browse?path=${encodeURIComponent(path)}&sort=${getSort()}&offset=${offset}` +
+    (showAll ? "&all=true" : "");
   let data = await api("GET", url());
 
   const itemsHolder = h("div");
@@ -487,7 +496,7 @@ export async function renderBrowse(view, libraryId, path) {
   const showItems = () => {
     if (closed) return;
     grid?.stop();
-    grid = pagedVideoGrid(data, async (offset) => api("GET", url(offset)));
+    grid = pagedVideoGrid(data, async (offset) => api("GET", url(offset)), (item) => videoCard(item, showAll ? path : undefined));
     itemsHolder.replaceChildren(grid.element);
   };
   showItems();
@@ -505,24 +514,44 @@ export async function renderBrowse(view, libraryId, path) {
         showItems();
       },
     },
-    h("option", { value: "name" }, "Name"),
+    // A "Show all" list sorts by full path, so each folder's videos stay together.
+    h("option", { value: "name" }, showAll ? "Path" : "Name"),
     h("option", { value: "year" }, "Year"),
   );
   sortSelect.value = data.sort;
 
-  const counts = [
-    data.folders.length && plural(data.folders.length, "folder"),
-    data.total_items && plural(data.total_items, "video"),
-  ].filter(Boolean);
+  const counts = showAll
+    ? [data.total_items && `${plural(data.total_items, "video")} in this folder and its subfolders`]
+    : [
+        data.folders.length && plural(data.folders.length, "folder"),
+        data.total_items && plural(data.total_items, "video"),
+      ];
+  // Only worth offering where there are subfolders to flatten.
+  const allToggle =
+    (showAll || data.folders.length > 0) &&
+    h(
+      "a",
+      {
+        class: "btn small",
+        href: folderUrl(libraryId, path, { all: !showAll }),
+        title: showAll ? "Back to this folder's subfolders and videos" : "Every video in this folder and its subfolders, in one list",
+      },
+      showAll ? "Show folders" : "Show all videos",
+    );
 
   fill(view,
     h(
       "div",
       { class: "page-head" },
       crumbs(libraryId, data.breadcrumbs),
-      data.total_items > 1 && h("label", { class: "sort" }, "Sort ", sortSelect),
+      h(
+        "div",
+        { class: "head-tools" },
+        allToggle,
+        data.total_items > 1 && h("label", { class: "sort" }, "Sort ", sortSelect),
+      ),
     ),
-    h("p", { class: "summary" }, counts.join(" · ") || "This folder is empty."),
+    h("p", { class: "summary" }, counts.filter(Boolean).join(" · ") || "This folder is empty."),
     data.folders.length > 0 &&
       h("ul", { class: "grid folders" }, data.folders.map((f) => folderCard(libraryId, f))),
     data.total_items > 0 && itemsHolder,

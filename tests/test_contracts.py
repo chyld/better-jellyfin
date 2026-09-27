@@ -32,7 +32,7 @@ def test_live_schema(tmp_path):
         "media_items": ["id", "uid", "library_id", "rel_path", "title", "year", "poster_path", "size", "mtime",
                         "container", "video_codec", "audio_codec", "pix_fmt", "width", "height", "duration",
                         "interlaced", "probe_error", "custom_image", "missing_since", "scanned_at", "fingerprint",
-                        "probe_version", "parent_dir", "title_key", "poster_rev"],
+                        "probe_version", "parent_dir", "title_key", "poster_rev", "path_key"],
         "tags": ["id", "uid", "name", "created_at", "image_version"],
         "item_tags": ["item_id", "tag_id", "added_at"],
         "folder_images": ["uid", "library_id", "rel_dir", "version"],
@@ -41,7 +41,7 @@ def test_live_schema(tmp_path):
         "marks": ["id", "uid", "item_id", "seconds", "created_at"],
     }
     # Browsing, tag order, move detection and the one local user depend on these.
-    assert indexes == {"media_items_browse", "item_tags_order", "item_tags_tag", "media_items_fingerprint",
+    assert indexes == {"media_items_browse", "media_items_paths", "item_tags_order", "item_tags_tag", "media_items_fingerprint",
                        "users_one_local", "marks_item"}
 
 

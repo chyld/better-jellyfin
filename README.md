@@ -45,6 +45,9 @@ ffmpeg converts on the fly.
 - **Browsing.** Libraries and folders appear as movie-poster cards and videos as landscape
   cards. Numbers sort naturally (`clip2` before `clip10`), and videos can be sorted by name or year.
   Big folders stay fast: videos load 200 at a time as you scroll.
+- **Show all videos.** In a folder with subfolders, **Show all videos** flattens it: every video
+  in the folder and all its subfolders in one grid, sorted by full path (naturally, so each
+  folder's videos stay together), with each card saying which subfolder it's from.
 - **Playback of everything.** Browser-ready files play directly. Others are repackaged or
   converted live by ffmpeg, starting in about half a second.
 - **A modern player.** A frosted-glass control dock, a gradient seek bar with a time preview,
@@ -172,6 +175,7 @@ permissions. The usual cause is a `./data` that Docker created owned by root.
 |---|---|---|
 | Home | `#/` | Library tiles, and a card for every tag. |
 | Library / folder | `#/library/<library-uuid>/<folder path>` | Subfolders as posters, then videos. Breadcrumbs and a Name/Year sort. |
+| Show all | `#/library/<library-uuid>/<folder path>?all` | Every video in the folder and its subfolders, by full path (or year). **Show folders** goes back. |
 | Video | `#/item/<video-uuid>` | Picture, title, pills (year, length, resolution, play mode), **Play**, tags and file details. |
 | Player | `#/play/<video-uuid>` | Full-window player. |
 | Tags | `#/tags` | Every tag: set its image, rename or merge, delete. |
@@ -560,7 +564,9 @@ data/
   title with numbers zero-padded so text order is natural order), under one index that skips
   missing videos. Opening a folder reads only that folder's rows, already sorted, one page at a
   time; its subfolders and their counts come from the same index. With 50,000 videos, a library's
-  top level answers in under 10 ms.
+  top level answers in under 10 ms. "Show all" lists page the same way from a second key
+  (`path_key`, the full path sorted naturally, with `/` sorting before any other character so a
+  folder's videos stay together).
 - **Users:** there's one built-in local user (`GET /api/me`). Nothing is per-user yet; the table is
   there so that, if login is ever added, per-person data has somewhere to attach.
 
@@ -605,7 +611,7 @@ JSON over HTTP. Every ID is a UUID. There's no authentication yet (see
 | DELETE | `/api/libraries/{id}` | Remove from Reel (409 while scanning). Files untouched. |
 | POST | `/api/libraries/{id}/scan` | Queue a scan (202). |
 | POST | `/api/libraries/scan` | Queue a scan of every library. |
-| GET | `/api/libraries/{id}/browse?path=&sort=name\|year&limit=&offset=` | Subfolders and one page of the videos in a folder (`limit` defaults to 200, at most 500). `total_items` is how many videos the folder has. |
+| GET | `/api/libraries/{id}/browse?path=&sort=name\|year&limit=&offset=&all=` | Subfolders and one page of the videos in a folder (`limit` defaults to 200, at most 500). `total_items` is how many videos the folder has. With `all=true`: no subfolders, and every video in the folder and below it, by full path (`sort=name`) or year, each with its `folder`. |
 | GET | `/api/libraries/{id}/folder-art?path=` | A folder's picture (NAS `folder.<ext>`, else uploaded). |
 | PUT | `/api/libraries/{id}/folder-image?path=` | Upload a folder picture (request body = the image). |
 | POST | `/api/libraries/{id}/folder-image-url?path=` | `{url}`: set a folder picture from a URL. |

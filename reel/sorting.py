@@ -25,6 +25,16 @@ def sort_key(title: str, rel_path: str) -> str:
     return natural_text(title) + "\x00" + natural_text(rel_path)
 
 
+def path_key(rel_path: str) -> str:
+    """How a video sorts by its full path, for "show all" lists.
+
+    "/" becomes "\x01", which sorts before any character in a name, so a folder's
+    videos follow the folder's own name at once ("A/x" before "A b/y"), matching
+    the order folders are listed in. The raw path breaks ties ("Clip" / "clip").
+    """
+    return natural_text(rel_path).replace("/", "\x01") + "\x00" + rel_path
+
+
 def parent_dir(rel_path: str) -> str:
     """The folder a video sits in, relative to its library ('' at the top)."""
     return rel_path.rsplit("/", 1)[0] if "/" in rel_path else ""

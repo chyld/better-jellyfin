@@ -6,7 +6,7 @@ import sqlite3
 from pathlib import PurePosixPath
 
 from .catalog import NotFound, clean_dir, descendants, page_bounds
-from .sorting import natural_text
+from .sorting import natural_text, path_key
 
 SORTS = ("name", "year")
 
@@ -31,6 +31,13 @@ ORDER_BY = {
     "year": "year IS NULL, year, title_key",
 }
 
+# "Show all" lists sort by full path instead of name, so each folder's videos
+# stay together.
+ALL_ORDER_BY = {
+    "name": "path_key",
+    "year": "year IS NULL, year, path_key",
+}
+
 
 def breadcrumbs(library_name: str, rel_dir: str) -> list[dict]:
     crumbs = [{"name": library_name, "path": ""}]
@@ -48,6 +55,7 @@ def browse(
     *,
     limit: int | None = None,
     offset: int | None = None,
+    show_all: bool = False,
 ) -> dict:
     """The subfolders and (one page of) videos directly inside `rel_dir` of a library.
 
@@ -56,6 +64,9 @@ def browse(
     are the first path segment of every parent_dir below it, with video counts.
     Only folders that (somewhere below them) contain videos are listed.
     `has_art` says whether a folder has its own folder.<ext> preview.
+
+    With `show_all`, it's instead every video in the folder and all its subfolders
+    (and no folders), in full-path order: see browse_all().
     """
     lib = conn.execute("SELECT uid, name FROM libraries WHERE id = ?", (library_id,)).fetchone()
     if lib is None:
@@ -64,6 +75,8 @@ def browse(
     if sort not in SORTS:
         sort = "name"
     limit, offset = page_bounds(limit, offset)
+    if show_all:
+        return browse_all(conn, library_id, lib, rel_dir, sort, limit, offset)
 
     # Videos a scan couldn't find any more are hidden (kept for a grace period).
     here = "library_id = ? AND parent_dir = ? AND missing_since IS NULL"
@@ -125,8 +138,46 @@ def browse(
         "path": rel_dir,
         "breadcrumbs": breadcrumbs(lib["name"], rel_dir),
         "sort": sort,
+        "all": False,
         "folders": folder_list,
         "items": [item_out(r) for r in rows],
+        "total_items": total,
+        "offset": offset,
+        "limit": limit,
+    }
+
+
+def browse_all(conn: sqlite3.Connection, library_id: int, lib: sqlite3.Row, rel_dir: str, sort: str,
+               limit: int, offset: int) -> dict:
+    """One page of every video at or below `rel_dir`, sorted by full path.
+
+    Paged from the path_key index: a folder's videos are one range of it, since
+    their keys all start with the folder's key and "\x01" (see sorting.path_key).
+    Keys fold case and number padding ("Show 7" and "Show 07" share one), so the
+    range is also checked against the exact folder names.
+    """
+    where, args = "library_id = ? AND missing_since IS NULL", [library_id]
+    if rel_dir:
+        low = path_key(rel_dir).split("\x00", 1)[0] + "\x01"
+        dirs_low, dirs_high = descendants(rel_dir)
+        where += " AND path_key >= ? AND path_key < ? AND (parent_dir = ? OR (parent_dir >= ? AND parent_dir < ?))"
+        args += [low, low[:-1] + "\x02", rel_dir, dirs_low, dirs_high]
+    total = conn.execute(f"SELECT COUNT(*) FROM media_items WHERE {where}", args).fetchone()[0]
+    if rel_dir and not total:
+        raise NotFound("Folder not found.")
+    rows = conn.execute(
+        f"SELECT * FROM media_items WHERE {where} ORDER BY {ALL_ORDER_BY[sort]} LIMIT ? OFFSET ?",
+        (*args, limit, offset),
+    ).fetchall()
+    return {
+        "library": {"id": lib["uid"], "name": lib["name"]},
+        "path": rel_dir,
+        "breadcrumbs": breadcrumbs(lib["name"], rel_dir),
+        "sort": sort,
+        "all": True,
+        "folders": [],
+        # Where each video is, below the library: the cards say which folder it came from.
+        "items": [{**item_out(r), "folder": r["parent_dir"]} for r in rows],
         "total_items": total,
         "offset": offset,
         "limit": limit,

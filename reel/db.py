@@ -263,6 +263,20 @@ def _v8_marks(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX marks_item ON marks (item_id, seconds)")
 
 
+def _v9_path_order(conn: sqlite3.Connection) -> None:
+    # "Show all" lists every video below a folder in full-path order, one page at a
+    # time; the key is stored and indexed like title_key (see sorting.path_key).
+    from .sorting import path_key
+
+    conn.execute("ALTER TABLE media_items ADD COLUMN path_key TEXT NOT NULL DEFAULT ''")
+    rows = conn.execute("SELECT id, rel_path FROM media_items").fetchall()
+    conn.executemany("UPDATE media_items SET path_key = ? WHERE id = ?",
+                     [(path_key(r["rel_path"]), r["id"]) for r in rows])
+    conn.execute(
+        "CREATE INDEX media_items_paths ON media_items (library_id, path_key) WHERE missing_since IS NULL"
+    )
+
+
 # (version, what it does, function). Append only; functions must not commit.
 MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (2, "fingerprints and probe versions for media items", _v2_identity),
@@ -272,6 +286,7 @@ MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (6, "index each video's folder and name order for fast browsing", _v6_folder_index),
     (7, "versions of NAS pictures, so thumbnails are found without the NAS", _v7_picture_versions),
     (8, "marks: spots in a video to jump back to", _v8_marks),
+    (9, "index each video's full-path order for show-all lists", _v9_path_order),
 ]
 
 

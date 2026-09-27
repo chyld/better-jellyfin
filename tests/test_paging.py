@@ -9,7 +9,7 @@ from reel.catalog import MAX_PAGE_SIZE
 from reel.db import connect, init_db
 from reel.libraries import create_library
 from reel.scanner import scan_library
-from reel.sorting import natural_key, parent_dir, sort_key
+from reel.sorting import natural_key, parent_dir, path_key, sort_key
 
 from conftest import make_files
 
@@ -28,6 +28,13 @@ def test_huge_numbers_still_sort():
 
 def test_sort_key_breaks_ties_by_path():
     assert sort_key("a", "x/a.mp4") < sort_key("a", "y/a.mp4")
+
+
+def test_path_key_keeps_each_folder_together_in_natural_order():
+    paths = ["A b/y.mp4", "A/x.mp4", "A/S2/clip10.mp4", "A/S2/clip2.mp4", "a.mp4", "B/1.mp4", "A/clip9.mp4"]
+    assert sorted(paths, key=path_key) == [
+        "A/clip9.mp4", "A/S2/clip2.mp4", "A/S2/clip10.mp4", "A/x.mp4", "A b/y.mp4", "a.mp4", "B/1.mp4",
+    ]
 
 
 def test_parent_dir():
@@ -90,6 +97,53 @@ def test_tag_pages(client, big):
     assert [i["title"] for i in first["items"] + rest["items"]] == [i["title"] for i in items[:7]]
 
 
+def test_show_all_pages_every_video_below_by_path(client, big):
+    seen, offset = [], 0
+    while True:
+        page = get(client, big, all="true", limit=10, offset=offset)
+        assert page["all"] is True and page["folders"] == [] and page["total_items"] == 26
+        if not page["items"]:
+            break
+        seen += [(i["folder"], i["title"]) for i in page["items"]]
+        offset += len(page["items"])
+    # "Many/Sub/deep.mp4" (titled after its folder, as a lone video) sorts by its path: after
+    # clip1..clip25, since "sub" > "clip" once case is folded.
+    assert seen == [("Many", f"clip{n}") for n in range(1, 26)] + [("Many/Sub", "Sub")]
+
+
+def test_show_all_by_year_and_plain_browse_says_so(client, big):
+    assert get(client, big, all="true", sort="year")["total_items"] == 26
+    assert get(client, big)["all"] is False
+
+
+def test_show_all_at_the_library_top_and_missing_folders(client, big):
+    top = client.get(f"/api/libraries/{big}/browse", params={"all": "true"}).json()
+    assert top["total_items"] == 26 and top["breadcrumbs"] == [{"name": "Media", "path": ""}]
+    assert client.get(f"/api/libraries/{big}/browse", params={"path": "Nope", "all": "true"}).status_code == 404
+
+
+def test_show_all_keeps_similar_folders_apart(conn, media_root, fake_probe):
+    """Keys fold case and number padding: "Show 7" must still not list "Show 07"'s videos."""
+    make_files(media_root, "Show 7/a.mp4", "Show 7/S2/clip10.mp4", "Show 7/S2/clip2.mp4", "Show 07/b.mp4",
+               "Show 7 b/c.mp4", "Show 70/d.mp4", "Show 7.mp4")
+    lib = create_library(conn, media_root, "Media", str(media_root))
+    scan_library(conn, lib, probe_fn=fake_probe)
+    page = browse(conn, lib, "Show 7", show_all=True)
+    assert [(i["folder"], i["title"]) for i in page["items"]] == [
+        ("Show 7", "a"), ("Show 7/S2", "clip2"), ("Show 7/S2", "clip10"),
+    ]
+    assert browse(conn, lib, "", show_all=True)["total_items"] == 7
+
+
+def test_show_all_hides_missing_videos(conn, media_root, fake_probe):
+    make_files(media_root, "A/a.mp4", "A/B/b.mp4")
+    lib = create_library(conn, media_root, "Media", str(media_root))
+    scan_library(conn, lib, probe_fn=fake_probe)
+    (media_root / "A/B/b.mp4").unlink()
+    scan_library(conn, lib, probe_fn=fake_probe)
+    assert [i["title"] for i in browse(conn, lib, "A", show_all=True)["items"]] == ["a"]
+
+
 # ---- folders ---------------------------------------------------------------------------
 
 
@@ -119,7 +173,7 @@ def test_folder_with_only_subfolders_is_found(conn, media_root, fake_probe):
 
 
 def columns(conn, rel_path):
-    r = conn.execute("SELECT parent_dir, title_key, title FROM media_items WHERE rel_path = ?",
+    r = conn.execute("SELECT parent_dir, title_key, path_key, title FROM media_items WHERE rel_path = ?",
                      (rel_path,)).fetchone()
     return dict(r) if r else None
 
@@ -131,6 +185,7 @@ def test_scan_fills_folder_and_order(conn, media_root, fake_probe):
     row = columns(conn, "A/B/Clip 7.mp4")
     assert row["parent_dir"] == "A/B" and row["title_key"] == sort_key(row["title"], "A/B/Clip 7.mp4")
     assert columns(conn, "top.mp4")["parent_dir"] == ""
+    assert row["path_key"] == path_key("A/B/Clip 7.mp4")
 
 
 def test_moved_video_follows_its_folder(conn, media_root, fake_probe):
@@ -144,6 +199,7 @@ def test_moved_video_follows_its_folder(conn, media_root, fake_probe):
     assert scan_library(conn, lib, probe_fn=fake_probe)["moved"] == 1
     row = columns(conn, "New/renamed.mp4")
     assert row["parent_dir"] == "New" and row["title_key"] == sort_key(row["title"], "New/renamed.mp4")
+    assert row["path_key"] == path_key("New/renamed.mp4")
     assert [i["id"] for i in browse(conn, lib, "New")["items"]] and browse(conn, lib, "")["folders"][0]["name"] == "New"
 
 
@@ -169,6 +225,24 @@ def test_upgrade_fills_folder_and_order(tmp_path, monkeypatch):
     assert [f["name"] for f in browse(conn, 1, "")["folders"]] == ["Show"]
 
 
+def test_upgrade_fills_path_order(tmp_path, monkeypatch):
+    path = tmp_path / "reel.db"
+    monkeypatch.setattr(db, "MIGRATIONS", [m for m in db.MIGRATIONS if m[0] < 9])
+    init_db(path)
+    conn = connect(path)
+    conn.execute("INSERT INTO libraries (uid, name, path) VALUES ('l', 'L', '/m')")
+    for rel in ("Show/clip10.mp4", "Show/Sub/clip2.mp4", "loose.mp4"):
+        conn.execute("INSERT INTO media_items (uid, library_id, rel_path, title, size, mtime, parent_dir) "
+                     "VALUES (?, 1, ?, ?, 1, 1, ?)", (rel, rel, rel, parent_dir(rel)))
+    conn.commit()
+    conn.close()
+    monkeypatch.undo()
+    init_db(path)
+    conn = connect(path)
+    assert columns(conn, "loose.mp4")["path_key"] == path_key("loose.mp4")
+    assert [i["folder"] for i in browse(conn, 1, "Show", show_all=True)["items"]] == ["Show", "Show/Sub"]
+
+
 def test_browsing_uses_the_index(conn):
     def plan(sql, *args):
         return " ".join(r[3] for r in conn.execute("EXPLAIN QUERY PLAN " + sql, args))
@@ -179,3 +253,7 @@ def test_browsing_uses_the_index(conn):
     below = plan("SELECT parent_dir, COUNT(*) FROM media_items WHERE library_id = ? AND parent_dir >= ? "
                  "AND parent_dir < ? AND missing_since IS NULL GROUP BY parent_dir", 1, "A/", "A0")
     assert "media_items_browse" in below and "TEMP B-TREE" not in below
+    everything = plan("SELECT * FROM media_items WHERE library_id = ? AND missing_since IS NULL "
+                      "AND path_key >= ? AND path_key < ? AND (parent_dir = ? OR (parent_dir >= ? AND parent_dir < ?)) "
+                      "ORDER BY path_key LIMIT 5", 1, "a\x01", "a\x02", "A", "A/", "A0")
+    assert "media_items_paths" in everything and "TEMP B-TREE" not in everything
