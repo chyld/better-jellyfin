@@ -332,8 +332,8 @@ the database, so **browsing never touches the NAS**.
 ### Playback
 
 The scanner stores **facts** about each file: container, codecs, pixel format, interlacing.
-**How to play it is decided when you press Play** (`reel/plan.py`), from those facts and from what
-*your* browser says it can decode. The browser is asked once per page load
+**How to play it is decided when it's needed** (`reel/plan.py`: when you press Play, and for each
+card in a list), from those facts and from what *your* browser says it can decode. The browser is asked once per page load
 (`MediaCapabilities.decodingInfo()`, falling back to `canPlayType()`). Rules can therefore change
 without a rescan, and a browser that plays more (HEVC on Safari, AC-3 on Edge) gets less
 conversion. **Video and audio are decided separately:**
@@ -346,8 +346,21 @@ conversion. **Video and audio are decided separately:**
 | **transcode** | Video the browser can't play: Xvid/DivX, MPEG-1/2, WMV/VC-1, MJPEG, Cinepak, Sorenson, HEVC (unless the browser plays it), 10-bit H.264, interlaced video | ffmpeg converts the video to H.264 (veryfast, CRF 21); the audio is copied when the browser plays it (e.g. MP3), otherwise converted. |
 | **unsupported** | ffprobe couldn't read it, or there's no video stream | Not playable; the Play button is disabled. |
 
-The video page shows the mode for your browser, and the player shows a **CONVERTING**,
-**CONVERTING AUDIO** or **REPACKAGING** badge.
+The video page shows the mode for your browser as a coloured pill, each video card colours its
+format badge the same way (lists take the same `video=&audio=&hls_support=` as `/plan`, so they
+always agree), and the player shows a **CONVERTING**, **CONVERTING AUDIO** or **REPACKAGING** badge:
+
+| Colour | Modes | |
+|---|---|---|
+| green | direct | played as is |
+| blue | remux, audio | light work: starts fast, full quality |
+| amber | transcode | converted by the server's CPU: slower to start and seek |
+| red | unsupported | can't play |
+
+The format on the badge is the real one ffprobe found (`browse.video_type()`): `mov,mp4,…` is MP4
+(MOV, M4V or 3GP by extension), `mpegts` TS, `avi` AVI, `mpeg` MPG (or VOB), `asf` WMV (or ASF),
+`matroska,webm` MKV (or WebM), anything else ffprobe's first name; the extension only when the
+file couldn't be read.
 
 **Delivery** (how the bytes get to the player, `reel/static/sources.js`):
 
@@ -694,9 +707,9 @@ version); bump `THUMBS` when the server changes how thumbnails are made.
 ### Tests
 
 ```sh
-uv run pytest              # backend: 562 tests
-node --test tests/js/      # frontend: 37 tests
-uv run pytest -m browser   # browser: 18 tests (about 2 minutes; needs Chromium and ffmpeg)
+uv run pytest              # backend: 604 tests
+node --test tests/js/      # frontend: 39 tests
+uv run pytest -m browser   # browser: 20 tests (about 2 minutes; needs Chromium and ffmpeg)
 scripts/docker-smoke.sh    # builds the image and checks it end to end (needs Docker)
 ```
 
@@ -706,6 +719,9 @@ scripts/docker-smoke.sh    # builds the image and checks it end to end (needs Do
   thumbnails, remuxing and conversion with the real ffprobe and ffmpeg. They're skipped if ffmpeg
   isn't installed.
 - URL downloads are tested against a local test web server.
+- The **frontend tests** (`tests/js`) run the helpers, router, capability detection and player
+  logic under Node, and parse every module in `reel/static`, so one that can't load fails without
+  a browser.
 - The **browser tests** (`tests/browser`) start a real Reel on a free port, scan generated clips
   with the real ffprobe, and drive headless Chromium over the DevTools protocol. They check that
   each delivery (file, progressive, HLS with converted FLAC audio, progressive conversion for a
@@ -713,7 +729,10 @@ scripts/docker-smoke.sh    # builds the image and checks it end to end (needs Do
   streams; that leaving the player stops ffmpeg; two tabs at different points of one video;
   playing on after the HLS session expired; a file replaced mid-play (the player reloads and
   carries on); simultaneous first uploads of a folder picture; and the player's snapshot button
-  (the saved picture is the frame that was on screen, before and after a seek). They're skipped by a plain
+  (the saved picture is the frame that was on screen, before and after a seek); stepping through a
+  Show all list with prev/next, then Back returning to the list; and that folder and Show all
+  cards have the same lines, each format badge coloured like the play-mode pill on the video's
+  page. They're skipped by a plain
   `uv run pytest` because they're slow.
 - The smoke test generates clips, builds the image, and checks the ffmpeg version, scanning,
   thumbnails, direct play with range requests, live conversion, the data volume and the health
@@ -749,9 +768,10 @@ reel/
   marks.py           marks: spots in a video saved from the player
   tags.py            tags: add/remove, rename/merge, delete
   fetch.py           safe image downloads from URLs
-  browse.py          read-only views: folders (indexed, paged), video details
+  browse.py          read-only views: folders (indexed, paged), Show all lists and their
+                     prev/next, video details; format names and play modes for cards
   catalog.py         shared by reads and writes: NotFound, folder paths, paging
-  sorting.py         natural sort keys stored for SQL ordering
+  sorting.py         natural sort keys stored for SQL ordering (names; full paths for Show all)
   static/
     index.html       page shell and dialogs
     app.js           wires the pages to the router; scroll restore
