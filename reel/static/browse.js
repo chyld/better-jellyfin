@@ -377,11 +377,10 @@ function tagEditor(item) {
 
 // ---- Folder -------------------------------------------------------------------
 
-/** A video's card. `from` (in "Show all" lists) is the folder being shown: videos
- *  from its subfolders say which one they're in. */
-function videoCard(item, from) {
+/** A video's card. In "Show all" lists (`withPath`) it also shows the video's path
+ *  in the library, file name included: what the list is sorted by. */
+function videoCard(item, withPath = false) {
   const meta = [item.year, formatDuration(item.duration)].filter(Boolean).join(" · ");
-  const where = from !== undefined && item.folder !== from ? item.folder.slice(from ? from.length + 1 : 0) : "";
   return h(
     "li",
     { class: "card-wrap" },
@@ -391,7 +390,7 @@ function videoCard(item, from) {
       { class: "card", href: `#/item/${item.id}`, title: item.title },
       artBox({ kind: "video", shape: "landscape", src: videoImageSrc(item) }),
       h("div", { class: "label" }, item.title),
-      where && h("div", { class: "sub where", title: item.folder }, where),
+      withPath && h("div", { class: "sub where" }, item.rel_path),
       meta && h("div", { class: "sub" }, meta),
     ),
   );
@@ -482,7 +481,7 @@ function pagedVideoGrid(first, fetchPage, card = (item) => videoCard(item)) {
 }
 
 /** A folder: its subfolders and videos, or with `showAll`, every video in it and
- *  its subfolders in one list, sorted by full path. */
+ *  its subfolders in one list, always sorted by path (so there's no sort menu). */
 export async function renderBrowse(view, libraryId, path, showAll = false) {
   const url = (offset = 0) =>
     `/api/libraries/${libraryId}/browse?path=${encodeURIComponent(path)}&sort=${getSort()}&offset=${offset}` +
@@ -496,7 +495,7 @@ export async function renderBrowse(view, libraryId, path, showAll = false) {
   const showItems = () => {
     if (closed) return;
     grid?.stop();
-    grid = pagedVideoGrid(data, async (offset) => api("GET", url(offset)), (item) => videoCard(item, showAll ? path : undefined));
+    grid = pagedVideoGrid(data, async (offset) => api("GET", url(offset)), (item) => videoCard(item, showAll));
     itemsHolder.replaceChildren(grid.element);
   };
   showItems();
@@ -514,8 +513,7 @@ export async function renderBrowse(view, libraryId, path, showAll = false) {
         showItems();
       },
     },
-    // A "Show all" list sorts by full path, so each folder's videos stay together.
-    h("option", { value: "name" }, showAll ? "Path" : "Name"),
+    h("option", { value: "name" }, "Name"),
     h("option", { value: "year" }, "Year"),
   );
   sortSelect.value = data.sort;
@@ -548,7 +546,7 @@ export async function renderBrowse(view, libraryId, path, showAll = false) {
         "div",
         { class: "head-tools" },
         allToggle,
-        data.total_items > 1 && h("label", { class: "sort" }, "Sort ", sortSelect),
+        !showAll && data.total_items > 1 && h("label", { class: "sort" }, "Sort ", sortSelect),
       ),
     ),
     h("p", { class: "summary" }, counts.filter(Boolean).join(" · ") || "This folder is empty."),

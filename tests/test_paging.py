@@ -104,16 +104,19 @@ def test_show_all_pages_every_video_below_by_path(client, big):
         assert page["all"] is True and page["folders"] == [] and page["total_items"] == 26
         if not page["items"]:
             break
-        seen += [(i["folder"], i["title"]) for i in page["items"]]
+        seen += [i["rel_path"] for i in page["items"]]
         offset += len(page["items"])
-    # "Many/Sub/deep.mp4" (titled after its folder, as a lone video) sorts by its path: after
-    # clip1..clip25, since "sub" > "clip" once case is folded.
-    assert seen == [("Many", f"clip{n}") for n in range(1, 26)] + [("Many/Sub", "Sub")]
+    # "Many/Sub/deep.mp4" comes after clip1..clip25: "sub" > "clip" once case is folded.
+    assert seen == [f"Many/clip{n}.mp4" for n in range(1, 26)] + ["Many/Sub/deep.mp4"]
 
 
-def test_show_all_by_year_and_plain_browse_says_so(client, big):
-    assert get(client, big, all="true", sort="year")["total_items"] == 26
-    assert get(client, big)["all"] is False
+def test_show_all_is_always_by_path(client, big):
+    """There's no other order for it: sort=year is ignored."""
+    by_year = get(client, big, all="true", sort="year")
+    assert by_year["sort"] == "path"
+    assert [i["rel_path"] for i in by_year["items"]] == [i["rel_path"] for i in get(client, big, all="true")["items"]]
+    plain = get(client, big)
+    assert plain["all"] is False and "rel_path" not in plain["items"][0]
 
 
 def test_show_all_at_the_library_top_and_missing_folders(client, big):
@@ -129,9 +132,7 @@ def test_show_all_keeps_similar_folders_apart(conn, media_root, fake_probe):
     lib = create_library(conn, media_root, "Media", str(media_root))
     scan_library(conn, lib, probe_fn=fake_probe)
     page = browse(conn, lib, "Show 7", show_all=True)
-    assert [(i["folder"], i["title"]) for i in page["items"]] == [
-        ("Show 7", "a"), ("Show 7/S2", "clip2"), ("Show 7/S2", "clip10"),
-    ]
+    assert [i["rel_path"] for i in page["items"]] == ["Show 7/a.mp4", "Show 7/S2/clip2.mp4", "Show 7/S2/clip10.mp4"]
     assert browse(conn, lib, "", show_all=True)["total_items"] == 7
 
 
@@ -240,7 +241,8 @@ def test_upgrade_fills_path_order(tmp_path, monkeypatch):
     init_db(path)
     conn = connect(path)
     assert columns(conn, "loose.mp4")["path_key"] == path_key("loose.mp4")
-    assert [i["folder"] for i in browse(conn, 1, "Show", show_all=True)["items"]] == ["Show", "Show/Sub"]
+    assert [i["rel_path"] for i in browse(conn, 1, "Show", show_all=True)["items"]] == [
+        "Show/clip10.mp4", "Show/Sub/clip2.mp4"]
 
 
 def test_browsing_uses_the_index(conn):

@@ -230,7 +230,7 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
     def browse_folder(library_uid: str, path: str = "", sort: str = "name", limit: int | None = None,
                       offset: int = 0, all: bool = False, conn: sqlite3.Connection = Db):
         """A folder's subfolders, and its videos one page at a time (`limit`, `offset`).
-        With `all`, every video in the folder and its subfolders, by full path."""
+        With `all`, every video in the folder and its subfolders, by path (`sort` is ignored)."""
         return browse.browse(conn, library_pk(conn, library_uid), path, sort, limit=limit, offset=offset,
                              show_all=all)
 
