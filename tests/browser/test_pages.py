@@ -107,3 +107,31 @@ def test_prev_next_through_a_show_all_list(server, page):
     page.js(f"location.hash = {first!r}")                                      # the same video, directly
     page.wait_for("!!document.querySelector('.detail')", message="the video's page")
     assert page.js("document.querySelector('.list-nav')") is None
+
+
+def test_cards_look_the_same_and_colour_like_the_video_page(server, page):
+    """A folder's cards and its Show all cards have the same lines; each card's format
+    badge has the tone of the play-mode pill on that video's page, in this browser."""
+    shape = """[...document.querySelectorAll('.grid.videos .card')].map(c => ({
+        href: c.getAttribute('href').split('?')[0],
+        lines: [...c.children].filter(e => e.matches('.label, .sub')).map(e => e.className),
+        type: c.querySelector('.type-badge').textContent,
+        tone: ['ok', 'info', 'warn', 'err'].find(t => c.querySelector('.type-badge').classList.contains(t)) }))"""
+    page.goto(f"{server.base}/#/library/{server.library}")
+    page.wait_for("!!document.querySelector('.grid.videos .type-badge')", message="the folder")
+    folder = page.js(shape)
+    page.js(f"location.hash = '#/library/{server.library}?all'")
+    page.wait_for("location.hash.endsWith('?all') && !!document.querySelector('.grid.videos .type-badge')",
+                  message="the show-all list")
+    listed = page.js(shape)
+    assert len(folder) == len(server.videos)
+    assert {c["lines"] == ["label", "sub where", "sub meta"] for c in folder + listed} == {True}
+    assert sorted(folder, key=lambda c: c["href"]) == sorted(listed, key=lambda c: c["href"])
+    by_id = {c["href"].rsplit("/", 1)[-1]: c for c in folder}
+    tones = {name: by_id[uid]["tone"] for name, uid in server.videos.items()}
+    assert tones["direct.mp4"] == "ok" and tones["remux.mkv"] == "info" and tones["long.avi"] == "warn"
+    assert by_id[server.videos["remux.mkv"]]["type"] == "MKV"
+    for name in ("direct.mp4", "remux.mkv", "long.avi"):
+        page.js(f"location.hash = '#/item/{server.videos[name]}'")
+        page.wait_for("!!document.querySelector('.pill.mode')", message=f"{name}'s page")
+        assert page.js(f"document.querySelector('.pill.mode').classList.contains('{tones[name]}')"), name

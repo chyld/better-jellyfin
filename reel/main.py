@@ -226,13 +226,21 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
         except (OutsideRoot, OSError):
             raise HTTPException(404, "The video file is missing. Is the NAS connected?")
 
+    def viewer(video: str | None, audio: str | None, hls_support: str) -> tuple[Capabilities, str]:
+        """The viewer's browser, from the same parameters /plan takes: each listed
+        video's play_mode is then what its page (and the player) will do."""
+        return Capabilities.from_query(video, audio), hls_support if hls_support in HLS_SUPPORT else "none"
+
     @app.get("/api/libraries/{library_uid}/browse")
     def browse_folder(library_uid: str, path: str = "", sort: str = "name", limit: int | None = None,
-                      offset: int = 0, all: bool = False, conn: sqlite3.Connection = Db):
+                      offset: int = 0, all: bool = False, video: str | None = None, audio: str | None = None,
+                      hls_support: str = "none", conn: sqlite3.Connection = Db):
         """A folder's subfolders, and its videos one page at a time (`limit`, `offset`).
-        With `all`, every video in the folder and its subfolders, by path (`sort` is ignored)."""
+        With `all`, every video in the folder and its subfolders, by path (`sort` is ignored).
+        `video`/`audio`/`hls_support` as for /plan: each video's play_mode for this browser."""
+        caps, hls_support = viewer(video, audio, hls_support)
         return browse.browse(conn, library_pk(conn, library_uid), path, sort, limit=limit, offset=offset,
-                             show_all=all)
+                             show_all=all, caps=caps, hls_support=hls_support)
 
     @app.get("/api/libraries/{library_uid}/folder-art")
     async def get_folder_art(library_uid: str, path: str = "", v: str | None = None):
@@ -279,8 +287,10 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
         return tags.list_tags(conn)
 
     @app.get("/api/tags/{tag_uid}")
-    def get_tag(tag_uid: str, limit: int | None = None, offset: int = 0, conn: sqlite3.Connection = Db):
-        return tags.tag_videos(conn, tag_uid, limit=limit, offset=offset)
+    def get_tag(tag_uid: str, limit: int | None = None, offset: int = 0, video: str | None = None,
+                audio: str | None = None, hls_support: str = "none", conn: sqlite3.Connection = Db):
+        caps, hls_support = viewer(video, audio, hls_support)
+        return tags.tag_videos(conn, tag_uid, limit=limit, offset=offset, caps=caps, hls_support=hls_support)
 
     @app.patch("/api/tags/{tag_uid}")
     def rename_tag(tag_uid: str, body: TagRename, conn: sqlite3.Connection = Db):

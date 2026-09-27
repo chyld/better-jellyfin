@@ -134,8 +134,7 @@ def test_show_all_is_always_by_path(client, big):
     by_year = get(client, big, all="true", sort="year")
     assert "sort" not in by_year
     assert [i["rel_path"] for i in by_year["items"]] == [i["rel_path"] for i in get(client, big, all="true")["items"]]
-    plain = get(client, big)
-    assert plain["all"] is False and "rel_path" not in plain["items"][0]
+    assert get(client, big)["all"] is False
 
 
 def test_show_all_at_the_library_top_and_missing_folders(client, big):

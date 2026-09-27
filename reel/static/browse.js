@@ -216,11 +216,18 @@ export async function renderHome(view) {
   );
 }
 
+/** This browser's codecs and HLS support, as /plan takes them: sent with every
+ *  list of videos, so each card shows how *this* browser will play it. */
+async function viewerQuery() {
+  return `${capsQuery(await capabilities())}&hls_support=${hlsSupport()}`;
+}
+
 // ---- Tag ------------------------------------------------------------------------
 
 export async function renderTag(view, tagId) {
-  const first = await api("GET", `/api/tags/${tagId}`);
-  const grid = pagedVideoGrid(first, (offset) => api("GET", `/api/tags/${tagId}?offset=${offset}`));
+  const viewer = await viewerQuery();
+  const first = await api("GET", `/api/tags/${tagId}?${viewer}`);
+  const grid = pagedVideoGrid(first, (offset) => api("GET", `/api/tags/${tagId}?offset=${offset}&${viewer}`));
   fill(
     view,
     h(
@@ -400,12 +407,15 @@ function tagEditor(item) {
 
 // ---- Folder -------------------------------------------------------------------
 
-/** A video's card. In a "Show all" list (`list`: its folder) it also shows the
- *  video's path from that folder down, file name included (what the list is
- *  sorted by), and opens the video's page with prev/next through the list. */
-function videoCard(item, list = null) {
+/**
+ * A video's card, the same everywhere: its title; its path from `from` (the
+ * folder being shown; "" for the library's top) down, file name included; then
+ * year, length and its format, coloured by how this browser will play it.
+ * In a "Show all" list (`list`: its folder) it opens the video's page with
+ * prev/next through the list.
+ */
+function videoCard(item, { from = "", list = null } = {}) {
   const meta = [item.year, formatDuration(item.duration)].filter(Boolean).join(" · ");
-  const withPath = list !== null;
   return h(
     "li",
     { class: "card-wrap" },
@@ -415,10 +425,18 @@ function videoCard(item, list = null) {
       { class: "card", href: itemUrl(item.id, list), title: item.title },
       artBox({ kind: "video", shape: "landscape", src: videoImageSrc(item) }),
       h("div", { class: "label" }, item.title),
-      withPath && h("div", { class: "sub where" }, pathBelow(item.rel_path, list)),
-      meta && h("div", { class: "sub" }, meta),
+      h("div", { class: "sub where" }, pathBelow(item.rel_path, from)),
+      h("div", { class: "sub meta" }, meta && h("span", {}, meta), typeBadge(item)),
     ),
   );
+}
+
+/** The video's format ("MP4", "TS"...), coloured by how this browser will play it:
+ *  green as is, blue repackaged, amber converted, red can't. Hover says which. */
+function typeBadge(item) {
+  if (!item.type) return null;
+  const [tone, label, text] = PLAY_MODES[item.play_mode] || ["", "", ""];
+  return h("span", { class: `type-badge ${tone}`, title: label && `${label}: ${text}` }, item.type);
 }
 
 function folderCard(libraryId, folder) {
@@ -508,8 +526,9 @@ function pagedVideoGrid(first, fetchPage, card = (item) => videoCard(item)) {
 /** A folder: its subfolders and videos, or with `showAll`, every video in it and
  *  its subfolders in one list, always sorted by path (so there's no sort menu). */
 export async function renderBrowse(view, libraryId, path, showAll = false) {
+  const viewer = await viewerQuery();
   const url = (offset = 0) =>
-    `/api/libraries/${libraryId}/browse?path=${encodeURIComponent(path)}&offset=${offset}` +
+    `/api/libraries/${libraryId}/browse?path=${encodeURIComponent(path)}&offset=${offset}&${viewer}` +
     (showAll ? "&all=true" : `&sort=${getSort()}`);
   let data = await api("GET", url());
 
@@ -520,7 +539,7 @@ export async function renderBrowse(view, libraryId, path, showAll = false) {
   const showItems = () => {
     if (closed) return;
     grid?.stop();
-    grid = pagedVideoGrid(data, async (offset) => api("GET", url(offset)), (item) => videoCard(item, showAll ? path : null));
+    grid = pagedVideoGrid(data, async (offset) => api("GET", url(offset)), (item) => videoCard(item, { from: path, list: showAll ? path : null }));
     itemsHolder.replaceChildren(grid.element);
   };
   showItems();
@@ -588,10 +607,12 @@ export async function renderBrowse(view, libraryId, path, showAll = false) {
 // ---- Video details ----------------------------------------------------------
 
 // [tone, short label, what it means]
+// Tones, on the video's page and its cards: ok = as is, info = light work (starts
+// fast, full quality), warn = converted by the server's CPU, err = can't play.
 const PLAY_MODES = {
   direct: ["ok", "Direct play", "Plays directly in the browser"],
-  remux: ["ok", "Quick repackage", "Repackaged on the fly, with no quality loss"],
-  audio: ["ok", "Audio converted", "The video plays as is; only the audio is converted"],
+  remux: ["info", "Quick repackage", "Repackaged on the fly, with no quality loss"],
+  audio: ["info", "Audio converted", "The video plays as is; only the audio is converted"],
   transcode: ["warn", "Converted live", "Converted by the server while it plays"],
   unsupported: ["err", "Can't play", "This video can't be played"],
 };

@@ -5,6 +5,7 @@ import sqlite3
 from pathlib import Path
 
 from .browse import item_out
+from .plan import Capabilities
 from .catalog import NotFound, page_bounds
 from .db import NOW_MS, new_uid, write_transaction
 from .pictures import picture_path
@@ -186,8 +187,10 @@ def list_tags(conn: sqlite3.Connection) -> list[dict]:
     return [{**_tag_out(r), "count": r["count"]} for r in rows]
 
 
-def tag_videos(conn: sqlite3.Connection, tag_uid: str, *, limit: int | None = None, offset: int | None = None) -> dict:
-    """A tag and (one page of) its videos, in the order they were tagged (no sorting yet)."""
+def tag_videos(conn: sqlite3.Connection, tag_uid: str, *, limit: int | None = None, offset: int | None = None,
+               caps: Capabilities | None = None, hls_support: str = "none") -> dict:
+    """A tag and (one page of) its videos, in the order they were tagged (no sorting yet).
+    `caps` / `hls_support`: the viewer's browser, for each video's play_mode."""
     tag = find_tag(conn, tag_uid)
     limit, offset = page_bounds(limit, offset)
     joined = """
@@ -198,5 +201,5 @@ def tag_videos(conn: sqlite3.Connection, tag_uid: str, *, limit: int | None = No
     rows = conn.execute(
         f"SELECT m.* {joined} ORDER BY it.added_at, it.rowid LIMIT ? OFFSET ?", (tag["id"], limit, offset)
     )
-    return {"tag": _tag_out(tag), "items": [item_out(r) for r in rows],
+    return {"tag": _tag_out(tag), "items": [item_out(r, caps, hls_support) for r in rows],
             "total_items": total, "offset": offset, "limit": limit}

@@ -6,13 +6,42 @@ import sqlite3
 from pathlib import PurePosixPath
 
 from .catalog import NotFound, clean_dir, descendants, page_bounds
+from .plan import Capabilities, plan
 from .sorting import folder_range, natural_text
 
 SORTS = ("name", "year")
 
 
-def item_out(row: sqlite3.Row) -> dict:
-    return {
+# ffprobe's format names -> what to call the file: (the usual name, {extension: a
+# more exact name within that family}). ffprobe reports some formats as families
+# ("mov,mp4,..." is MP4 or QuickTime), so the extension picks the member. Only the
+# extension, never the name alone: a .mp4 that's really MPEG-TS is shown as TS.
+FORMAT_NAMES = {
+    "mov,mp4,m4a,3gp,3g2,mj2": ("MP4", {"mov": "MOV", "m4v": "M4V", "3gp": "3GP", "3g2": "3G2"}),
+    "matroska,webm": ("MKV", {"webm": "WebM"}),
+    "mpegts": ("TS", {}),
+    "avi": ("AVI", {}),
+    "mpeg": ("MPG", {"vob": "VOB"}),
+    "asf": ("WMV", {"asf": "ASF"}),
+}
+
+
+def video_type(container: str | None, rel_path: str) -> str | None:
+    """The file's real format, in plain words ("MP4", "TS", "AVI"...), from what
+    ffprobe found; the extension when it couldn't read the file (None if none)."""
+    name = rel_path.rsplit("/", 1)[-1]
+    ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+    if not container:
+        return ext.upper() or None
+    usual, members = FORMAT_NAMES.get(container, (container.split(",", 1)[0].upper(), {}))
+    return members.get(ext, usual)
+
+
+def item_out(row: sqlite3.Row, caps: Capabilities | None = None, hls_support: str = "none") -> dict:
+    """A video for a list or its page. With the viewer's `caps` (and how it plays
+    HLS), also `play_mode`: how that browser will play it (see plan.py), which
+    colours its card, and matches what its page says."""
+    out = {
         "id": row["uid"],
         "title": row["title"],
         "year": row["year"],
@@ -22,7 +51,12 @@ def item_out(row: sqlite3.Row) -> dict:
         "has_poster": row["poster_path"] is not None,  # an image on the NAS
         "poster_rev": row["poster_rev"],                # its version (in its thumbnail's URL)
         "custom_image": row["custom_image"],            # version of an uploaded one, if any
+        "rel_path": row["rel_path"],                    # its path in the library, file name included
+        "type": video_type(row["container"], row["rel_path"]),
     }
+    if caps is not None:
+        out["play_mode"] = plan(row, caps, hls_support).mode
+    return out
 
 
 ORDER_BY = {
@@ -49,6 +83,8 @@ def browse(
     limit: int | None = None,
     offset: int | None = None,
     show_all: bool = False,
+    caps: Capabilities | None = None,
+    hls_support: str = "none",
 ) -> dict:
     """The subfolders and (one page of) videos directly inside `rel_dir` of a library.
 
@@ -60,6 +96,7 @@ def browse(
 
     With `show_all`, it's instead every video in the folder and all its subfolders
     (and no folders), always in full-path order: see browse_all().
+    `caps` / `hls_support`: the viewer's browser, for each video's play_mode (item_out).
     """
     lib = conn.execute("SELECT uid, name FROM libraries WHERE id = ?", (library_id,)).fetchone()
     if lib is None:
@@ -69,7 +106,7 @@ def browse(
         sort = "name"
     limit, offset = page_bounds(limit, offset)
     if show_all:
-        return browse_all(conn, library_id, lib, rel_dir, limit, offset)
+        return browse_all(conn, library_id, lib, rel_dir, limit, offset, caps, hls_support)
 
     # Videos a scan couldn't find any more are hidden (kept for a grace period).
     here = "library_id = ? AND parent_dir = ? AND missing_since IS NULL"
@@ -133,7 +170,7 @@ def browse(
         "sort": sort,
         "all": False,
         "folders": folder_list,
-        "items": [item_out(r) for r in rows],
+        "items": [item_out(r, caps, hls_support) for r in rows],
         "total_items": total,
         "offset": offset,
         "limit": limit,
@@ -153,7 +190,7 @@ def _all_below(library_id: int, rel_dir: str) -> tuple[str, list]:
 
 
 def browse_all(conn: sqlite3.Connection, library_id: int, lib: sqlite3.Row, rel_dir: str,
-               limit: int, offset: int) -> dict:
+               limit: int, offset: int, caps: Capabilities | None, hls_support: str) -> dict:
     """One page of every video at or below `rel_dir`, sorted by its path in the
     library (file name included), naturally, and paged from the path_key index.
     There's no other sort: the cards show that path, so the order is the one on screen.
@@ -172,8 +209,7 @@ def browse_all(conn: sqlite3.Connection, library_id: int, lib: sqlite3.Row, rel_
         "breadcrumbs": breadcrumbs(lib["name"], rel_dir),
         "all": True,
         "folders": [],
-        # Each video's path in the library, file name included: what the list is sorted by.
-        "items": [{**item_out(r), "rel_path": r["rel_path"]} for r in rows],
+        "items": [item_out(r, caps, hls_support) for r in rows],
         "total_items": total,
         "offset": offset,
         "limit": limit,

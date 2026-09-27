@@ -25,6 +25,7 @@
   --danger: #fb7185;
   --ok: #34d399;
   --warn: #fbbf24;
+  --info: #60a5fa;
   --radius: 16px;
   --shadow: 0 10px 30px rgb(0 0 0 / 0.35);
   --shadow-lg: 0 24px 60px rgb(0 0 0 / 0.55);
@@ -169,8 +170,18 @@ select { padding: 7px 30px 7px 12px; appearance: none; cursor: pointer;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .card .sub { margin-top: 2px; color: var(--muted); font-size: 12.5px; font-weight: 500; font-variant-numeric: tabular-nums; }
-/* A video's path in "Show all" lists: shown whole, wrapping anywhere (paths have few spaces). */
+/* A video's path: shown whole, wrapping anywhere (paths have few spaces). */
 .card .sub.where { overflow-wrap: anywhere; }
+.card .sub.meta { display: flex; align-items: center; gap: 8px; }
+/* A video's format on its card, coloured like the play-mode pill on its page. */
+.type-badge {
+  font-size: 10.5px; font-weight: 700; letter-spacing: 0.04em; line-height: 1; padding: 3px 6px;
+  border-radius: 6px; color: var(--muted); background: var(--glass-2); border: 1px solid var(--edge);
+}
+.type-badge.ok { color: var(--ok); background: rgb(52 211 153 / 0.1); border-color: rgb(52 211 153 / 0.3); }
+.type-badge.info { color: var(--info); background: rgb(96 165 250 / 0.1); border-color: rgb(96 165 250 / 0.3); }
+.type-badge.warn { color: var(--warn); background: rgb(251 191 36 / 0.1); border-color: rgb(251 191 36 / 0.3); }
+.type-badge.err { color: var(--danger); background: rgb(251 113 133 / 0.1); border-color: rgb(251 113 133 / 0.3); }
 
 .art {
   position: relative; overflow: hidden; border-radius: 14px;
@@ -262,6 +273,7 @@ select { padding: 7px 30px 7px 12px; appearance: none; cursor: pointer;
 }
 .pill.mode::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; box-shadow: 0 0 8px currentColor; }
 .pill.ok { color: var(--ok); background: rgb(52 211 153 / 0.08); border-color: rgb(52 211 153 / 0.25); }
+.pill.info { color: var(--info); background: rgb(96 165 250 / 0.08); border-color: rgb(96 165 250 / 0.25); }
 .pill.warn { color: var(--warn); background: rgb(251 191 36 / 0.08); border-color: rgb(251 191 36 / 0.25); }
 .pill.err { color: var(--danger); background: rgb(251 113 133 / 0.08); border-color: rgb(251 113 133 / 0.25); }
 .btn.play { height: 50px; padding: 0 30px; border-radius: 999px; font-size: 16px; font-weight: 700; gap: 10px; }

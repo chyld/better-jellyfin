@@ -45,6 +45,12 @@ ffmpeg converts on the fly.
 - **Browsing.** Libraries and folders appear as movie-poster cards and videos as landscape
   cards. Numbers sort naturally (`clip2` before `clip10`), and videos can be sorted by name or year.
   Big folders stay fast: videos load 200 at a time as you scroll.
+- **Video cards.** Every video card shows its title, its path from the folder you're in (file
+  name included), then year, length and its real format (MP4, TS, AVI, MPG, WMV, MKV...), as
+  ffprobe found it: a `.mp4` that's really an MPEG transport stream says TS. The format is
+  coloured by how *your browser* will play it: green as is, blue repackaged (starts fast, full
+  quality), amber converted live by the server, red can't play. Hover it to see which; the video's
+  page says the same, in the same colour.
 - **Show all videos.** In a folder with subfolders, **Show all videos** flattens it: every video
   in the folder and all its subfolders in one grid, each card showing the video's path from
   that folder down (file name included), and sorted by that path (naturally, so each folder's videos
@@ -614,7 +620,7 @@ JSON over HTTP. Every ID is a UUID. There's no authentication yet (see
 | DELETE | `/api/libraries/{id}` | Remove from Reel (409 while scanning). Files untouched. |
 | POST | `/api/libraries/{id}/scan` | Queue a scan (202). |
 | POST | `/api/libraries/scan` | Queue a scan of every library. |
-| GET | `/api/libraries/{id}/browse?path=&sort=name\|year&limit=&offset=&all=` | Subfolders and one page of the videos in a folder (`limit` defaults to 200, at most 500). `total_items` is how many videos the folder has. With `all=true`: no subfolders, and every video in the folder and below it, each with its `rel_path`, sorted by it (`sort` is ignored). |
+| GET | `/api/libraries/{id}/browse?path=&sort=name\|year&limit=&offset=&all=` | Subfolders and one page of the videos in a folder (`limit` defaults to 200, at most 500). `total_items` is how many videos the folder has. With `all=true`: no subfolders, and every video in the folder and below it, sorted by path (`sort` is ignored). Every video has its `rel_path`, `type` (its real format, e.g. `MP4`, `TS`) and `play_mode`: pass `video=&audio=&hls_support=` as for `/plan` to get it for your browser (without them, a typical browser). |
 | GET | `/api/libraries/{id}/folder-art?path=` | A folder's picture (NAS `folder.<ext>`, else uploaded). |
 | PUT | `/api/libraries/{id}/folder-image?path=` | Upload a folder picture (request body = the image). |
 | POST | `/api/libraries/{id}/folder-image-url?path=` | `{url}`: set a folder picture from a URL. |
@@ -648,7 +654,7 @@ JSON over HTTP. Every ID is a UUID. There's no authentication yet (see
 | Method | Path | |
 |---|---|---|
 | GET | `/api/tags` | Tags on at least one video, with counts. |
-| GET | `/api/tags/{id}?limit=&offset=` | A tag and one page of its videos (in tagging order), with `total_items`. |
+| GET | `/api/tags/{id}?limit=&offset=&video=&audio=&hls_support=` | A tag and one page of its videos (in tagging order), with `total_items`. Videos as in `/browse`. |
 | PATCH | `/api/tags/{id}` | `{name}`: rename; merges into an existing tag of that name. |
 | DELETE | `/api/tags/{id}` | Delete the tag from every video. |
 | GET, PUT, DELETE | `/api/tags/{id}/image` | The tag's picture: fetch, upload, remove. |
