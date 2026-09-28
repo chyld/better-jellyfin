@@ -2,7 +2,7 @@
 import { api, artBox, encodePath, fill, formatDuration, formatSize, h, parseTags, pathBelow, plural, tagError } from "./api.js";
 import { openImageDialog } from "./imagedialog.js";
 import { capabilities, capsQuery, hlsSupport } from "./caps.js";
-import { clipPageUrl, clipPlayUrl, clipTimes, clipsSection, confirmDelete } from "./clips.js";
+import { clipPageUrl, clipPlayUrl, clipTimes, confirmDelete } from "./clips.js";
 
 const SORT_KEY = "reel.sort";
 
@@ -795,7 +795,6 @@ export async function renderItem(view, itemId, list = null) {
         h("dl", { class: "facts" }, facts.map(([k, v]) => [h("dt", {}, k), h("dd", {}, v)])),
       ),
     ),
-    clipsSection(item, item.clips || [], { list: around ? list : null }).element,
   );
 }
 

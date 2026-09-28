@@ -1,5 +1,6 @@
-// A video's clips (made on its edit page): the list shown on the video's page and
-// on the edit page, each clip a card that opens its page, with a Delete that asks first.
+// A video's clips (made on its edit page): links to a clip's page and the player,
+// the question before deleting one, and the list on the edit page (each clip a
+// card that opens its page, with a Delete that asks first).
 import { api, artBox, fill, formatDuration, h } from "./api.js";
 
 // `list`: the folder whose "Show all" list it was opened from (prev/next), or null.

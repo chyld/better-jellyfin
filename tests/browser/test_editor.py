@@ -1,6 +1,6 @@
 """A video's edit page (mark twice, make a clip), and its clips: listed on the
-video's page and the edit page, deleted only after confirming, and each playing
-just its stretch. In a real browser."""
+edit page (not the video's page), deleted only after confirming, each with a
+page of its own, and each playing just its stretch. In a real browser."""
 import base64
 import os
 import time
@@ -48,7 +48,6 @@ def test_marking_twice_makes_a_clip_listed_everywhere(server, page):
     page.cdp("Page.bringToFront")
     page.goto(f"{server.base}/#/item/{video}")
     page.wait_for("!!document.querySelector('.btn.edit-link')", message="the video's page")
-    assert page.js("document.querySelector('.clips').hidden")              # no clips yet
     page.js("document.querySelector('.btn.edit-link').click()")
     page.wait_for("!!document.querySelector('.edit-player') && document.querySelector('.edit-video').readyState >= 1",
                   message="the edit page")
@@ -89,11 +88,7 @@ def test_marking_twice_makes_a_clip_listed_everywhere(server, page):
     stored = [(c["name"], c["start"], c["end"]) for c in server.call("GET", f"/api/items/{video}/clips")]
     assert stored == [("Clip 1", 30.0, 40.0), ("Clip 2", 45.0, 50.0)]
 
-    # Done: the video's page lists them too. Delete asks first; Cancel keeps the clip.
-    page.js("document.querySelector('.page-head a.btn').click()")
-    page.wait_for("document.querySelectorAll('.clips .card').length === 2", message="the clips on the video's page")
-    assert clip_names(page) == ["Clip 1", "Clip 2"]
-    shot(page, "video-page-with-clips")
+    # Delete asks first; Cancel keeps the clip.
     page.js("document.querySelector('.clip-delete').click()")
     page.wait_for("!!document.querySelector('dialog.confirm-dialog[open]')", message="the question")
     assert page.js("document.querySelector('dialog.confirm-dialog h3').textContent") == "Delete Clip 1?"
@@ -107,7 +102,16 @@ def test_marking_twice_makes_a_clip_listed_everywhere(server, page):
     page.js("document.querySelector('dialog.confirm-dialog .btn.danger').click()")
     page.wait_for("document.querySelectorAll('.clips .card').length === 1", message="deleted")
     assert clip_names(page) == ["Clip 2"]
+    assert page.js("document.querySelectorAll('.edit-band').length") == 1
     assert [c["name"] for c in server.call("GET", f"/api/items/{video}/clips")] == ["Clip 2"]
+
+    # Done: the video's page doesn't list clips.
+    page.js("document.querySelector('.page-head a.btn').click()")
+    page.wait_for("!!document.querySelector('.detail') && !document.querySelector('.edit-player')",
+                  message="the video's page")
+    assert page.js("document.querySelector('.clips')") is None
+    page.js("history.back()")
+    page.wait_for("document.querySelectorAll('.clips .card').length === 1", message="the edit page again")
 
     # A clip's card opens its page; Play plays from its start, with a clock of its own,
     # and stops at its end.
@@ -137,14 +141,14 @@ def test_marks_too_close_together_make_no_clip(server, page):
 
 
 def test_the_pages_on_a_phone(server, page):
-    """Nothing wider than the screen on a phone: the edit page and a video's page with clips."""
+    """Nothing wider than the screen on a phone: the edit page, and a clip's page."""
     video = server.videos["direct.mp4"]
     for start in (1, 6):
-        server.call("POST", f"/api/items/{video}/clips", {"start": start, "end": start + 4})
+        clip = server.call("POST", f"/api/items/{video}/clips", {"start": start, "end": start + 4})[-1]
     page.cdp("Emulation.setDeviceMetricsOverride", width=390, height=844, deviceScaleFactor=1, mobile=True)
     try:
         for url, ready, name in [(f"#/edit/{video}", ".clips .card", "edit-phone"),
-                                 (f"#/item/{video}", ".clips .card", "video-phone")]:
+                                 (f"#/clip/{clip['id']}", ".clip-detail", "clip-phone")]:
             page.goto(f"{server.base}/{url}")
             page.wait_for(f"!!document.querySelector('{ready}')", message=name)
             time.sleep(0.5)
@@ -234,5 +238,4 @@ def test_deleting_a_clip_from_its_page(server, page):
     page.wait_for("!!document.querySelector('dialog.confirm-dialog[open]')", message="the question")
     page.js("document.querySelector('dialog.confirm-dialog .btn.danger').click()")
     page.wait_for(f"location.hash === '#/item/{video}' && !!document.querySelector('.detail')", message="the video's page")
-    assert page.js("document.querySelector('.clips').hidden")
     assert server.call("GET", f"/api/items/{video}/clips") == []

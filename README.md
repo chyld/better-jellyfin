@@ -68,7 +68,7 @@ ffmpeg converts on the fly.
   after tapping **Edit**).
 - **Clips.** On a video's **Edit video** page, play it and press **Mark** where a clip starts
   and again where it ends, then **Make clip**. Clips (Clip 1, Clip 2...) are listed on the
-  video's page and the edit page, and each plays just its stretch, as a video of its own. The
+  edit page and after their video in its folder, and each plays just its stretch. The
   file itself is never changed.
 - **Snap a preview.** The camera button in the player (or **P**) makes the frame on screen the
   video's picture, replacing any it had.
@@ -191,7 +191,7 @@ permissions. The usual cause is a `./data` that Docker created owned by root.
 | Home | `#/` | Library tiles, and a card for every tag. |
 | Library / folder | `#/library/<library-uuid>/<folder path>` | Subfolders as posters, then videos, each followed by its clips. Breadcrumbs and a Name/Year sort. |
 | Show all | `#/library/<library-uuid>/<folder path>?all` | Every video in the folder and its subfolders, each with its path from that folder down (file name included), sorted by that path, and each followed by its clips. **Show folders** goes back. |
-| Video | `#/item/<video-uuid>` | Picture, title, pills (year, length, resolution, play mode), **Play**, **Edit video**, tags, marks and file details, then the video's **Clips**. Opened from a Show all list (`?all=<folder path>`), also prev/next through it. |
+| Video | `#/item/<video-uuid>` | Picture, title, pills (year, length, resolution, play mode), **Play**, **Edit video**, tags, marks and file details. Opened from a Show all list (`?all=<folder path>`), also prev/next through it. |
 | Clip | `#/clip/<clip-uuid>` | A clip's first frame, name, length and times, **Play** (just the clip), **Go to video** and **Delete**. Opened from a Show all list, also prev/next through it. |
 | Edit video | `#/edit/<video-uuid>` | The video with a timeline, **Mark**, **Clear marks** and **Make clip**, then its clips. See [Making clips](#making-clips). |
 | Player | `#/play/<video-uuid>` | Full-window player. `?t=<seconds>` starts there; `?clip=<clip-uuid>` plays just that clip (its back button goes to the clip's page). |
@@ -254,7 +254,7 @@ four buttons.
    marks** starts over without making a clip.
 
 Make as many clips as you like. They're shaded on the timeline and listed under **Clips** on
-the edit page and on the video's page: each card shows the clip's first frame (taken from the
+the edit page (and after their video in its folder and in Show all): each card shows the clip's first frame (taken from the
 original file) and its times, and opens the clip's page, where **▶ Play** plays just the clip.
 **Delete** (on a card, or the clip's page) asks first. Numbers aren't reused
 while later clips exist (delete Clip 1 and the next is still Clip 3).
