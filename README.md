@@ -63,6 +63,12 @@ ffmpeg converts on the fly.
 - **Marks.** A bookmark button in the player saves the spot you're at (just the time). Marks
   show as ticks on the seek bar, and on the video's page as a list you can jump to (and delete,
   after tapping **Edit**).
+- **Edit a video: skips and clips.** A video's **Edit video** page marks stretches of it with a
+  start and an end (typed, nudged by a tenth of a second, or set from the preview with **I** /
+  **O**), each checked against a picture of that exact frame from the file. A stretch can be
+  **skipped** whenever the video plays (as if it were cut out), kept as a **clip** (listed on the
+  video's page, and playing just that stretch as a video of its own), or just marked. The file
+  itself is never changed.
 - **Snap a preview.** The camera button in the player (or **P**) makes the frame on screen the
   video's picture, replacing any it had.
 - **Pictures from your files.** `movie.png` beside `movie.mp4` and `folder.png` in a folder are
@@ -184,8 +190,9 @@ permissions. The usual cause is a `./data` that Docker created owned by root.
 | Home | `#/` | Library tiles, and a card for every tag. |
 | Library / folder | `#/library/<library-uuid>/<folder path>` | Subfolders as posters, then videos. Breadcrumbs and a Name/Year sort. |
 | Show all | `#/library/<library-uuid>/<folder path>?all` | Every video in the folder and its subfolders, each with its path from that folder down (file name included), sorted by that path. **Show folders** goes back. |
-| Video | `#/item/<video-uuid>` | Picture, title, pills (year, length, resolution, play mode), **Play**, tags and file details. Opened from a Show all list (`?all=<folder path>`), also prev/next through it. |
-| Player | `#/play/<video-uuid>` | Full-window player. |
+| Video | `#/item/<video-uuid>` | Picture, title, pills (year, length, resolution, play mode), **Play**, **Edit video**, tags, marks, ranges and file details, then the video's **Clips**. Opened from a Show all list (`?all=<folder path>`), also prev/next through it. |
+| Edit video | `#/edit/<video-uuid>` | A preview with a timeline, the start and end of a range (each with its frame), and the video's saved ranges. See [Editing a video](#editing-a-video). |
+| Player | `#/play/<video-uuid>` | Full-window player. `?t=<seconds>` starts there; `?clip=<range-uuid>` plays just that clip. |
 | Tags | `#/tags` | Every tag: set its image, rename or merge, delete. |
 | Tag | `#/tag/<tag-uuid>` | The videos with that tag. |
 | Libraries | `#/manage` | Add, rename, remove and scan libraries, with live progress. |
@@ -221,11 +228,52 @@ click one to play from there (`#/play/<id>?t=335`). To delete marks, tap **Edit*
 heading: each mark then shows an ×; **Done** hides them again, so a stray tap never deletes one. Marks belong to the
 video, so they follow a moved or renamed file, like tags.
 
+**Skipped ranges** (see below) are shaded on the seek bar, and playing into one jumps to its end
+("Skipped 0:12 – 0:30"); one that runs to the end of the video stops playback there. A **clip**
+plays in the same player, but its seek bar, clock and ⏮ button cover just the clip, and it
+pauses at the clip's end ("End of clip"; ▶ plays it again).
+
 **Use this frame as the preview** pauses the video and asks the server for the frame at that
 exact moment, taken from the **original file** (full quality, whatever the player was sent;
 VHS captures are deinterlaced as for playback). It's stored like an uploaded picture, replaces
 any earlier one, and wins over a picture on the NAS. A note at the top says "Preview updated"
 (or what went wrong). Nothing is written to the NAS.
+
+### Editing a video
+
+**Edit video** on a video's page opens its edit page, which marks **ranges**: stretches of the
+video with a start and an end. Nothing is cut from the file (Reel never writes to your videos);
+a range is saved in Reel's database as one of three kinds:
+
+| Kind | What it does |
+|---|---|
+| **Range** | Just marked, to find again. Listed on the video's page; click one to play from its start. |
+| **Skip** | Jumped over whenever the video plays, as if it were cut out. Shaded on the seek bar. |
+| **Clip** | Shown under **Clips** on the video's page, with its first frame as its picture. It plays just that stretch, as a video of its own. |
+
+The page has a preview (played the same way as in the player, so every format works), a
+timeline showing the saved ranges and the one being edited, and below it the **start** and
+**end**. Each can be typed (`1:02:10.5`, `2:05` or `75`), nudged by ±1 or ±0.1 seconds, or set
+to where the preview is. Beside each is the **frame at exactly that time, taken by the server from
+the original file**: a converted stream in the browser isn't frame-exact when paused, but this
+picture is what's really there. Then a label (optional), the kind, and **Save range**.
+**Preview range** plays just that stretch.
+
+Saved ranges are listed at the bottom: **Edit** loads one back into the form (**Save changes**
+updates it; **New range** starts another), **▶ Preview** plays it, a clip has **Open clip**, and
+**Delete** asks once more before deleting. Like marks, ranges belong to the video, so they
+follow a moved or renamed file, and go when it's removed from the catalog.
+
+| Edit page keys | |
+|---|---|
+| **Space** / **K** | Play / pause the preview |
+| **←** / **→** | Back / forward 1 second (**Shift**: 10 seconds) |
+| **,** / **.** | Back / forward 0.1 seconds |
+| **I** / **O** | Set the start / end to where the preview is |
+
+Times are kept to a tenth of a second, inside the video; a range is at least half a second long.
+A video that can't play in this browser can still be edited: type the times and check them
+against the pictures.
 
 ---
 
@@ -544,7 +592,7 @@ Everything Reel stores is in the data folder: `./data` with Docker, or `REEL_DAT
 
 ```
 data/
-├── reel.db             SQLite database: libraries, videos, tags, image records
+├── reel.db             SQLite database: libraries, videos, tags, marks, ranges, image records
 ├── reel.lock           held by the running Reel (one per data folder)
 ├── thumbs/             cached thumbnails of NAS pictures (safe to delete; they're remade)
 │   └── ab/abcdef….jpg
@@ -664,6 +712,11 @@ JSON over HTTP. Every ID is a UUID. There's no authentication yet (see
 | GET | `/api/items/{id}/marks` | The video's marks, earliest first: `[{id, time}]` (also in `GET /api/items/{id}` as `marks`). |
 | POST | `/api/items/{id}/marks` | `{time}`: mark a spot (kept inside the video; nothing new within a second of a mark). Returns the marks. |
 | DELETE | `/api/items/{id}/marks/{mark}` | Delete a mark. Returns the marks left. |
+| GET | `/api/items/{id}/ranges` | The video's ranges, earliest first: `[{id, start, end, kind, label}]`, `kind` being `range`, `skip` or `clip` (also in `GET /api/items/{id}` as `ranges`). |
+| POST | `/api/items/{id}/ranges` | `{start, end, kind, label}`: save a range (times to 0.1 s, kept inside the video, at least 0.5 s long; `label` optional, up to 100 characters). Returns the ranges; 400 with the reason if it can't be saved. |
+| PUT | `/api/items/{id}/ranges/{range}` | Change a range (same body). Returns the ranges. |
+| DELETE | `/api/items/{id}/ranges/{range}` | Delete a range. Returns the ranges left. |
+| GET | `/api/items/{id}/frame?at=` | The frame at `at` seconds, from the original file, as a JPEG at most 480 wide (the edit page's pictures and clips' pictures). At most 2 are made at once. |
 | DELETE | `/api/items/{id}/image` | Remove the uploaded picture (the NAS one, if any, shows again). |
 | POST | `/api/items/{id}/tags` | `{name}`: tag the video. Returns its tags. |
 | DELETE | `/api/items/{id}/tags/{tag}` | Untag. Returns its remaining tags. |
@@ -713,9 +766,9 @@ version); bump `THUMBS` when the server changes how thumbnails are made.
 ### Tests
 
 ```sh
-uv run pytest              # backend: 606 tests
-node --test tests/js/      # frontend: 39 tests
-uv run pytest -m browser   # browser: 21 tests (about 2 minutes; needs Chromium and ffmpeg)
+uv run pytest              # backend: 618 tests
+node --test tests/js/      # frontend: 45 tests
+uv run pytest -m browser   # browser: 25 tests (about 3 minutes; needs Chromium and ffmpeg)
 scripts/docker-smoke.sh    # builds the image and checks it end to end (needs Docker)
 ```
 
@@ -772,6 +825,7 @@ reel/
   pictures.py        your pictures for tags, videos and folders: one way to set, remove and clean up
   thumbnails.py      pictures on cards: finding, thumbnailing (limited), and after-scan warming/cleanup
   marks.py           marks: spots in a video saved from the player
+  ranges.py          ranges: stretches of a video to skip, keep as clips, or just mark
   tags.py            tags: add/remove, rename/merge, delete
   fetch.py           safe image downloads from URLs
   browse.py          read-only views: folders (indexed, paged), Show all lists and their
@@ -783,8 +837,9 @@ reel/
     app.js           wires the pages to the router; scroll restore
     router.js        hash routing; each visit owns its page and cleans up (even A → B → A)
     api.js           fetch helper, h() element builder, formatting, tag rules
-    browse.js        Home, folders, video page, tag page, tag editor
-    player.js        the player
+    browse.js        Home, folders, video page (with its clips), tag page, tag editor
+    player.js        the player (also plays clips, and jumps skipped ranges)
+    editor.js        a video's edit page: ranges
     caps.js          what this browser can decode (and whether it plays HLS)
     sources.js       file / progressive / HLS delivery behind one interface
     vendor/          hls.js (light build, Apache-2.0)
@@ -826,7 +881,11 @@ Dockerfile, compose.yaml, .env.example
 
 ## Roadmap
 
-Nothing planned right now: Reel does what it was built to do.
+- **Exporting ranges as real files.** A clip as a new video file, or the whole video without its
+  skipped ranges, made by ffmpeg in the background (exact cuts, converted to H.264 MP4; or fast,
+  copied cuts that snap to keyframes). Files would go only to a separate writable folder, never
+  the media folder, which could be added as a library so exports show up in Reel. Waiting on
+  where that folder should live.
 
 Decided against: watch progress / resume (single-user setup), sorting a tag's videos (they stay
 in tagging order), subtitles, hardware transcoding, and a background pass that pre-converts old

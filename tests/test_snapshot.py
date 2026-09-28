@@ -144,3 +144,26 @@ def test_unreadable_video_gives_a_clear_error(client, videos, media_root):
     (media_root / "Clips/plain.mp4").write_bytes(b"not a video any more")
     res = snapshot(client, videos["plain"], 1)
     assert res.status_code == 502 and res.json()["detail"].startswith("Couldn't take a picture")
+
+
+def test_frames_for_the_edit_page_come_from_the_original(client, videos, settings, tmp_path):
+    """The edit page's start/end pictures: the frame at that exact time, from the file
+    (interlaced ones too), at most 480 wide; nothing is left in the data folder."""
+    before = sorted(p.name for p in settings.data_dir.iterdir())
+    for name in ("plain", "tape"):
+        video = videos[name]
+        red = client.get(f"/api/items/{video['id']}/frame?at=4.5")
+        blue = client.get(f"/api/items/{video['id']}/frame?at=5.5")
+        assert red.status_code == blue.status_code == 200 and red.headers["content-type"] == "image/jpeg"
+        assert colour(red.content, tmp_path) == "red" and colour(blue.content, tmp_path) == "blue", name
+    end = client.get(f"/api/items/{videos['plain']['id']}/frame?at=999")   # past the end: the last moment
+    assert end.status_code == 200 and colour(end.content, tmp_path) == "blue"
+    assert client.get(f"/api/items/{videos['plain']['id']}/frame?at=-1").status_code == 422
+    assert client.get("/api/items/00000000-0000-0000-0000-000000000000/frame?at=1").status_code == 404
+    assert sorted(p.name for p in settings.data_dir.iterdir()) == before
+    src = tmp_path / "f.jpg"
+    src.write_bytes(red.content)
+    import json
+    info = json.loads(subprocess.run(["ffprobe", "-v", "error", "-show_streams", "-of", "json", str(src)],
+                                     capture_output=True, text=True, check=True).stdout)["streams"][0]
+    assert info["width"] == 320          # smaller than 480: kept as is

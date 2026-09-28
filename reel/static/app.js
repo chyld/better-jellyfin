@@ -1,4 +1,5 @@
 import { fromList, itemUrl, renderBrowse, renderHome, renderItem, renderTag } from "./browse.js";
+import { renderEditor } from "./editor.js";
 import { renderManage } from "./manage.js";
 import { renderPlayer, startTime } from "./player.js";
 import { createRouter } from "./router.js";
@@ -17,8 +18,11 @@ const router = createRouter({
       renderBrowse(page, uid, decodeURIComponent(path || ""), new URLSearchParams(query?.slice(1)).has("all"))],
     // `?all=<folder>`: opened from that folder's "Show all" list (prev/next buttons).
     [/^#\/item\/([0-9a-f-]{36})(\?.*)?$/, (page, uid, query) => renderItem(page, uid, fromList(query))],
+    // `?clip=<range>`: just that clip, saved on the edit page.
     [/^#\/play\/([0-9a-f-]{36})(\?.*)?$/, (page, uid, query) =>
-      renderPlayer(page, uid, startTime(query?.slice(1)), itemUrl(uid, fromList(query)))],
+      renderPlayer(page, uid, startTime(query?.slice(1)), itemUrl(uid, fromList(query)),
+        new URLSearchParams(query?.slice(1)).get("clip"))],
+    [/^#\/edit\/([0-9a-f-]{36})$/, (page, uid) => renderEditor(page, uid)],
     [/^#\/tag\/([0-9a-f-]{36})$/, (page, uid) => renderTag(page, uid)],
   ],
   // Each visit renders into a fresh element, so a slow page that finishes after

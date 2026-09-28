@@ -97,14 +97,26 @@ export function prevMark(marks, position) {
   return [...marks].reverse().find((m) => m.time < position - 2) || null;
 }
 
+/** The skipped range `t` is in (playback jumps to its end), or null. The last
+ *  0.3 s of a range doesn't count: that's where a jump lands. */
+export function skipAt(skips, t) {
+  return skips.find((r) => t >= r.start && t < r.end - 0.3) || null;
+}
+
+/** Where to start a clip: `start` if it's inside the clip, else the clip's start. */
+export function clipStart(clip, start) {
+  return start > clip.start && start < clip.end ? start : clip.start;
+}
+
 /** "#/play/<id>?t=335": where to start, in seconds (0 if not given). */
 export function startTime(query) {
   const t = Number(new URLSearchParams(query || "").get("t"));
   return Number.isFinite(t) && t > 0 ? t : 0;
 }
 
-/** `backUrl`: where the back button goes (the video's page, keeping the list it was opened from). */
-export async function renderPlayer(page, itemId, start = 0, backUrl = `#/item/${itemId}`) {
+/** `backUrl`: where the back button goes (the video's page, keeping the list it was opened from).
+ *  `clipId`: play just that clip (a range saved on the edit page), as if it were a video. */
+export async function renderPlayer(page, itemId, start = 0, backUrl = `#/item/${itemId}`, clipId = null) {
   // Ask the server how *this* browser should play it (see plan.py).
   const caps = await capabilities();
   const [item, plan] = await Promise.all([
@@ -112,6 +124,12 @@ export async function renderPlayer(page, itemId, start = 0, backUrl = `#/item/${
     api("GET", `/api/items/${itemId}/plan?${capsQuery(caps)}&hls_support=${hlsSupport()}`),
   ]);
   if (plan.mode === "unsupported" || item.missing) throw new Error("This video can't be played.");
+  // A clip is a window on the video: the seek bar, clock and controls cover just
+  // that stretch. Otherwise, ranges saved as "skip" are jumped over.
+  const clip = clipId ? (item.ranges || []).find((r) => r.id === clipId && r.kind === "clip") : null;
+  if (clipId && !clip) throw new Error("This clip doesn't exist any more.");
+  const skips = clip ? [] : (item.ranges || []).filter((r) => r.kind === "skip");
+  const from = clip ? clip.start : 0;
 
   const streamed = plan.streamed;
   let dragTime = null; // while dragging the seek bar: where it would seek to
@@ -145,10 +163,12 @@ export async function renderPlayer(page, itemId, start = 0, backUrl = `#/item/${
   const tip = h("div", { class: "seek-tip" });
   // Your marks, as ticks on the seek bar: click one to go there.
   const ticks = h("div", { class: "seek-marks" });
+  // Skipped ranges, shaded on the rail.
+  const skipBands = h("div", { class: "seek-skips", "aria-hidden": "true" });
   const seekBar = h(
     "div",
     { class: "seek", role: "slider", tabindex: 0, "aria-label": "Seek", "aria-valuemin": 0 },
-    h("div", { class: "seek-rail" }, buffered, fillBar),
+    h("div", { class: "seek-rail" }, buffered, fillBar, skipBands),
     ticks,
     knob,
     tip,
@@ -174,7 +194,7 @@ export async function renderPlayer(page, itemId, start = 0, backUrl = `#/item/${
     h(
       "div",
       { class: "player-heading" },
-      h("span", { class: "player-title" }, item.title),
+      h("span", { class: "player-title" }, clip ? `${item.title} · ${clip.label || "Clip"}` : item.title),
       streamed && h("span", { class: "badge" }, h("i", { class: "pulse" }), BADGES[plan.mode] || "Converting"),
     ),
   );
@@ -212,6 +232,8 @@ export async function renderPlayer(page, itemId, start = 0, backUrl = `#/item/${
   const duration = () =>
     plan.delivery === "progressive" || !Number.isFinite(video.duration) ? item.duration || 0 : video.duration;
   const position = () => source.position();
+  // The end of what's shown: the clip's end, or the video's.
+  const until = () => (clip ? Math.min(clip.end, duration() || clip.end) : duration());
 
   function load(start) {
     source.load(start);
@@ -219,25 +241,26 @@ export async function renderPlayer(page, itemId, start = 0, backUrl = `#/item/${
   }
 
   function seek(t) {
-    source.seek(clampSeek(t, duration()));
+    source.seek(clip ? Math.max(from, Math.min(t, clip.end - 0.5)) : clampSeek(t, duration()));
     updateTime();
   }
 
+  // Seek bar positions and the clock are measured from `from` (a clip's start).
   const pct = (t) => {
-    const total = duration();
-    return total ? `${Math.min(100, Math.max(0, (t / total) * 100))}%` : "0%";
+    const total = until() - from;
+    return total > 0 ? `${Math.min(100, Math.max(0, ((t - from) / total) * 100))}%` : "0%";
   };
 
   function updateTime() {
-    const total = duration();
+    const total = until() - from;
     const shown = dragTime ?? position();
-    timeNow.textContent = formatDuration(shown) || "0:00";
+    timeNow.textContent = formatDuration(shown - from) || "0:00";
     timeTotal.textContent = formatDuration(total) || "–";
     fillBar.style.width = pct(shown);
     knob.style.left = pct(shown);
     buffered.style.width = pct(source.bufferedEnd());
     seekBar.setAttribute("aria-valuemax", Math.round(total));
-    seekBar.setAttribute("aria-valuenow", Math.round(shown));
+    seekBar.setAttribute("aria-valuenow", Math.round(shown - from));
     seekBar.setAttribute("aria-valuetext", timeNow.textContent);
   }
 
@@ -296,16 +319,17 @@ export async function renderPlayer(page, itemId, start = 0, backUrl = `#/item/${
   function showMarks() {
     updateMarkButtons();
     const total = duration();
+    const shown = marks.filter((m) => m.time >= from && m.time <= until());
     ticks.replaceChildren(
-      ...(total ? marks : []).map((m) =>
+      ...(total ? shown : []).map((m) =>
         h(
           "button",
           {
             type: "button",
             class: "seek-mark",
             style: `left:${pct(m.time)}`,
-            title: `Go to ${formatDuration(m.time) || "0:00"}`,
-            "aria-label": `Go to mark at ${formatDuration(m.time) || "0:00"}`,
+            title: `Go to ${formatDuration(m.time - from) || "0:00"}`,
+            "aria-label": `Go to mark at ${formatDuration(m.time - from) || "0:00"}`,
             // Its own click, not the seek bar's drag: go exactly to the mark.
             onpointerdown: (e) => e.stopPropagation(),
             onclick: (e) => {
@@ -314,6 +338,11 @@ export async function renderPlayer(page, itemId, start = 0, backUrl = `#/item/${
             },
           },
         ),
+      ),
+    );
+    skipBands.replaceChildren(
+      ...(total ? skips : []).map((r) =>
+        h("div", { class: "seek-skip", style: `left:${pct(r.start)};width:calc(${pct(r.end)} - ${pct(r.start)})` }),
       ),
     );
   }
@@ -341,8 +370,35 @@ export async function renderPlayer(page, itemId, start = 0, backUrl = `#/item/${
   }
 
   function togglePlay() {
-    if (video.paused) video.play().catch(() => {});
-    else video.pause();
+    if (video.paused) {
+      if (clip && position() >= clip.end - 0.3) seek(from); // at the clip's end: play it again
+      video.play().catch(() => {});
+    } else video.pause();
+  }
+
+  // A clip stops at its end; a skipped range is jumped over (a skip to the very
+  // end just stops there).
+  let skipping = false;
+  function keepInBounds() {
+    const at = position();
+    if (clip) {
+      if (at >= clip.end - 0.05 && !video.paused) {
+        video.pause();
+        showToast("End of clip");
+      }
+      return;
+    }
+    const skip = dragTime === null && !skipping && skipAt(skips, at);
+    if (!skip) return;
+    if (skip.end >= duration() - 1) {
+      video.pause();
+      showToast("The rest is skipped");
+      return;
+    }
+    skipping = true;
+    seek(skip.end);
+    showToast(`Skipped ${formatDuration(skip.start) || "0:00"} – ${formatDuration(skip.end)}`);
+    skipping = false;
   }
 
   function toggleFullscreen() {
@@ -361,12 +417,12 @@ export async function renderPlayer(page, itemId, start = 0, backUrl = `#/item/${
   // ---- Seek bar dragging and hover time ----
   const timeAt = (clientX) => {
     const rect = seekBar.getBoundingClientRect();
-    return (Math.min(Math.max(clientX - rect.left, 0), rect.width) / rect.width) * duration();
+    return from + (Math.min(Math.max(clientX - rect.left, 0), rect.width) / rect.width) * (until() - from);
   };
   const showTip = (clientX) => {
     const rect = seekBar.getBoundingClientRect();
     const x = Math.min(Math.max(clientX - rect.left, 0), rect.width);
-    tip.textContent = formatDuration(timeAt(clientX)) || "0:00";
+    tip.textContent = formatDuration(timeAt(clientX) - from) || "0:00";
     tip.style.left = `${x}px`;
   };
   seekBar.addEventListener("pointermove", (e) => {
@@ -410,6 +466,7 @@ export async function renderPlayer(page, itemId, start = 0, backUrl = `#/item/${
     showControls();
   });
   video.addEventListener("timeupdate", updateTime);
+  video.addEventListener("timeupdate", keepInBounds);
   video.addEventListener("progress", updateTime);
   video.addEventListener("durationchange", updateTime);
   video.addEventListener("waiting", () => (spinner.hidden = false));
@@ -438,7 +495,7 @@ export async function renderPlayer(page, itemId, start = 0, backUrl = `#/item/${
 
   // ---- Buttons ----
   playBtn.addEventListener("click", togglePlay);
-  startBtn.addEventListener("click", () => seek(0));
+  startBtn.addEventListener("click", () => seek(from));
   backBtn.addEventListener("click", () => seek(position() - JUMP_SECONDS));
   forwardBtn.addEventListener("click", () => seek(position() + JUMP_SECONDS));
   fullBtn.addEventListener("click", toggleFullscreen);
@@ -464,7 +521,7 @@ export async function renderPlayer(page, itemId, start = 0, backUrl = `#/item/${
       f: toggleFullscreen,
       m: () => (video.muted = !video.muted),
       p: takeSnapshot,
-      Home: () => seek(0),
+      Home: () => seek(from),
       ArrowLeft: () => seek(position() - (e.shiftKey ? JUMP_SECONDS : SKIP_SECONDS)),
       ArrowRight: () => seek(position() + (e.shiftKey ? JUMP_SECONDS : SKIP_SECONDS)),
     };
@@ -477,7 +534,7 @@ export async function renderPlayer(page, itemId, start = 0, backUrl = `#/item/${
   document.addEventListener("keydown", onKey);
 
   spinner.hidden = false;
-  load(start);
+  load(clip ? clipStart(clip, start) : start);
   updateTime();
   showMarks();
 

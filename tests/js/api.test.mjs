@@ -154,3 +154,30 @@ test("pathBelow shows a path from the Show all folder down", () => {
   assert.equal(pathBelow("Spicy/europe/001/movie.mp4", ""), "Spicy/europe/001/movie.mp4"); // the library's top
   assert.equal(pathBelow("Spicy/jav/a.mp4", "Spicy/ja"), "Spicy/jav/a.mp4");               // a whole folder name only
 });
+
+// ---- The edit page's times ----
+
+const { formatTime, parseTime } = await import("../../reel/static/api.js");
+
+test("times on the edit page show tenths of a second", () => {
+  assert.equal(formatTime(0), "0:00.0");
+  assert.equal(formatTime(7.04), "0:07.0");
+  assert.equal(formatTime(75.25), "1:15.3");
+  assert.equal(formatTime(3730.5), "1:02:10.5");
+  assert.equal(formatTime(59.96), "1:00.0");
+});
+
+test("typed times: seconds, m:ss and h:mm:ss, with or without tenths", () => {
+  assert.equal(parseTime("75"), 75);
+  assert.equal(parseTime(" 75.2 "), 75.2);
+  assert.equal(parseTime("1:15"), 75);
+  assert.equal(parseTime("1:02:10.5"), 3730.5);
+  assert.equal(parseTime("90:00"), 5400);
+  assert.equal(parseTime(formatTime(3730.5)), 3730.5);
+});
+
+test("things that aren't times", () => {
+  for (const text of ["", "abc", "1:75", "1:2:3:4", "1.5:00", "-3", "1::2", "1:30.", null]) {
+    assert.equal(parseTime(text), null, String(text));
+  }
+});

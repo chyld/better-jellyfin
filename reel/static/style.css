@@ -399,6 +399,104 @@ dialog .note { margin: 0 0 14px; font-size: 14px; color: var(--warn); }
 .welcome p { color: var(--muted); margin: 0 0 28px; font-size: 16px; }
 .welcome .btn { height: 46px; padding: 0 24px; border-radius: 999px; }
 
+/* ---- A video's ranges and clips (made on its edit page) ----------------------------------- */
+
+.detail-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.btn.edit-link { height: 50px; padding: 0 22px; border-radius: 999px; font-size: 15px; font-weight: 650; }
+a.text-btn { text-decoration: none; }
+.ranges-section { margin-top: 20px; }
+.chip.range { font-variant-numeric: tabular-nums; }
+.chip.range.skip { color: var(--muted); border-style: dashed; }
+.chip-kind {
+  font-size: 10.5px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--danger);
+}
+.clips { margin-top: 12px; }
+
+/* Kinds: range (marked), skip (jumped over), clip (a video of its own). */
+:root { --kind-range: #fbbf24; --kind-skip: #f87171; --kind-clip: #34d399; }
+.kind-badge {
+  flex: none; min-width: 52px; text-align: center; padding: 4px 9px; border-radius: 999px;
+  font-size: 11px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
+  border: 1px solid currentColor;
+}
+.kind-badge.range { color: var(--kind-range); }
+.kind-badge.skip { color: var(--kind-skip); }
+.kind-badge.clip { color: var(--kind-clip); }
+
+/* The edit page */
+.edit-preview, .edit-form, .edit-list { max-width: 1100px; }
+.edit-screen { background: #000; border-radius: var(--radius); overflow: hidden; border: 1px solid var(--edge); }
+.edit-screen[hidden] { display: none; }
+.edit-video { display: block; width: 100%; max-height: 56vh; background: #000; cursor: pointer; }
+.edit-note { color: var(--muted); }
+.edit-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; margin: 14px 0 10px; }
+.edit-clock { font-variant-numeric: tabular-nums; font-weight: 600; }
+.edit-keys { color: var(--faint); font-size: 12.5px; margin-left: auto; }
+.edit-timeline {
+  position: relative; height: 34px; border-radius: 8px; cursor: pointer; touch-action: none;
+  background: var(--glass-2); border: 1px solid var(--edge); outline: none;
+}
+.edit-timeline:focus-visible { box-shadow: 0 0 0 3px rgb(56 189 248 / 0.35); }
+.edit-saved { position: absolute; inset: 0; pointer-events: none; }
+.edit-band { position: absolute; top: 5px; bottom: 5px; border-radius: 3px; opacity: 0.35; }
+.edit-band.range { background: var(--kind-range); }
+.edit-band.skip { background: repeating-linear-gradient(135deg, var(--kind-skip) 0 3px, transparent 3px 6px); opacity: 0.6; }
+.edit-band.clip { background: var(--kind-clip); }
+.edit-selection {
+  position: absolute; top: 0; bottom: 0; pointer-events: none; border-radius: 4px;
+  border: 2px solid var(--neon-a); background: rgb(56 189 248 / 0.14);
+}
+.edit-selection.skip { border-color: var(--kind-skip); background: rgb(248 113 113 / 0.14); }
+.edit-selection.clip { border-color: var(--kind-clip); background: rgb(52 211 153 / 0.14); }
+.edit-head {
+  position: absolute; top: -4px; bottom: -4px; width: 2px; margin-left: -1px; pointer-events: none;
+  background: #fff; box-shadow: 0 0 8px rgb(255 255 255 / 0.8);
+}
+
+.edit-form, .edit-list { margin-top: 36px; }
+.edit-form h3, .edit-list h3 { margin: 0 0 14px; font-size: 18px; font-weight: 700; }
+.edit-ends { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+.edit-end {
+  display: grid; gap: 10px; align-content: start; padding: 16px; border-radius: var(--radius);
+  background: var(--glass); border: 1px solid var(--edge);
+}
+.edit-end-head { display: flex; align-items: center; gap: 12px; }
+.edit-label { font-size: 12px; font-weight: 650; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); min-width: 40px; }
+.edit-time { flex: 1; min-width: 0; font-variant-numeric: tabular-nums; font-size: 16px; font-weight: 600; }
+.edit-still-box { position: relative; aspect-ratio: 16 / 9; border-radius: 10px; overflow: hidden; background: #000; }
+.edit-still { width: 100%; height: 100%; object-fit: contain; display: block; transition: opacity 0.2s; }
+.edit-still:not([src]) { visibility: hidden; }
+.edit-still-box.loading .edit-still { opacity: 0.45; }
+.edit-nudges { display: flex; flex-wrap: wrap; gap: 6px; }
+.edit-nudges .btn { font-variant-numeric: tabular-nums; }
+.edit-meta { display: flex; align-items: center; gap: 16px; margin: 18px 0 14px; }
+.edit-meta input { flex: 1; min-width: 0; }
+.edit-length { font-variant-numeric: tabular-nums; color: var(--muted); font-weight: 600; white-space: nowrap; }
+.edit-length.bad { color: var(--danger); }
+.segmented { display: inline-flex; padding: 3px; border-radius: 999px; background: var(--glass-2); border: 1px solid var(--edge); }
+.seg {
+  font: inherit; font-size: 14px; font-weight: 600; padding: 7px 18px; border: 0; border-radius: 999px;
+  background: none; color: var(--muted); cursor: pointer; transition: background 0.2s, color 0.2s;
+}
+.seg:hover { color: var(--text); }
+.seg:focus-visible { outline: none; box-shadow: 0 0 0 3px rgb(56 189 248 / 0.35); }
+.seg[aria-pressed="true"] { color: var(--accent-text); background: var(--neon); }
+.edit-hint { color: var(--muted); font-size: 13.5px; margin: 10px 0 16px; }
+.edit-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+.edit-actions .btn[hidden] { display: none; }
+
+.range-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.range-row {
+  display: flex; align-items: center; gap: 14px; padding: 12px 14px; border-radius: 14px;
+  background: var(--glass); border: 1px solid var(--edge);
+}
+.range-row.selected { border-color: rgb(56 189 248 / 0.6); background: rgb(56 189 248 / 0.06); }
+.range-what { flex: 1; min-width: 0; }
+.range-name { font-weight: 650; overflow-wrap: anywhere; }
+.range-times { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+.range-actions { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
+
 /* ---- Small screens ------------------------------------------------------------------------ */
 
 @media (max-width: 900px) {
@@ -408,6 +506,13 @@ dialog .note { margin: 0 0 14px; font-size: 14px; color: var(--warn); }
 @media (max-width: 700px) {
   .tag-row { flex-wrap: wrap; }
   .tag-row .buttons { width: 100%; justify-content: flex-start; }
+}
+@media (max-width: 700px) {
+  .edit-ends { grid-template-columns: 1fr; }
+  .edit-keys { display: none; }
+  .range-row { flex-wrap: wrap; }
+  .range-actions { width: 100%; justify-content: flex-start; }
+  .edit-meta { flex-wrap: wrap; }
 }
 @media (max-width: 560px) {
   .topbar { padding: 0 16px; gap: 14px; height: 58px; }

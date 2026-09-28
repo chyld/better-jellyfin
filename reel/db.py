@@ -287,6 +287,26 @@ def _v10_path_order_by_folder(conn: sqlite3.Connection) -> None:
                      [(path_key(r["rel_path"]), r["id"]) for r in rows])
 
 
+def _v11_ranges(conn: sqlite3.Connection) -> None:
+    # Stretches of a video marked on its edit page: just marked, skipped when
+    # playing, or a clip (see ranges.py). The file itself is never changed.
+    conn.execute(
+        """
+        CREATE TABLE ranges (
+            id         INTEGER PRIMARY KEY,
+            uid        TEXT NOT NULL UNIQUE,
+            item_id    INTEGER NOT NULL REFERENCES media_items(id) ON DELETE CASCADE,
+            start      REAL NOT NULL,
+            "end"      REAL NOT NULL,
+            kind       TEXT NOT NULL CHECK (kind IN ('range', 'skip', 'clip')),
+            label      TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    conn.execute('CREATE INDEX ranges_item ON ranges (item_id, start)')
+
+
 # (version, what it does, function). Append only; functions must not commit.
 MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (2, "fingerprints and probe versions for media items", _v2_identity),
@@ -298,6 +318,7 @@ MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (8, "marks: spots in a video to jump back to", _v8_marks),
     (9, "index each video's full-path order for show-all lists", _v9_path_order),
     (10, "full-path order: folders with look-alike names stay apart", _v10_path_order_by_folder),
+    (11, "ranges: stretches of a video to skip, keep as clips, or just mark", _v11_ranges),
 ]
 
 
