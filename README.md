@@ -190,7 +190,8 @@ permissions. The usual cause is a `./data` that Docker created owned by root.
 | Tag | `#/tag/<tag-uuid>` | The videos with that tag. |
 | Libraries | `#/manage` | Add, rename, remove and scan libraries, with live progress. |
 
-Going **Back** returns you to the same scroll position in long grids.
+Going **Back** returns you to the same scroll position in long grids: the pages of videos
+you had loaded are loaded again first, so a spot far down a list is still there.
 
 ### Player controls
 
@@ -257,6 +258,10 @@ the database, so **browsing never touches the NAS**.
     `REEL_MISSING_GRACE_DAYS` (default 7). If it comes back before then, for example when the
     NAS is mounted again, it reappears with everything intact. Its page shows "Missing from
     the library".
+- **The walk looks only at files it can use.** Each file looked at (its size, time, and
+  whether it's a link) is a round trip on SMB, so only videos, `folder.<ext>` and pictures named
+  like a video in the same folder are looked at; `.nfo`, `.srt` and loose photos are skipped.
+  The files in a folder are looked at 4 at a time.
 - **Symlinks** that lead out of the library are ignored, videos and pictures alike, and the
   scan reports how many. Symlinks that stay inside the library are fine. Symlinked folders
   aren't followed.
@@ -316,15 +321,16 @@ the database, so **browsing never touches the NAS**.
   (its size and modification time), and thumbnails are cached under it, so showing a cached
   one needs no trip to the NAS. The version is also in the picture's URL, so the browser keeps
   it for good. A picture replaced on the NAS shows up after the next scan.
-- **Once the scan queue is empty, missing thumbnails are made** one at a time, so the first
+- **Once the scan queue is empty, missing thumbnails are made** two at a time, so the first
   look at a folder doesn't wait for ffmpeg. Scans always go first ("Scan all" scans every
   library before making any), and it gives way as soon as another scan is queued, someone starts
   watching, or Reel stops (a thumbnail being made is ended); the rest are made on first view or
   after the next scan. Thumbnails of old picture versions are deleted then too.
 - **While someone watches, thumbnails are made one at a time** (otherwise up to 4 at once), so a
-  new folder doesn't take the CPU or the NAS from playback. "Watching" means a stream is running
-  or any video bytes (direct play, a stream, an HLS segment) were asked for in the last 30
-  seconds.
+  new folder doesn't take the CPU or the NAS from playback. "Watching" means a stream is running,
+  a video file is still being sent for direct play (a browser can keep one response open for
+  many minutes), or any video bytes (direct play, a stream, an HLS segment) were asked for in
+  the last 30 seconds.
 - Cards load their pictures lazily as they scroll into view.
 - Placeholders are drawn in the browser, so a missing picture costs no request. A picture that
   fails to load (for example with the NAS offline) also turns into its placeholder.
@@ -707,9 +713,9 @@ version); bump `THUMBS` when the server changes how thumbnails are made.
 ### Tests
 
 ```sh
-uv run pytest              # backend: 604 tests
+uv run pytest              # backend: 606 tests
 node --test tests/js/      # frontend: 39 tests
-uv run pytest -m browser   # browser: 20 tests (about 2 minutes; needs Chromium and ffmpeg)
+uv run pytest -m browser   # browser: 21 tests (about 2 minutes; needs Chromium and ffmpeg)
 scripts/docker-smoke.sh    # builds the image and checks it end to end (needs Docker)
 ```
 

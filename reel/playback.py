@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import anyio
+from fastapi.responses import FileResponse
 
 from .plan import Plan
 
@@ -252,8 +253,9 @@ class Watching:
     A running ffmpeg isn't enough: direct play has none, and an HLS encoder
     pauses once it's ahead. So every request for video bytes (the file, a
     stream, a segment) is noted, and "watching" means one of those in the last
-    RECENT seconds, or a stream running now. Read from other threads: it only
-    looks at a number and a set's size, which is safe.
+    RECENT seconds, a stream running now, or a file still being sent (a browser
+    may keep one direct-play response open for many minutes). Read from other
+    threads: it only looks at numbers and a set's size, which is safe.
     """
 
     RECENT = 30.0
@@ -261,9 +263,29 @@ class Watching:
     def __init__(self, streams: "StreamManager"):
         self._streams = streams
         self._last = float("-inf")
+        self._sending = 0   # file responses in progress (changed on the event loop only)
 
     def saw_playback(self) -> None:
         self._last = time.monotonic()
 
     def __call__(self) -> bool:
-        return bool(self._streams.active) or time.monotonic() - self._last < self.RECENT
+        return (bool(self._streams.active) or self._sending > 0
+                or time.monotonic() - self._last < self.RECENT)
+
+
+class WatchedFile(FileResponse):
+    """A video file sent for direct play: counts as watching for as long as it's
+    being sent, and for RECENT seconds after (the browser plays what it buffered)."""
+
+    def __init__(self, *args, watching: Watching, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._watching = watching
+
+    async def __call__(self, scope, receive, send) -> None:
+        self._watching.saw_playback()
+        self._watching._sending += 1
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            self._watching._sending -= 1
+            self._watching.saw_playback()

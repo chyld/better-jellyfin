@@ -9,12 +9,14 @@ size and modification time), and thumbnails are cached under it, so:
 - making one waits for a slot (at most SLOTS at once, one while someone is
   watching) before it takes a request thread, then re-checks the picture is
   still inside its library and runs ffmpeg;
-- after scans, missing thumbnails are made in the background and old versions
-  are deleted (see warm() and prune(), called by the scan manager).
+- after scans, missing thumbnails are made in the background (WARM_SLOTS at a
+  time, none while someone is watching) and old versions are deleted (see warm()
+  and prune(), called by the scan manager).
 """
 import asyncio
 import sqlite3
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from fastapi.concurrency import run_in_threadpool
@@ -27,6 +29,7 @@ from .images import Thumbnailer, ThumbnailError
 from .paths import OutsideRoot, resolve_inside
 
 SLOTS = 4  # NAS pictures thumbnailed at once (one while someone is watching)
+WARM_SLOTS = 2  # made at once after a scan (leaving room for folders being opened)
 THUMB_HEADERS = {"Cache-Control": "private, max-age=3600"}
 IMMUTABLE_HEADERS = {"Cache-Control": "private, max-age=31536000, immutable"}
 
@@ -153,8 +156,8 @@ class Thumbnails:
         return self.thumbnailer.prune(keep)
 
     def warm(self, library_ids: list[int], should_stop: Callable[[], bool]) -> bool:
-        """Make the missing thumbnails of these libraries, one at a time, so a first
-        look at a folder doesn't wait for ffmpeg. Checks `should_stop` (a scan
+        """Make the missing thumbnails of these libraries, WARM_SLOTS at a time, so a
+        first look at a folder doesn't wait for ffmpeg. Checks `should_stop` (a scan
         queued, someone watching, Reel stopping) before each one. Returns whether
         it finished; if not, the rest are made on first view or after the next scan."""
         if not library_ids:
@@ -165,15 +168,18 @@ class Thumbnails:
                     if self.thumbnailer.cached(_key(p), p["rev"], p["shape"]) is None]
         finally:
             conn.close()
-        for found in todo:
+
+        def one(found: dict) -> bool:
             if should_stop():
                 return False
             try:
                 self.make(found)
             except ThumbnailError:
                 pass  # a broken picture (or Reel stopping): the browser shows the placeholder
-        return True
+            return True
 
+        with ThreadPoolExecutor(WARM_SLOTS) as pool:
+            return all(list(pool.map(one, todo)))
 
 def _key(found: dict) -> str:
     """The picture's path as the catalog knows it: part of its thumbnail's cache key."""

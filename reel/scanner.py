@@ -30,6 +30,7 @@ YEAR_PREFIX = re.compile(r"^((?:19|20)\d{2})[.\s_-]+(.+)$")
 # tags and images) before it's removed. Covers a NAS that was briefly unmounted.
 MISSING_GRACE = timedelta(days=7)
 FINGERPRINT_CHUNK = 64 * 1024
+STAT_WORKERS = 4  # files in a folder looked at (stat) at once during the walk
 
 log = logging.getLogger(__name__)
 
@@ -69,6 +70,31 @@ def _matters(filename: str) -> bool:
         return False
     ext = filename.rsplit(".", 1)[1].lower()
     return ext in VIDEO_EXTENSIONS or ext in IMAGE_EXTENSIONS
+
+
+def _used(filenames: list[str]) -> list[str]:
+    """The files in one folder the scan uses: its videos, its folder.<ext>, and
+    pictures named like one of its videos (zombie.mp4 -> zombie.png)."""
+    filenames = [f for f in filenames if _matters(f)]
+    stems = {"folder"} | {f.rsplit(".", 1)[0].lower() for f in filenames if is_video(f)}
+    return [f for f in filenames if is_video(f) or f.rsplit(".", 1)[0].lower() in stems]
+
+
+def _look(root: Path, rel_dir: Path, dirpath: str, name: str) -> tuple[str, os.stat_result | None]:
+    """One file's stat, followed if it's a link inside the library: ("ok", stat),
+    or ("gone" | "outside" | "unreadable", None). Runs in the walk's pool."""
+    full = os.path.join(dirpath, name)
+    try:
+        st = os.lstat(full)
+        if stat.S_ISLNK(st.st_mode):
+            if not is_inside(root, rel_dir / name):
+                return "outside", None
+            st = os.stat(full)
+    except FileNotFoundError:
+        return "gone", None
+    except OSError:
+        return "unreadable", None
+    return "ok", st
 
 
 def is_video(filename: str) -> bool:
@@ -179,69 +205,69 @@ def walk_library(root: Path, cancel: threading.Event | None = None) -> Walk:
         # Keep going, but remember: nothing below this folder may be treated as gone.
         unreadable_folders.append(Path(err.filename).relative_to(root).as_posix())
 
-    for dirpath, dirnames, filenames in os.walk(root, onerror=on_error):
-        _check(cancel)
-        # Skip hidden folders (.zfs snapshots, .Trash, etc.).
-        dirnames[:] = sorted(d for d in dirnames if not d.startswith("."))
-        rel_dir = Path(dirpath).relative_to(root)
-        folders.add(rel_dir.as_posix() if rel_dir.parts else "")
-        # Only videos and pictures are used; everything else (.nfo, .srt, ...) is
-        # skipped before any per-file check, each of which is a round trip on SMB.
-        filenames = [f for f in filenames if _matters(f)]
-        # One look at each (lstat): its size and time, and whether it's a link. Only a
-        # link needs another (to follow it), and one leading out of the library is
-        # ignored, videos and pictures alike. Each call is a round trip on SMB.
-        stats: dict[str, os.stat_result] = {}
-        kept = []
-        for f in filenames:
-            full = os.path.join(dirpath, f)
-            try:
-                st = os.lstat(full)
-                if stat.S_ISLNK(st.st_mode):
-                    if not is_inside(root, rel_dir / f):
-                        outside += is_video(f)
-                        continue
-                    st = os.stat(full)
-            except FileNotFoundError:
-                continue  # deleted while we were scanning: really gone
-            except OSError:
-                if is_video(f):
-                    unreadable_files.add((rel_dir / f).as_posix())  # there, but unreadable right now
+    with ThreadPoolExecutor(STAT_WORKERS) as pool:
+        for dirpath, dirnames, filenames in os.walk(root, onerror=on_error):
+            _check(cancel)
+            # Skip hidden folders (.zfs snapshots, .Trash, etc.).
+            dirnames[:] = sorted(d for d in dirnames if not d.startswith("."))
+            rel_dir = Path(dirpath).relative_to(root)
+            folders.add(rel_dir.as_posix() if rel_dir.parts else "")
+            # Only videos and the pictures that can be used (folder.<ext>, or named like a
+            # video here) matter; everything else (.nfo, .srt, loose photos, ...) is
+            # skipped before any per-file check, each of which is a round trip on SMB.
+            filenames = _used(filenames)
+            # One look at each (lstat): its size and time, and whether it's a link. Only a
+            # link needs another (to follow it), and one leading out of the library is
+            # ignored, videos and pictures alike. The looks run a few at a time, since
+            # on SMB each one is mostly waiting.
+            stats: dict[str, os.stat_result] = {}
+            kept = []
+            look = lambda f: _look(root, rel_dir, dirpath, f)  # noqa: E731
+            looks = pool.map(look, filenames) if len(filenames) > 1 else map(look, filenames)
+            for f, (outcome, st) in zip(filenames, looks):
+                if outcome == "gone":
+                    continue  # deleted while we were scanning: really gone
+                if outcome == "outside":
+                    outside += is_video(f)
+                    continue
+                if outcome == "unreadable":
+                    if is_video(f):
+                        unreadable_files.add((rel_dir / f).as_posix())  # there, but unreadable right now
+                    else:
+                        kept.append(f)  # a picture that's there: kept, its version unknown (no stats entry)
+                    continue
+                stats[f] = st
+                kept.append(f)
+            filenames = kept
+            names_lower = {f.lower(): f for f in filenames}
+            video_names = sorted(f for f in filenames if is_video(f))
+
+            art = _find_image(names_lower, "folder")
+            if art:
+                here = rel_dir.as_posix() if rel_dir.parts else ""
+                if art in stats:
+                    folder_art[here] = ((rel_dir / art).as_posix(), _rev(stats[art]))
                 else:
-                    kept.append(f)  # a picture that's there: kept, its version unknown (no stats entry)
-                continue
-            stats[f] = st
-            kept.append(f)
-        filenames = kept
-        names_lower = {f.lower(): f for f in filenames}
-        video_names = sorted(f for f in filenames if is_video(f))
+                    art_unreadable.add(here)  # there but unreadable: its stored row stays as it is
 
-        art = _find_image(names_lower, "folder")
-        if art:
-            here = rel_dir.as_posix() if rel_dir.parts else ""
-            if art in stats:
-                folder_art[here] = ((rel_dir / art).as_posix(), _rev(stats[art]))
-            else:
-                art_unreadable.add(here)  # there but unreadable: its stored row stays as it is
-
-        for name in video_names:
-            rel_path = (rel_dir / name).as_posix()
-            st = stats[name]
-            # A lone video in a leaf folder (Drama/0902/rough-cut.mp4) is named after the folder;
-            # a lone video beside other folders (Personal/loose.mp4) keeps its own name.
-            alone = len(video_names) == 1 and not dirnames
-            title, year = derive_title(rel_path, alone_in_folder=alone)
-            poster = find_poster(name, names_lower)
-            videos.append(FoundVideo(
-                rel_path=rel_path,
-                title=title,
-                year=year,
-                poster_path=(rel_dir / poster).as_posix() if poster else None,
-                poster_rev=_rev(stats[poster]) if poster in stats else None,
-                poster_unreadable=bool(poster) and poster not in stats,
-                size=st.st_size,
-                mtime=st.st_mtime,
-            ))
+            for name in video_names:
+                rel_path = (rel_dir / name).as_posix()
+                st = stats[name]
+                # A lone video in a leaf folder (Drama/0902/rough-cut.mp4) is named after the folder;
+                # a lone video beside other folders (Personal/loose.mp4) keeps its own name.
+                alone = len(video_names) == 1 and not dirnames
+                title, year = derive_title(rel_path, alone_in_folder=alone)
+                poster = find_poster(name, names_lower)
+                videos.append(FoundVideo(
+                    rel_path=rel_path,
+                    title=title,
+                    year=year,
+                    poster_path=(rel_dir / poster).as_posix() if poster else None,
+                    poster_rev=_rev(stats[poster]) if poster in stats else None,
+                    poster_unreadable=bool(poster) and poster not in stats,
+                    size=st.st_size,
+                    mtime=st.st_mtime,
+                ))
     return Walk(videos, folder_art, sorted(unreadable_folders), unreadable_files, outside, folders,
                 art_unreadable=art_unreadable)
 

@@ -227,7 +227,8 @@ async function viewerQuery() {
 export async function renderTag(view, tagId) {
   const viewer = await viewerQuery();
   const first = await api("GET", `/api/tags/${tagId}?${viewer}`);
-  const grid = pagedVideoGrid(first, (offset) => api("GET", `/api/tags/${tagId}?offset=${offset}&${viewer}`));
+  const grid = pagedVideoGrid(first, (offset) => api("GET", `/api/tags/${tagId}?offset=${offset}&${viewer}`),
+    undefined, location.hash);
   fill(
     view,
     h(
@@ -238,6 +239,7 @@ export async function renderTag(view, tagId) {
     h("p", { class: "summary" }, first.total_items ? plural(first.total_items, "video") : "No videos have this tag."),
     first.total_items > 0 && grid.element,
   );
+  await grid.restore();
   return () => grid.stop();
 }
 
@@ -458,45 +460,59 @@ function folderCard(libraryId, folder) {
   );
 }
 
+// How many videos each list (by its URL) had loaded, so coming back to it loads
+// as many again before the router restores the scroll position. Otherwise a spot
+// past the first page can't be scrolled back to.
+const loadedCounts = new Map();
+
 /**
  * A grid of videos that loads the next page as you near its end.
  * `first` is the first page ({items, total_items}); fetchPage(offset) gets the next.
- * `card` makes each video's card.
- * Returns { element, stop } — call stop() when leaving the page.
+ * `card` makes each video's card. `key` (the list's URL) remembers how far it was
+ * loaded, for restore().
+ * Returns { element, restore, stop } — await restore() before the page is shown
+ * (it loads the pages this list had loaded last time); call stop() when leaving.
  */
-function pagedVideoGrid(first, fetchPage, card = (item) => videoCard(item)) {
+function pagedVideoGrid(first, fetchPage, card = (item) => videoCard(item), key = null) {
   const list = h("ul", { class: "grid videos" }, first.items.map(card));
   const sentinel = h("div", { class: "load-more", "aria-hidden": "true" });
   const failure = h("p", { class: "load-error", role: "status", hidden: true });
   let loaded = first.items.length;
   let total = first.total_items ?? loaded;
-  let busy = false;
+  let loading = null; // the page being loaded, if any
   let stopped = false;
+  const wanted = (key && loadedCounts.get(key)) || 0;
+  const remember = () => key && loadedCounts.set(key, loaded);
+  remember();
 
   const nearEnd = () => sentinel.isConnected && sentinel.getBoundingClientRect().top < window.innerHeight + 800;
-  async function more() {
-    if (busy || stopped || loaded >= total) return;
-    busy = true;
+  async function loadNext() {
     failure.hidden = true;
+    let page;
     try {
-      let page;
-      try {
-        page = await fetchPage(loaded);
-      } catch (err) {
-        // Say so, instead of silently stopping: scrolling alone won't try again.
-        if (!stopped) showFailure(err);
-        return;
-      }
-      if (stopped) return;
-      list.append(...page.items.map(card));
-      loaded += page.items.length;
-      total = page.total_items ?? total;
-      if (!page.items.length) total = loaded;
-    } finally {
-      busy = false;
+      page = await fetchPage(loaded);
+    } catch (err) {
+      // Say so, instead of silently stopping: scrolling alone won't try again.
+      if (!stopped) showFailure(err);
+      return false;
     }
-    if (loaded >= total) finish();
-    else if (nearEnd()) more(); // a tall screen may still show the end
+    if (stopped) return false;
+    list.append(...page.items.map(card));
+    loaded += page.items.length;
+    total = page.total_items ?? total;
+    if (!page.items.length) total = loaded;
+    remember();
+    return true;
+  }
+  function more() {
+    if (loading || stopped || loaded >= total) return loading || Promise.resolve();
+    loading = loadNext().then((ok) => {
+      loading = null;
+      if (!ok) return;
+      if (loaded >= total) finish();
+      else if (nearEnd()) more(); // a tall screen may still show the end
+    });
+    return loading;
   }
   function showFailure(err) {
     failure.replaceChildren(
@@ -516,6 +532,13 @@ function pagedVideoGrid(first, fetchPage, card = (item) => videoCard(item)) {
   else sentinel.remove();
   return {
     element: h("div", { class: "paged" }, list, failure, sentinel),
+    async restore() {
+      while (!stopped && list.isConnected && loaded < Math.min(wanted, total)) {
+        const before = loaded;
+        await more();
+        if (loaded === before) break; // it failed (and says so)
+      }
+    },
     stop() {
       stopped = true;
       observer.disconnect();
@@ -536,10 +559,12 @@ export async function renderBrowse(view, libraryId, path, showAll = false) {
   let grid = null;
   let closed = false;
   let sortRequests = 0; // only the newest sort's answer is shown
+  const listKey = location.hash;
   const showItems = () => {
     if (closed) return;
     grid?.stop();
-    grid = pagedVideoGrid(data, async (offset) => api("GET", url(offset)), (item) => videoCard(item, { from: path, list: showAll ? path : null }));
+    grid = pagedVideoGrid(data, async (offset) => api("GET", url(offset)),
+      (item) => videoCard(item, { from: path, list: showAll ? path : null }), listKey);
     itemsHolder.replaceChildren(grid.element);
   };
   showItems();
@@ -598,6 +623,7 @@ export async function renderBrowse(view, libraryId, path, showAll = false) {
       h("ul", { class: "grid folders" }, data.folders.map((f) => folderCard(libraryId, f))),
     data.total_items > 0 && itemsHolder,
   );
+  await grid.restore();
   return () => {
     closed = true;
     grid?.stop();

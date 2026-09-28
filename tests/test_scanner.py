@@ -300,11 +300,13 @@ def test_one_slow_probe_doesnt_hold_back_the_others(conn, media_root, fake_probe
 
 
 def test_the_walk_looks_at_each_video_and_picture_once(conn, media_root, fake_probe, monkeypatch):
-    """One stat per video or picture (its size, time and whether it's a link), none
-    for sidecar files (.nfo, .srt, ...): each is a round trip on SMB."""
+    """One stat per video or picture it can use (its size, time and whether it's a
+    link), none for sidecar files (.nfo, .srt, ...) or photos no video is named
+    like: each is a round trip on SMB."""
     import os
-    make_files(media_root, "Tapes/a.mpg", "Tapes/a.png", "Tapes/folder.jpg",
-               *[f"Tapes/extra{i}.nfo" for i in range(40)], *[f"Tapes/extra{i}.srt" for i in range(40)])
+    make_files(media_root, "Tapes/a.mpg", "Tapes/A.png", "Tapes/folder.jpg",
+               *[f"Tapes/extra{i}.nfo" for i in range(40)], *[f"Tapes/extra{i}.srt" for i in range(40)],
+               *[f"Tapes/photo{i}.jpg" for i in range(40)])
     lib = create_library(conn, media_root, "Media", str(media_root))
     looked = []
     from reel import scanner
@@ -313,7 +315,7 @@ def test_the_walk_looks_at_each_video_and_picture_once(conn, media_root, fake_pr
     monkeypatch.setattr(scanner.os, "stat", lambda p, *a, **k: looked.append(os.path.basename(p)) or real_stat(p, *a, **k))
     scan_library(conn, lib, probe_fn=fake_probe)
     files = [name for name in looked if "." in name]
-    assert sorted(files) == ["a.mpg", "a.png", "folder.jpg"]
+    assert sorted(files) == ["A.png", "a.mpg", "folder.jpg"]
     row = conn.execute("SELECT poster_rev FROM media_items").fetchone()
     assert row["poster_rev"] and conn.execute("SELECT art_rev FROM folder_art").fetchone()[0]
 

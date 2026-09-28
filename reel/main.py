@@ -377,8 +377,8 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
     def get_item_file(item_uid: str, conn: sqlite3.Connection = Db):
         """The original file, with range requests so the browser can seek."""
         row, path = media_file(conn, item_uid)
-        watching.saw_playback()
-        return FileResponse(path, media_type=playback.direct_content_type(row["rel_path"]))
+        return playback.WatchedFile(path, media_type=playback.direct_content_type(row["rel_path"]),
+                                    watching=watching)
 
     def stream_source(item_uid: str) -> tuple[sqlite3.Row, Path]:
         """Look the video up on a short-lived connection (closed before streaming)."""

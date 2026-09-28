@@ -384,6 +384,33 @@ def test_playing_a_file_counts_as_watching(client, media_root):
     assert client.app.state.watching()
 
 
+
+def test_a_file_being_sent_counts_as_watching_until_it_ends(monkeypatch, tmp_path):
+    """Direct play can be one long response: it counts as watching all the way
+    through, not just for RECENT seconds after the request came in."""
+    import asyncio
+
+    from reel.playback import StreamManager, WatchedFile, Watching
+
+    monkeypatch.setattr(Watching, "RECENT", 0.0)
+    watching = Watching(StreamManager())
+    video = tmp_path / "a.mp4"
+    video.write_bytes(b"0" * 300_000)
+    seen = []
+
+    async def send(message):
+        seen.append(watching())
+        await asyncio.sleep(0)
+
+    async def receive():
+        await asyncio.sleep(10)
+        return {"type": "http.disconnect"}
+
+    scope = {"type": "http", "method": "GET", "headers": [], "path": "/", "query_string": b""}
+    asyncio.run(WatchedFile(video, watching=watching)(scope, receive, send))
+    assert len(seen) > 2 and all(seen)
+    assert not watching()
+
 @pytest.mark.parametrize("watching, most", [(True, 1), (False, 4)])
 def test_scans_probe_one_file_at_a_time_while_someone_watches(watching, most, conn, media_root):
     from reel.libraries import create_library

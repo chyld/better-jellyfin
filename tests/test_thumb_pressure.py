@@ -131,3 +131,49 @@ def test_thumbnails_are_made_one_at_a_time_while_something_plays(playing, most, 
             codes = list(pool.map(lambda i: c.get(f"/api/items/{i['id']}/thumb").status_code, items))
         app.state.streams.active.clear()
     assert codes == [200] * 8 and peak[0] == most
+
+
+def test_warming_makes_a_few_at_once_and_stops_when_asked(settings, media_root, fake_probe, monkeypatch, tmp_path):
+    """After a scan, missing thumbnails are made WARM_SLOTS at a time; once asked to
+    stop (someone started watching), no more are started and it says it didn't finish."""
+    from reel import thumbnails
+
+    names = [f"Tapes/v{i}" for i in range(12)]
+    make_files(media_root, *[n + ".mp4" for n in names], *[n + ".png" for n in names])
+    jpeg = tmp_path / "t.jpg"
+    jpeg.write_bytes(b"\xff\xd8\xff" + b"0" * 100)
+    lock = threading.Lock()
+    running, peak, made = [0], [0], [0]
+
+    def counting_make(self, src, shape="poster", **kwargs):
+        with lock:
+            running[0] += 1
+            peak[0] = max(peak[0], running[0])
+        time.sleep(0.1)
+        with lock:
+            running[0] -= 1
+            made[0] += 1
+        return jpeg
+
+    monkeypatch.setattr(Thumbnailer, "cached", lambda self, *args, **kwargs: None)
+    monkeypatch.setattr(Thumbnailer, "make", counting_make)
+    init_db(settings.db_path)
+    app = create_app(settings, ScanManager(settings.db_path, scan_fn=partial(scan_library, probe_fn=fake_probe)))
+    app.state.scans.after_batch = None
+    from fastapi.testclient import TestClient
+    with TestClient(app) as c:
+        lib = c.post("/api/libraries", json={"name": "Tapes", "path": str(media_root / "Tapes")}).json()["id"]
+        c.post(f"/api/libraries/{lib}/scan")
+        app.state.scans.wait_idle()
+    warm = thumbnails.Thumbnails(settings.db_path, settings.media_root, settings.images_dir,
+                                 Thumbnailer(settings.thumbs_dir), lambda: False)
+    from reel.db import connect
+    conn = connect(settings.db_path)
+    ids = [r[0] for r in conn.execute("SELECT id FROM libraries")]
+    conn.close()
+    assert warm.warm(ids, lambda: False) is True
+    assert made[0] == 12 and peak[0] == thumbnails.WARM_SLOTS
+
+    made[0] = 0
+    assert warm.warm(ids, lambda: made[0] >= 4) is False
+    assert made[0] < 12

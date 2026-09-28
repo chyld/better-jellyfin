@@ -135,3 +135,39 @@ def test_cards_look_the_same_and_colour_like_the_video_page(server, page):
         page.js(f"location.hash = '#/item/{server.videos[name]}'")
         page.wait_for("!!document.querySelector('.pill.mode')", message=f"{name}'s page")
         assert page.js(f"document.querySelector('.pill.mode').classList.contains('{tones[name]}')"), name
+
+
+def test_back_to_a_long_list_returns_to_the_same_video(server, page):
+    """Pages of one very tall card each, one per row (the test forces all three):
+    scrolled four pages down, a video opened, then Back: the list loads those pages
+    again before the scroll position is restored, so the same card is on screen
+    (not the end of page 1)."""
+    import time
+
+    on_screen = """[...document.querySelectorAll('.grid.videos .card')]
+        .filter(c => { const r = c.getBoundingClientRect(); return r.bottom > 0 && r.top < innerHeight; })
+        .map(c => c.getAttribute('href'))"""
+    page.goto(f"{server.base}/#/")
+    page.wait_for("!!document.querySelector('.card')", message="home")
+    page.js("""(() => {
+        const real = window.fetch;
+        window.fetch = (url, ...rest) => real(String(url).includes('/browse?') ? url + '&limit=1' : url, ...rest);
+        document.head.append(Object.assign(document.createElement('style'), {textContent:
+            '.grid.videos { grid-template-columns: 1fr !important } .grid.videos li { min-height: 3000px }'}));
+        return true;
+    })()""")
+    page.js(f"location.hash = '#/library/{server.library}?all'")
+    page.wait_for("document.querySelectorAll('.grid.videos li').length === 1", message="the first page")
+    for _ in range(len(server.videos)):
+        if page.js("document.querySelectorAll('.grid.videos li').length") >= 4:
+            break
+        page.js("window.scrollTo(0, document.documentElement.scrollHeight)")
+        time.sleep(0.5)
+    page.js("document.querySelectorAll('.grid.videos li')[3].scrollIntoView()")
+    before, seen = page.js("window.scrollY"), page.js(on_screen)
+    assert before > 3 * 3000 and len(seen) == 1
+    page.js(f"location.hash = {seen[0]!r}")
+    page.wait_for("!!document.querySelector('.detail')", message="the video's page")
+    page.js("history.back()")
+    page.wait_for(f"location.hash.endsWith('?all') && window.scrollY === {before}", message="back at the same spot")
+    assert page.js(on_screen) == seen
