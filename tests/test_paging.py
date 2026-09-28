@@ -129,6 +129,42 @@ def test_show_all_pages_every_video_below_by_path(client, big):
     assert seen == [f"Many/clip{n}.mp4" for n in range(1, 26)] + ["Many/Sub/deep.mp4"]
 
 
+def test_show_all_puts_each_videos_clips_right_after_it(client, big):
+    """Clips follow their video, in the order made. Pages count videos only, so a
+    video's clips are on its page, even when it ends the page; next_offset says
+    where the next page starts."""
+    videos = {i["rel_path"]: i["id"] for i in get(client, big, all="true")["items"]}
+    for path, marks in [("Many/clip10.mp4", [(20, 25), (1, 5)]), ("Many/clip3.mp4", [(3, 4)]),
+                        ("Many/Sub/deep.mp4", [(7, 9)])]:
+        for start, end in marks:
+            client.post(f"/api/items/{videos[path]}/clips", json={"start": start, "end": end})
+    seen, offset = [], 0
+    while True:
+        page = get(client, big, all="true", limit=10, offset=offset)
+        assert page["total_items"] == 26 and page["total_clips"] == 4
+        if not page["items"]:
+            break
+        seen += [(i.get("kind", "video"), i["rel_path"], i.get("name")) for i in page["items"]]
+        assert page["next_offset"] == offset + len([i for i in page["items"] if "kind" not in i])
+        offset = page["next_offset"]
+    order = [f"Many/clip{n}.mp4" for n in range(1, 26)] + ["Many/Sub/deep.mp4"]
+    expected = []
+    for path in order:
+        expected.append(("video", path, None))
+        expected += [("clip", path, name) for name in {"Many/clip10.mp4": ["Clip 1", "Clip 2"],
+                                                      "Many/clip3.mp4": ["Clip 1"],
+                                                      "Many/Sub/deep.mp4": ["Clip 1"]}.get(path, [])]
+    assert seen == expected
+    # clip10 is the 10th video: last on the first page of 10, with both its clips.
+    first = get(client, big, all="true", limit=10)["items"]
+    assert [i.get("name") for i in first[-3:]] == [None, "Clip 1", "Clip 2"]
+    clip = first[-2]
+    assert clip["video_id"] == videos["Many/clip10.mp4"] and (clip["start"], clip["end"]) == (20.0, 25.0)
+    assert clip["title"] == "clip10"
+    # Only below the folder shown; and the plain folder view has no clips.
+    assert get(client, big, path="Many/Sub", all="true")["total_clips"] == 1
+    assert all("kind" not in i for i in get(client, big)["items"])
+
 def test_show_all_is_always_by_path(client, big):
     """There's no other order for it: sort=year is ignored."""
     by_year = get(client, big, all="true", sort="year")

@@ -2,7 +2,7 @@
 import { api, artBox, encodePath, fill, formatDuration, formatSize, h, parseTags, pathBelow, plural, tagError } from "./api.js";
 import { openImageDialog } from "./imagedialog.js";
 import { capabilities, capsQuery, hlsSupport } from "./caps.js";
-import { clipsSection } from "./clips.js";
+import { clipTimes, clipsSection } from "./clips.js";
 
 const SORT_KEY = "reel.sort";
 
@@ -133,6 +133,11 @@ export function itemUrl(id, list = null) {
 function playUrl(id, list, t = 0) {
   const query = [t ? `t=${t}` : "", listParam(list)].filter(Boolean).join("&");
   return `#/play/${id}${query ? `?${query}` : ""}`;
+}
+
+/** The player, playing just a clip, remembering the list its video is in. */
+function clipPlayUrl(videoId, clipId, list) {
+  return `#/play/${videoId}?clip=${clipId}${list === null ? "" : `&${listParam(list)}`}`;
 }
 
 /** A folder's page; with `all`, every video in it and its subfolders ("Show all"). */
@@ -418,6 +423,7 @@ function tagEditor(item) {
  * prev/next through the list.
  */
 function videoCard(item, { from = "", list = null } = {}) {
+  if (item.kind === "clip") return clipEntryCard(item, { from, list });
   const meta = [item.year, formatDuration(item.duration)].filter(Boolean).join(" · ");
   return h(
     "li",
@@ -430,6 +436,24 @@ function videoCard(item, { from = "", list = null } = {}) {
       h("div", { class: "label" }, item.title),
       h("div", { class: "sub where" }, pathBelow(item.rel_path, from)),
       h("div", { class: "sub meta" }, meta && h("span", {}, meta), typeBadge(item)),
+    ),
+  );
+}
+
+/** A clip in a Show all list, right after its video: its first frame, the video's
+ *  title and its name, the video's path, and its times. It plays the clip. */
+function clipEntryCard(clip, { from = "", list = null }) {
+  const name = `${clip.title} · ${clip.name}`;
+  return h(
+    "li",
+    { class: "card-wrap clip-entry" },
+    h(
+      "a",
+      { class: "card", href: clipPlayUrl(clip.video_id, clip.id, list), title: name },
+      artBox({ kind: "video", shape: "landscape", src: `/api/items/${clip.video_id}/frame?at=${clip.start.toFixed(1)}` }),
+      h("div", { class: "label" }, name),
+      h("div", { class: "sub where" }, pathBelow(clip.rel_path, from)),
+      h("div", { class: "sub meta" }, h("span", {}, clipTimes(clip)), h("span", { class: "type-badge clip", title: "A clip of the video before it" }, "Clip")),
     ),
   );
 }
@@ -461,7 +485,7 @@ function folderCard(libraryId, folder) {
   );
 }
 
-// How many videos each list (by its URL) had loaded, so coming back to it loads
+// How far each list (by its URL) had loaded, so coming back to it loads
 // as many again before the router restores the scroll position. Otherwise a spot
 // past the first page can't be scrolled back to.
 const loadedCounts = new Map();
@@ -469,7 +493,9 @@ const loadedCounts = new Map();
 /**
  * A grid of videos that loads the next page as you near its end.
  * `first` is the first page ({items, total_items}); fetchPage(offset) gets the next.
- * `card` makes each video's card. `key` (the list's URL) remembers how far it was
+ * A page may say where the next one starts (`next_offset`: a Show all page counts
+ * only videos, not the clips after them); otherwise it's after its items.
+ * `card` makes each entry's card. `key` (the list's URL) remembers how far it was
  * loaded, for restore().
  * Returns { element, restore, stop } — await restore() before the page is shown
  * (it loads the pages this list had loaded last time); call stop() when leaving.
@@ -478,7 +504,7 @@ function pagedVideoGrid(first, fetchPage, card = (item) => videoCard(item), key 
   const list = h("ul", { class: "grid videos" }, first.items.map(card));
   const sentinel = h("div", { class: "load-more", "aria-hidden": "true" });
   const failure = h("p", { class: "load-error", role: "status", hidden: true });
-  let loaded = first.items.length;
+  let loaded = first.next_offset ?? first.items.length; // videos so far: where the next page starts
   let total = first.total_items ?? loaded;
   let loading = null; // the page being loaded, if any
   let stopped = false;
@@ -499,7 +525,7 @@ function pagedVideoGrid(first, fetchPage, card = (item) => videoCard(item), key 
     }
     if (stopped) return false;
     list.append(...page.items.map(card));
-    loaded += page.items.length;
+    loaded = page.next_offset ?? loaded + page.items.length;
     total = page.total_items ?? total;
     if (!page.items.length) total = loaded;
     remember();
@@ -589,7 +615,8 @@ export async function renderBrowse(view, libraryId, path, showAll = false) {
   if (!showAll) sortSelect.value = data.sort;
 
   const counts = showAll
-    ? [data.total_items && `${plural(data.total_items, "video")} in this folder and its subfolders`]
+    ? [data.total_items &&
+        `${plural(data.total_items, "video")}${data.total_clips ? ` and ${plural(data.total_clips, "clip")}` : ""} in this folder and its subfolders`]
     : [
         data.folders.length && plural(data.folders.length, "folder"),
         data.total_items && plural(data.total_items, "video"),

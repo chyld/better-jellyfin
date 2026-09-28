@@ -194,6 +194,12 @@ def browse_all(conn: sqlite3.Connection, library_id: int, lib: sqlite3.Row, rel_
     """One page of every video at or below `rel_dir`, sorted by its path in the
     library (file name included), naturally, and paged from the path_key index.
     There's no other sort: the cards show that path, so the order is the one on screen.
+
+    Each video is followed by its clips (made on its edit page), in the order they
+    were made: entries with `kind: "clip"` (see clip_out). Paging counts videos
+    only (`limit` videos, each with all its clips), so a video and its clips are
+    never split across pages: `next_offset` is where the next page starts, and
+    `total_items` / `total_clips` count the whole list.
     """
     where, args = _all_below(library_id, rel_dir)
     total = conn.execute(f"SELECT COUNT(*) FROM media_items WHERE {where}", args).fetchone()[0]
@@ -203,16 +209,48 @@ def browse_all(conn: sqlite3.Connection, library_id: int, lib: sqlite3.Row, rel_
         f"SELECT * FROM media_items WHERE {where} ORDER BY path_key LIMIT ? OFFSET ?",
         (*args, limit, offset),
     ).fetchall()
+    total_clips = conn.execute(
+        f"SELECT COUNT(*) FROM clips WHERE item_id IN (SELECT id FROM media_items WHERE {where})", args
+    ).fetchone()[0]
+    clips_of: dict[int, list] = {}
+    if total_clips and rows:
+        marks = ",".join("?" * len(rows))
+        for c in conn.execute(
+            f'SELECT item_id, uid, number, start, "end" FROM clips WHERE item_id IN ({marks}) ORDER BY item_id, number',
+            [r["id"] for r in rows],
+        ):
+            clips_of.setdefault(c["item_id"], []).append(c)
+    items = []
+    for r in rows:
+        items.append(item_out(r, caps, hls_support))
+        items += [clip_out(c, r) for c in clips_of.get(r["id"], [])]
     return {
         "library": {"id": lib["uid"], "name": lib["name"]},
         "path": rel_dir,
         "breadcrumbs": breadcrumbs(lib["name"], rel_dir),
         "all": True,
         "folders": [],
-        "items": [item_out(r, caps, hls_support) for r in rows],
+        "items": items,
         "total_items": total,
+        "total_clips": total_clips,
         "offset": offset,
+        "next_offset": offset + len(rows),
         "limit": limit,
+    }
+
+
+def clip_out(clip: sqlite3.Row, video: sqlite3.Row) -> dict:
+    """A clip in a "Show all" list, right after its video: its own id, name and
+    times, and its video's id, title and path."""
+    return {
+        "kind": "clip",
+        "id": clip["uid"],
+        "name": f"Clip {clip['number']}",
+        "start": clip["start"],
+        "end": clip["end"],
+        "video_id": video["uid"],
+        "title": video["title"],
+        "rel_path": video["rel_path"],
     }
 
 

@@ -147,3 +147,35 @@ def test_the_pages_on_a_phone(server, page):
             assert page.js("document.documentElement.scrollWidth") <= 390, name
     finally:
         page.cdp("Emulation.setDeviceMetricsOverride", width=1280, height=720, deviceScaleFactor=1, mobile=False)
+
+
+def test_show_all_lists_each_videos_clips_right_after_it(server, page):
+    """Pages of one video (the test forces it), so a video's clips must come with it."""
+    video = server.videos["remux.mkv"]
+    for start in (10, 2):
+        server.call("POST", f"/api/items/{video}/clips", {"start": start, "end": start + 5})
+    page.cdp("Page.bringToFront")
+    page.goto(f"{server.base}/#/")
+    page.wait_for("!!document.querySelector('.card')", message="home")
+    page.js("""(() => { const real = window.fetch;
+        window.fetch = (url, ...rest) => real(String(url).includes('/browse?') ? url + '&limit=1' : url, ...rest);
+        return true; })()""")
+    page.js(f"location.hash = '#/library/{server.library}?all'")
+    total = len(server.videos) + 2
+    page.wait_for(f"document.querySelectorAll('.grid.videos .card').length === {total}", message="every video and clip")
+    assert page.js("document.querySelector('.summary').textContent") == \
+        f"{len(server.videos)} videos and 2 clips in this folder and its subfolders"
+    cards = page.js("""[...document.querySelectorAll('.grid.videos .card')].map(c => ({
+        href: c.getAttribute('href'), label: c.querySelector('.label').textContent,
+        badge: c.querySelector('.type-badge') && c.querySelector('.type-badge').textContent }))""")
+    at = next(i for i, c in enumerate(cards) if c["href"].startswith(f"#/item/{video}"))
+    assert [c["label"] for c in cards[at + 1:at + 3]] == ["remux · Clip 1", "remux · Clip 2"]
+    assert [c["badge"] for c in cards[at + 1:at + 3]] == ["Clip", "Clip"]
+    assert sum(c["badge"] == "Clip" for c in cards) == 2
+    page.wait_for(f"document.querySelectorAll('.grid.videos .card')[{at + 1}].querySelector('img').naturalWidth > 0",
+                  message="the clip's picture")
+    shot(page, "show-all-with-clips")
+    page.js(f"document.querySelectorAll('.grid.videos .card')[{at + 1}].click()")
+    page.wait_for("!!document.querySelector('.player-title')", message="the player")
+    assert page.js("document.querySelector('.player-title').textContent").endswith("Clip 1")
+    page.wait_for("document.querySelector('.clock.total').textContent === '0:05'", message="the clip's length")

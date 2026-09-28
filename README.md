@@ -54,8 +54,10 @@ ffmpeg converts on the fly.
 - **Show all videos.** In a folder with subfolders, **Show all videos** flattens it: every video
   in the folder and all its subfolders in one grid, each card showing the video's path from
   that folder down (file name included), and sorted by that path (naturally, so each folder's videos
-  stay together). A video opened from that list gets **‹ Prev** / **Next ›** buttons and its
-  place ("12 of 312"); Back returns to the list, however many steps you took.
+  stay together). Each video's [clips](#making-clips) follow it right away, with a **Clip** badge,
+  and play just the clip. A video opened from that list gets **‹ Prev** / **Next ›** buttons and its
+  place ("12 of 312"; these step from video to video, skipping clips); Back returns to the list,
+  however many steps you took.
 - **Playback of everything.** Browser-ready files play directly. Others are repackaged or
   converted live by ffmpeg, starting in about half a second.
 - **A modern player.** A frosted-glass control dock, a gradient seek bar with a time preview,
@@ -187,7 +189,7 @@ permissions. The usual cause is a `./data` that Docker created owned by root.
 |---|---|---|
 | Home | `#/` | Library tiles, and a card for every tag. |
 | Library / folder | `#/library/<library-uuid>/<folder path>` | Subfolders as posters, then videos. Breadcrumbs and a Name/Year sort. |
-| Show all | `#/library/<library-uuid>/<folder path>?all` | Every video in the folder and its subfolders, each with its path from that folder down (file name included), sorted by that path. **Show folders** goes back. |
+| Show all | `#/library/<library-uuid>/<folder path>?all` | Every video in the folder and its subfolders, each with its path from that folder down (file name included), sorted by that path, and each followed by its clips. **Show folders** goes back. |
 | Video | `#/item/<video-uuid>` | Picture, title, pills (year, length, resolution, play mode), **Play**, **Edit video**, tags, marks and file details, then the video's **Clips**. Opened from a Show all list (`?all=<folder path>`), also prev/next through it. |
 | Edit video | `#/edit/<video-uuid>` | The video with a timeline, **Mark**, **Clear marks** and **Make clip**, then its clips. See [Making clips](#making-clips). |
 | Player | `#/play/<video-uuid>` | Full-window player. `?t=<seconds>` starts there; `?clip=<clip-uuid>` plays just that clip. |
@@ -676,7 +678,7 @@ JSON over HTTP. Every ID is a UUID. There's no authentication yet (see
 | DELETE | `/api/libraries/{id}` | Remove from Reel (409 while scanning). Files untouched. |
 | POST | `/api/libraries/{id}/scan` | Queue a scan (202). |
 | POST | `/api/libraries/scan` | Queue a scan of every library. |
-| GET | `/api/libraries/{id}/browse?path=&sort=name\|year&limit=&offset=&all=` | Subfolders and one page of the videos in a folder (`limit` defaults to 200, at most 500). `total_items` is how many videos the folder has. With `all=true`: no subfolders, and every video in the folder and below it, sorted by path (`sort` is ignored). Every video has its `rel_path`, `type` (its real format, e.g. `MP4`, `TS`) and `play_mode`: pass `video=&audio=&hls_support=` as for `/plan` to get it for your browser (without them, a typical browser). |
+| GET | `/api/libraries/{id}/browse?path=&sort=name\|year&limit=&offset=&all=` | Subfolders and one page of the videos in a folder (`limit` defaults to 200, at most 500). `total_items` is how many videos the folder has. With `all=true`: no subfolders, and every video in the folder and below it, sorted by path (`sort` is ignored), each followed by its clips (`kind: "clip"`, with `id`, `name`, `start`, `end`, and the video's `video_id`, `title` and `rel_path`); pages count videos only (a video comes with all its clips), `next_offset` is where the next page starts, and `total_clips` counts the list's clips. Every video has its `rel_path`, `type` (its real format, e.g. `MP4`, `TS`) and `play_mode`: pass `video=&audio=&hls_support=` as for `/plan` to get it for your browser (without them, a typical browser). |
 | GET | `/api/libraries/{id}/folder-art?path=` | A folder's picture (NAS `folder.<ext>`, else uploaded). |
 | PUT | `/api/libraries/{id}/folder-image?path=` | Upload a folder picture (request body = the image). |
 | POST | `/api/libraries/{id}/folder-image-url?path=` | `{url}`: set a folder picture from a URL. |
@@ -754,9 +756,9 @@ version); bump `THUMBS` when the server changes how thumbnails are made.
 ### Tests
 
 ```sh
-uv run pytest              # backend: 616 tests
+uv run pytest              # backend: 617 tests
 node --test tests/js/      # frontend: 45 tests
-uv run pytest -m browser   # browser: 24 tests (about 3 minutes; needs Chromium and ffmpeg)
+uv run pytest -m browser   # browser: 25 tests (about 3 minutes; needs Chromium and ffmpeg)
 scripts/docker-smoke.sh    # builds the image and checks it end to end (needs Docker)
 ```
 
