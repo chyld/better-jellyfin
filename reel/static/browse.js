@@ -435,7 +435,7 @@ function videoCard(item, { from = "", list = null } = {}) {
   );
 }
 
-/** A clip in a Show all list, right after its video: its first frame, the video's
+/** A clip in a list of videos, right after its video: its first frame, the video's
  *  title and its name, the video's path, and its times. It opens the clip's page. */
 function clipEntryCard(clip, { from = "", list = null }) {
   const name = `${clip.title} · ${clip.name}`;
@@ -615,6 +615,7 @@ export async function renderBrowse(view, libraryId, path, showAll = false) {
     : [
         data.folders.length && plural(data.folders.length, "folder"),
         data.total_items && plural(data.total_items, "video"),
+        data.total_clips && plural(data.total_clips, "clip"),
       ];
   // Only worth offering where there are subfolders to flatten.
   const allToggle =

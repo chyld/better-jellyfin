@@ -161,9 +161,30 @@ def test_show_all_puts_each_videos_clips_right_after_it(client, big):
     clip = first[-2]
     assert clip["video_id"] == videos["Many/clip10.mp4"] and (clip["start"], clip["end"]) == (20.0, 25.0)
     assert clip["title"] == "clip10"
-    # Only below the folder shown; and the plain folder view has no clips.
+    # Only below the folder shown.
     assert get(client, big, path="Many/Sub", all="true")["total_clips"] == 1
-    assert all("kind" not in i for i in get(client, big)["items"])
+
+
+@pytest.mark.parametrize("sort", ["name", "year"])
+def test_a_folder_puts_each_videos_clips_right_after_it(client, big, sort):
+    """The plain folder view too, in either sort, paged by videos like Show all."""
+    videos = {i["rel_path"]: i["id"] for i in get(client, big)["items"]}
+    for start in (20, 1):
+        client.post(f"/api/items/{videos['Many/clip10.mp4']}/clips", json={"start": start, "end": start + 4})
+    whole = get(client, big, sort=sort, limit=500)
+    assert whole["total_items"] == 25 and whole["total_clips"] == 2      # Sub's video isn't in this folder
+    names = [(i["rel_path"], i.get("name")) for i in whole["items"]]
+    at = names.index(("Many/clip10.mp4", None))
+    assert names[at + 1:at + 3] == [("Many/clip10.mp4", "Clip 1"), ("Many/clip10.mp4", "Clip 2")]
+    seen, offset = [], 0
+    while True:
+        page = get(client, big, sort=sort, limit=4, offset=offset)
+        if not page["items"]:
+            break
+        seen += [(i["rel_path"], i.get("name")) for i in page["items"]]
+        offset = page["next_offset"]
+    assert seen == names
+    assert get(client, big, path="Many/Sub")["total_clips"] == 0
 
 def test_show_all_is_always_by_path(client, big):
     """There's no other order for it: sort=year is ignored."""

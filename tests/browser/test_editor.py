@@ -180,6 +180,16 @@ def test_show_all_lists_each_videos_clips_right_after_it(server, page):
     page.wait_for(f"document.querySelectorAll('.grid.videos .card')[{at + 1}].querySelector('img').naturalWidth > 0",
                   message="the clip's picture")
     shot(page, "show-all-with-clips")
+    # The plain folder view lists them after their video too.
+    page.js(f"location.hash = '#/library/{server.library}'")
+    page.wait_for("!location.hash.endsWith('?all') && "
+                  f"document.querySelectorAll('.grid.videos .card').length === {total}", message="the folder")
+    labels = page.js("[...document.querySelectorAll('.grid.videos .card .label')].map(e => e.textContent)")
+    assert labels[labels.index("long") + 1:labels.index("long") + 3] == ["long · Clip 1", "long · Clip 2"]
+    assert page.js("document.querySelector('.summary').textContent") == f"{len(server.videos)} videos · 2 clips"
+    page.js("history.back()")
+    page.wait_for(f"location.hash.endsWith('?all') && document.querySelectorAll('.grid.videos .card').length === {total}",
+                  message="Show all again")
     # Its video's page steps through the list with the clips: Next is Clip 1.
     page.js(f"document.querySelectorAll('.grid.videos .card')[{at}].click()")
     page.wait_for("!!document.querySelector('.list-pos')", message="the video's page")

@@ -44,7 +44,8 @@ ffmpeg converts on the fly.
   scan it. Rescans only re-read new or changed files.
 - **Browsing.** Libraries and folders appear as movie-poster cards and videos as landscape
   cards. Numbers sort naturally (`clip2` before `clip10`), and videos can be sorted by name or year.
-  Big folders stay fast: videos load 200 at a time as you scroll.
+  Big folders stay fast: videos load 200 at a time as you scroll. Each video's
+  [clips](#making-clips) follow it, with a **Clip** badge.
 - **Video cards.** Every video card shows its title, its path from the folder you're in (file
   name included), then year, length and its real format (MP4, TS, AVI, MPG, WMV, MKV...), as
   ffprobe found it: a `.mp4` that's really an MPEG transport stream says TS. The format is
@@ -188,7 +189,7 @@ permissions. The usual cause is a `./data` that Docker created owned by root.
 | Page | URL | What's there |
 |---|---|---|
 | Home | `#/` | Library tiles, and a card for every tag. |
-| Library / folder | `#/library/<library-uuid>/<folder path>` | Subfolders as posters, then videos. Breadcrumbs and a Name/Year sort. |
+| Library / folder | `#/library/<library-uuid>/<folder path>` | Subfolders as posters, then videos, each followed by its clips. Breadcrumbs and a Name/Year sort. |
 | Show all | `#/library/<library-uuid>/<folder path>?all` | Every video in the folder and its subfolders, each with its path from that folder down (file name included), sorted by that path, and each followed by its clips. **Show folders** goes back. |
 | Video | `#/item/<video-uuid>` | Picture, title, pills (year, length, resolution, play mode), **Play**, **Edit video**, tags, marks and file details, then the video's **Clips**. Opened from a Show all list (`?all=<folder path>`), also prev/next through it. |
 | Clip | `#/clip/<clip-uuid>` | A clip's first frame, name, length and times, **Play** (just the clip), **Go to video** and **Delete**. Opened from a Show all list, also prev/next through it. |
@@ -680,7 +681,7 @@ JSON over HTTP. Every ID is a UUID. There's no authentication yet (see
 | DELETE | `/api/libraries/{id}` | Remove from Reel (409 while scanning). Files untouched. |
 | POST | `/api/libraries/{id}/scan` | Queue a scan (202). |
 | POST | `/api/libraries/scan` | Queue a scan of every library. |
-| GET | `/api/libraries/{id}/browse?path=&sort=name\|year&limit=&offset=&all=` | Subfolders and one page of the videos in a folder (`limit` defaults to 200, at most 500). `total_items` is how many videos the folder has. With `all=true`: no subfolders, and every video in the folder and below it, sorted by path (`sort` is ignored), each followed by its clips (`kind: "clip"`, with `id`, `name`, `start`, `end`, and the video's `video_id`, `title` and `rel_path`); pages count videos only (a video comes with all its clips), `next_offset` is where the next page starts, and `total_clips` counts the list's clips. Every video has its `rel_path`, `type` (its real format, e.g. `MP4`, `TS`) and `play_mode`: pass `video=&audio=&hls_support=` as for `/plan` to get it for your browser (without them, a typical browser). |
+| GET | `/api/libraries/{id}/browse?path=&sort=name\|year&limit=&offset=&all=` | Subfolders and one page of the videos in a folder (`limit` defaults to 200, at most 500). `total_items` is how many videos the folder has. Each video is followed by its clips, as described for `all=true` below. With `all=true`: no subfolders, and every video in the folder and below it, sorted by path (`sort` is ignored), each followed by its clips (`kind: "clip"`, with `id`, `name`, `start`, `end`, and the video's `video_id`, `title` and `rel_path`); pages count videos only (a video comes with all its clips), `next_offset` is where the next page starts, and `total_clips` counts the list's clips. Every video has its `rel_path`, `type` (its real format, e.g. `MP4`, `TS`) and `play_mode`: pass `video=&audio=&hls_support=` as for `/plan` to get it for your browser (without them, a typical browser). |
 | GET | `/api/libraries/{id}/folder-art?path=` | A folder's picture (NAS `folder.<ext>`, else uploaded). |
 | PUT | `/api/libraries/{id}/folder-image?path=` | Upload a folder picture (request body = the image). |
 | POST | `/api/libraries/{id}/folder-image-url?path=` | `{url}`: set a folder picture from a URL. |
@@ -760,7 +761,7 @@ version); bump `THUMBS` when the server changes how thumbnails are made.
 ### Tests
 
 ```sh
-uv run pytest              # backend: 619 tests
+uv run pytest              # backend: 621 tests
 node --test tests/js/      # frontend: 45 tests
 uv run pytest -m browser   # browser: 26 tests (about 3 minutes; needs Chromium and ffmpeg)
 scripts/docker-smoke.sh    # builds the image and checks it end to end (needs Docker)
