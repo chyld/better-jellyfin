@@ -10,7 +10,7 @@ Clips belong to the video's catalog row, so they follow a moved or renamed file
 """
 import sqlite3
 
-from .catalog import NotFound
+from .catalog import NotFound, video_rev
 from .db import new_uid
 
 MIN_LENGTH = 0.5    # seconds
@@ -21,7 +21,7 @@ class ClipError(Exception):
 
 
 def _video(conn: sqlite3.Connection, item_uid: str) -> sqlite3.Row:
-    row = conn.execute("SELECT id, duration FROM media_items WHERE uid = ?", (item_uid,)).fetchone()
+    row = conn.execute("SELECT id, duration, size, mtime FROM media_items WHERE uid = ?", (item_uid,)).fetchone()
     if row is None:
         raise NotFound("Video not found.")
     return row
@@ -32,21 +32,14 @@ def list_clips(conn: sqlite3.Connection, item_uid: str) -> list[dict]:
     video = _video(conn, item_uid)
     rows = conn.execute('SELECT uid, number, start, "end" FROM clips WHERE item_id = ? ORDER BY number',
                         (video["id"],))
-    return [{"id": r["uid"], "number": r["number"], "name": f"Clip {r['number']}", "start": r["start"],
-             "end": r["end"]} for r in rows]
+    return [clip_fields(r, video) for r in rows]
 
 
-def clip_detail(conn: sqlite3.Connection, clip_uid: str) -> dict:
-    """A clip for its own page: its name and times, and its video (as on the
-    video's page: title, library, breadcrumbs...)."""
-    from .browse import item_detail
-
-    row = conn.execute('SELECT c.uid, c.number, c.start, c."end", m.uid AS video FROM clips c '
-                       "JOIN media_items m ON m.id = c.item_id WHERE c.uid = ?", (clip_uid,)).fetchone()
-    if row is None:
-        raise NotFound("Clip not found.")
-    return {"id": row["uid"], "number": row["number"], "name": f"Clip {row['number']}", "start": row["start"],
-            "end": row["end"], "video": item_detail(conn, row["video"])}
+def clip_fields(clip: sqlite3.Row, video: sqlite3.Row) -> dict:
+    """What every view of a clip says: its id, name and times, and `picture`, its
+    picture's version (for /api/clips/{id}/thumb?v=)."""
+    return {"id": clip["uid"], "number": clip["number"], "name": f"Clip {clip['number']}",
+            "start": clip["start"], "end": clip["end"], "picture": video_rev(video["size"], video["mtime"])}
 
 
 def add_clip(conn: sqlite3.Connection, item_uid: str, a: float, b: float) -> list[dict]:
@@ -60,9 +53,13 @@ def add_clip(conn: sqlite3.Connection, item_uid: str, a: float, b: float) -> lis
         end = min(end, round(video["duration"], 1))
     if end - start < MIN_LENGTH:
         raise ClipError(f"The marks must be at least {MIN_LENGTH:g} seconds apart.")
-    number = conn.execute("SELECT COALESCE(MAX(number), 0) + 1 FROM clips WHERE item_id = ?", (video["id"],)).fetchone()[0]
-    conn.execute('INSERT INTO clips (uid, item_id, number, start, "end") VALUES (?, ?, ?, ?, ?)',
-                 (new_uid(), video["id"], number, start, end))
+    # The next number is worked out in the insert itself, so two clips made at
+    # once can't both get it (and the index refuses a duplicate anyway).
+    conn.execute(
+        'INSERT INTO clips (uid, item_id, number, start, "end") '
+        "SELECT ?, ?, COALESCE(MAX(number), 0) + 1, ?, ? FROM clips WHERE item_id = ?",
+        (new_uid(), video["id"], start, end, video["id"]),
+    )
     conn.commit()
     return list_clips(conn, item_uid)
 

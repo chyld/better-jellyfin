@@ -5,7 +5,7 @@ from functools import partial
 import pytest
 from fastapi.testclient import TestClient
 
-from reel.db import init_db
+from reel.db import connect, init_db
 from reel.images import save_frame
 from reel.main import create_app
 from reel.probe import probe
@@ -146,24 +146,44 @@ def test_unreadable_video_gives_a_clear_error(client, videos, media_root):
     assert res.status_code == 502 and res.json()["detail"].startswith("Couldn't take a picture")
 
 
-def test_frames_for_clips_come_from_the_original(client, videos, settings, tmp_path):
-    """Clips' pictures: the frame at that exact time, from the file
-    (interlaced ones too), at most 480 wide; nothing is left in the data folder."""
-    before = sorted(p.name for p in settings.data_dir.iterdir())
+def test_a_clips_picture_is_its_videos_frame_at_its_start(client, videos, settings, tmp_path, monkeypatch):
+    """Taken from the original file (interlaced ones too), made once and then served
+    from the thumbnail cache (no ffmpeg), under a version that changes when the file
+    does; kept by the thumbnail clean-up."""
+    from reel import images
+    pictures = {}
     for name in ("plain", "tape"):
         video = videos[name]
-        red = client.get(f"/api/items/{video['id']}/frame?at=4.5")
-        blue = client.get(f"/api/items/{video['id']}/frame?at=5.5")
-        assert red.status_code == blue.status_code == 200 and red.headers["content-type"] == "image/jpeg"
-        assert colour(red.content, tmp_path) == "red" and colour(blue.content, tmp_path) == "blue", name
-    end = client.get(f"/api/items/{videos['plain']['id']}/frame?at=999")   # past the end: the last moment
-    assert end.status_code == 200 and colour(end.content, tmp_path) == "blue"
-    assert client.get(f"/api/items/{videos['plain']['id']}/frame?at=-1").status_code == 422
-    assert client.get("/api/items/00000000-0000-0000-0000-000000000000/frame?at=1").status_code == 404
-    assert sorted(p.name for p in settings.data_dir.iterdir()) == before
-    src = tmp_path / "f.jpg"
-    src.write_bytes(red.content)
-    import json
-    info = json.loads(subprocess.run(["ffprobe", "-v", "error", "-show_streams", "-of", "json", str(src)],
-                                     capture_output=True, text=True, check=True).stdout)["streams"][0]
-    assert info["width"] == 320          # smaller than 480: kept as is
+        red = client.post(f"/api/items/{video['id']}/clips", json={"start": 4.0, "end": 4.9}).json()[-1]
+        blue = client.post(f"/api/items/{video['id']}/clips", json={"start": 5.5, "end": 9}).json()[-1]
+        for clip, want in ((red, "red"), (blue, "blue")):
+            res = client.get(f"/api/clips/{clip['id']}/thumb?v={clip['picture']}")
+            assert res.status_code == 200 and res.headers["content-type"] == "image/jpeg"
+            assert "immutable" in res.headers["cache-control"]
+            assert colour(res.content, tmp_path) == want, name
+            pictures[clip["id"]] = res.content
+    # Again: from the cache, without ffmpeg.
+    monkeypatch.setattr(images.subprocess, "Popen", lambda *a, **k: (_ for _ in ()).throw(AssertionError("ffmpeg ran")))
+    for clip_id, data in pictures.items():
+        assert client.get(f"/api/clips/{clip_id}/thumb").content == data
+    monkeypatch.undo()
+    assert client.get("/api/clips/nope/thumb").status_code == 404
+    # The clean-up after scans keeps them.
+    thumbs = client.app.state.thumbnails
+    import os, time
+    for f in settings.thumbs_dir.glob("*/*.jpg"):
+        os.utime(f, (time.time() - 7200, time.time() - 7200))              # old enough to be pruned
+    thumbs.prune()
+    for clip_id in pictures:
+        found = thumbs.clip_picture(clip_id)
+        assert thumbs.thumbnailer.cached(str(found["root"] / found["rel"]), found["rev"], found["shape"])
+    # Warming after a scan makes any that are missing.
+    import shutil
+    shutil.rmtree(settings.thumbs_dir)
+    conn = connect(settings.db_path)
+    library_ids = [r[0] for r in conn.execute("SELECT id FROM libraries")]
+    conn.close()
+    assert thumbs.warm(library_ids, lambda: False)
+    for clip_id in pictures:
+        found = thumbs.clip_picture(clip_id)
+        assert thumbs.thumbnailer.cached(str(found["root"] / found["rel"]), found["rev"], found["shape"])

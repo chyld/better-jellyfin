@@ -16,6 +16,37 @@ export function clipPlayUrl(videoId, clipId, list = null) {
   return `#/play/${videoId}?clip=${clipId}${listQuery(list, "&")}`;
 }
 
+/** A clip's picture: its video's frame at its start (cached by the server; the
+ *  version changes when the video file does, so the browser keeps it for good). */
+export function clipImageUrl(clip) {
+  return `/api/clips/${clip.id}/thumb?v=${encodeURIComponent(clip.picture)}`;
+}
+
+/**
+ * A clip's card: its picture, `label` (its name, or "<video> · <name>"), the
+ * video's path (`where`, if given), and its times, with a Clip badge in lists of
+ * videos (`badge`). It opens the clip's page, keeping `list`. With `onDelete`,
+ * a Delete button under it.
+ */
+export function clipCard(clip, { label = clip.name, where = null, badge = false, list = null, onDelete = null } = {}) {
+  const times = clipTimes(clip);
+  return h(
+    "li",
+    { class: `card-wrap clip${onDelete ? " deletable" : ""}` },
+    h(
+      "a",
+      { class: "card", href: clipPageUrl(clip.id, list), title: label },
+      artBox({ kind: "video", shape: "landscape", src: clipImageUrl(clip), alt: "" }),
+      h("div", { class: "label" }, label),
+      where !== null && h("div", { class: "sub where" }, where),
+      badge
+        ? h("div", { class: "sub meta" }, h("span", {}, times), h("span", { class: "type-badge clip", title: "A clip of the video before it" }, "Clip"))
+        : h("div", { class: "sub" }, times),
+    ),
+    onDelete && h("button", { type: "button", class: "btn small danger clip-delete", "aria-label": `Delete ${clip.name}`, onclick: onDelete }, "Delete"),
+  );
+}
+
 /** "0:12 – 0:40 · 0:28" */
 export function clipTimes(clip) {
   return `${formatDuration(clip.start) || "0:00"} – ${formatDuration(clip.end)} · ${formatDuration(clip.end - clip.start) || "0:00"}`;
@@ -76,23 +107,12 @@ export function clipsSection(item, clips, { emptyText = null, list = null, onCha
     }
   }
 
-  function card(clip) {
-    const art = artBox({ kind: "video", shape: "landscape", src: `/api/items/${item.id}/frame?at=${clip.start.toFixed(1)}`, alt: "" });
-    const lines = [h("div", { class: "label" }, clip.name), h("div", { class: "sub" }, clipTimes(clip))];
-    return h(
-      "li",
-      { class: "card-wrap clip" },
-      h("a", { class: "card", href: clipPageUrl(clip.id, list), title: clip.name }, art, lines),
-      h("button", { type: "button", class: "btn small danger clip-delete", "aria-label": `Delete ${clip.name}`, onclick: () => remove(clip) }, "Delete"),
-    );
-  }
-
   function show(next) {
     clips = next;
     element.hidden = !clips.length && !emptyText;
     count.textContent = clips.length || "";
     empty.hidden = clips.length > 0;
-    fill(grid, clips.map(card));
+    fill(grid, clips.map((clip) => clipCard(clip, { list, onDelete: () => remove(clip) })));
   }
   show(clips);
   return { element, show };

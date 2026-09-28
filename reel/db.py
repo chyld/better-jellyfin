@@ -335,6 +335,19 @@ def _v12_clips(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX clips_item ON clips (item_id, number)")
 
 
+def _v13_unique_clip_numbers(conn: sqlite3.Connection) -> None:
+    # Two clips of a video can't share a number ("Clip 3" twice). Any that did
+    # (made at the same moment) are renumbered after the video's last.
+    dupes = conn.execute(
+        "SELECT id, item_id FROM clips c WHERE EXISTS (SELECT 1 FROM clips d WHERE d.item_id = c.item_id "
+        "AND d.number = c.number AND d.id < c.id) ORDER BY id").fetchall()
+    for clip_id, item_id in dupes:
+        conn.execute("UPDATE clips SET number = (SELECT MAX(number) + 1 FROM clips WHERE item_id = ?) WHERE id = ?",
+                     (item_id, clip_id))
+    conn.execute("DROP INDEX clips_item")
+    conn.execute("CREATE UNIQUE INDEX clips_item ON clips (item_id, number)")
+
+
 # (version, what it does, function). Append only; functions must not commit.
 MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (2, "fingerprints and probe versions for media items", _v2_identity),
@@ -348,6 +361,7 @@ MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (10, "full-path order: folders with look-alike names stay apart", _v10_path_order_by_folder),
     (11, "ranges: stretches of a video to skip, keep as clips, or just mark", _v11_ranges),
     (12, "clips only: numbered clips replace ranges", _v12_clips),
+    (13, "a video's clip numbers are unique", _v13_unique_clip_numbers),
 ]
 
 

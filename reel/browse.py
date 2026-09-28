@@ -6,6 +6,7 @@ import sqlite3
 from pathlib import PurePosixPath
 
 from .catalog import NotFound, clean_dir, descendants, page_bounds
+from .clips import clip_fields
 from .plan import Capabilities, plan
 from .sorting import folder_range, natural_text
 
@@ -254,18 +255,20 @@ def _with_clips(conn: sqlite3.Connection, rows: list[sqlite3.Row], total_clips: 
 
 
 def clip_out(clip: sqlite3.Row, video: sqlite3.Row) -> dict:
-    """A clip in a list, right after its video: its own id, name and times, and
-    its video's id, title and path."""
-    return {
-        "kind": "clip",
-        "id": clip["uid"],
-        "name": f"Clip {clip['number']}",
-        "start": clip["start"],
-        "end": clip["end"],
-        "video_id": video["uid"],
-        "title": video["title"],
-        "rel_path": video["rel_path"],
-    }
+    """A clip in a list, right after its video: its own id, name, times and
+    picture version, and its video's id, title and path."""
+    return {"kind": "clip", **clip_fields(clip, video),
+            "video_id": video["uid"], "title": video["title"], "rel_path": video["rel_path"]}
+
+
+def clip_detail(conn: sqlite3.Connection, clip_uid: str) -> dict:
+    """A clip for its own page: as in a list, and its video as on the video's
+    page (title, library, breadcrumbs...)."""
+    row = conn.execute('SELECT c.uid, c.number, c.start, c."end", m.uid AS video, m.size, m.mtime FROM clips c '
+                       "JOIN media_items m ON m.id = c.item_id WHERE c.uid = ?", (clip_uid,)).fetchone()
+    if row is None:
+        raise NotFound("Clip not found.")
+    return {**clip_fields(row, row), "video": item_detail(conn, row["video"])}
 
 
 def neighbors(conn: sqlite3.Connection, uid: str, rel_dir: str | None, kind: str = "video") -> dict:

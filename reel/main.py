@@ -5,13 +5,12 @@ import logging
 import shutil
 import sqlite3
 import subprocess
-import tempfile
 from collections.abc import Iterator
 from contextlib import asynccontextmanager
 from urllib.parse import urlencode
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -27,8 +26,6 @@ from .scan_manager import ScanManager
 from .thumbnails import THUMB_HEADERS, Thumbnails
 
 STATIC_DIR = Path(__file__).parent / "static"
-FRAME_SLOTS = 2     # frames (clips' pictures) taken at once
-FRAME_WIDTH = 480
 
 
 class AppFiles(StaticFiles):
@@ -119,8 +116,6 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
             finally:
                 conn.close()
             hls_sessions.start()
-            for leftover in settings.data_dir.glob("frame-*"):   # from a frame being taken at a crash
-                shutil.rmtree(leftover, ignore_errors=True)
             tools.update(ffmpeg=tool_version("ffmpeg"), ffprobe=tool_version("ffprobe"))
             for name, version in tools.items():
                 if version is None:
@@ -156,6 +151,7 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
     app.state.streams = streams
     app.state.hls = hls_sessions
     app.state.watching = watching
+    app.state.thumbnails = thumbnails
 
     def get_db() -> Iterator[sqlite3.Connection]:
         conn = connect(settings.db_path)
@@ -299,7 +295,13 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
     @app.get("/api/clips/{clip_uid}")
     def get_clip(clip_uid: str, conn: sqlite3.Connection = Db):
         """A clip, for its page: name, times, and its video."""
-        return clips.clip_detail(conn, clip_uid)
+        return browse.clip_detail(conn, clip_uid)
+
+    @app.get("/api/clips/{clip_uid}/thumb")
+    async def get_clip_thumb(clip_uid: str, v: str | None = None):
+        """A clip's picture: its video's frame at the clip's start, made like a
+        thumbnail (cached; limited while someone watches). `v` is its version."""
+        return await thumbnails.response(await run_in_threadpool(thumbnails.clip_picture, clip_uid), v)
 
     @app.get("/api/clips/{clip_uid}/neighbors")
     def get_clip_neighbors(clip_uid: str, path: str = "", conn: sqlite3.Connection = Db):
@@ -400,29 +402,6 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
         except ThumbnailError as exc:
             raise HTTPException(502, f"Couldn't take a picture from the video ({exc}).")
         return {"custom_image": version}
-
-    frame_slots = asyncio.Semaphore(FRAME_SLOTS)
-
-    @app.get("/api/items/{item_uid}/frame")
-    async def get_frame(item_uid: str, at: float = Query(0, ge=0, allow_inf_nan=False)):
-        """The frame at `at` seconds, from the original file (so it's exactly what's
-        there, whatever the browser was sent), as a JPEG at most 480 wide: clips' pictures."""
-        row, path = await run_in_threadpool(stream_source, item_uid)
-        if row["duration"]:
-            at = min(at, max(0.0, row["duration"] - 0.5))  # the very end may have no frame
-
-        def take() -> bytes:
-            with tempfile.TemporaryDirectory(dir=settings.data_dir, prefix="frame-") as tmp:
-                out = Path(tmp) / "frame.jpg"
-                save_frame(path, at, out, interlaced=bool(row["interlaced"]), width=FRAME_WIDTH)
-                return out.read_bytes()
-
-        async with frame_slots:
-            try:
-                data = await run_in_threadpool(take)
-            except ThumbnailError as exc:
-                raise HTTPException(502, f"Couldn't take a picture from the video ({exc}).")
-        return Response(data, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=86400"})
 
     def media_file(conn: sqlite3.Connection, item_uid: str) -> tuple[sqlite3.Row, Path]:
         row = conn.execute("SELECT * FROM media_items WHERE uid = ?", (item_uid,)).fetchone()

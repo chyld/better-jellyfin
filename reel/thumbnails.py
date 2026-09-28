@@ -23,9 +23,9 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 
 from . import pictures
-from .catalog import NotFound, clean_dir
+from .catalog import NotFound, clean_dir, video_rev
 from .db import connect
-from .images import Thumbnailer, ThumbnailError
+from .images import Thumbnailer, ThumbnailError, frame_shape
 from .paths import OutsideRoot, resolve_inside
 
 SLOTS = 4  # NAS pictures thumbnailed at once (one while someone is watching)
@@ -91,6 +91,21 @@ class Thumbnails:
         finally:
             conn.close()
 
+    def clip_picture(self, clip_uid: str) -> dict:
+        """A clip's picture: its video's frame at the clip's start, found as a NAS
+        picture is ({"root", "rel", "rev", "shape"}, plus the time), versioned by
+        the video file's recorded size and time."""
+        conn = connect(self.db_path)
+        try:
+            row = conn.execute(
+                "SELECT c.start, m.library_id, m.rel_path, m.size, m.mtime, m.interlaced FROM clips c "
+                "JOIN media_items m ON m.id = c.item_id WHERE c.uid = ?", (clip_uid,)).fetchone()
+            if row is None:
+                raise NotFound("Clip not found.")
+            return _clip_found(_library_root(conn, row["library_id"]), row)
+        finally:
+            conn.close()
+
     # ---- Serving -----------------------------------------------------------------------
 
     async def response(self, found: dict, requested: str | None) -> FileResponse:
@@ -115,19 +130,24 @@ class Thumbnails:
         return FileResponse(path, media_type="image/jpeg", headers=headers)
 
     def make(self, found: dict) -> Path:
-        """In a worker thread: check the NAS picture is still inside its library (it
-        may have been swapped for a link since the scan), then thumbnail it."""
+        """In a worker thread: check the NAS picture (or a clip's video) is still
+        inside its library (it may have been swapped for a link since the scan),
+        then thumbnail it (or take the clip's frame)."""
         try:
             resolve_inside(self.media_root, found["root"])
             src = resolve_inside(found["root"], found["rel"])
         except (OutsideRoot, OSError):
             raise ThumbnailError("The picture is missing.")
+        if "at" in found:
+            return self.thumbnailer.frame(src, found["at"], key_src=_key(found), rev=found["rev"],
+                                          interlaced=found["interlaced"])
         return self.thumbnailer.make(src, found["shape"], key_src=_key(found), rev=found["rev"])
 
     # ---- After scans (on the scan thread) ------------------------------------------------
 
     def nas_pictures(self, conn: sqlite3.Connection, library_ids: list[int] | None = None) -> list[dict]:
-        """Every NAS picture with a recorded version (in these libraries, or all)."""
+        """Every NAS picture with a recorded version (in these libraries, or all),
+        and every clip's picture."""
         where, args = "", ()
         if library_ids is not None:
             where = f"AND l.id IN ({','.join('?' * len(library_ids))})"
@@ -144,7 +164,17 @@ class Thumbnails:
             """,
             args * 2,
         ).fetchall()
-        return [{"root": Path(r["root"]), "rel": r["rel"], "rev": r["rev"], "shape": r["shape"]} for r in rows]
+        found = [{"root": Path(r["root"]), "rel": r["rel"], "rev": r["rev"], "shape": r["shape"]} for r in rows]
+        # Clips' pictures: frames of their videos.
+        clips = conn.execute(
+            f"""
+            SELECT l.path AS root, c.start, m.rel_path, m.size, m.mtime, m.interlaced
+              FROM clips c JOIN media_items m ON m.id = c.item_id JOIN libraries l ON l.id = m.library_id
+             WHERE m.missing_since IS NULL {where}
+            """,
+            args,
+        ).fetchall()
+        return found + [_clip_found(Path(r["root"]), r) for r in clips]
 
     def prune(self) -> int:
         """Delete thumbnails of old picture versions, and of pictures that are gone."""
@@ -180,6 +210,12 @@ class Thumbnails:
 
         with ThreadPoolExecutor(WARM_SLOTS) as pool:
             return all(list(pool.map(one, todo)))
+
+def _clip_found(root: Path, row: sqlite3.Row) -> dict:
+    """A clip's picture, found like a NAS picture: its video, and the time."""
+    return {"root": root, "rel": row["rel_path"], "rev": video_rev(row["size"], row["mtime"]),
+            "shape": frame_shape(row["start"]), "at": row["start"], "interlaced": bool(row["interlaced"])}
+
 
 def _key(found: dict) -> str:
     """The picture's path as the catalog knows it: part of its thumbnail's cache key."""

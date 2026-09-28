@@ -1,4 +1,5 @@
-import { fromList, itemUrl, renderBrowse, renderClip, renderHome, renderItem, renderTag } from "./browse.js";
+import { fromList, itemUrl, renderBrowse, renderHome, renderItem, renderTag } from "./browse.js";
+import { renderClip } from "./clippage.js";
 import { clipPageUrl } from "./clips.js";
 import { renderEditor } from "./editor.js";
 import { renderManage } from "./manage.js";

@@ -255,7 +255,8 @@ four buttons.
 
 Make as many clips as you like. They're shaded on the timeline and listed under **Clips** on
 the edit page (and after their video in its folder and in Show all): each card shows the clip's first frame (taken from the
-original file) and its times, and opens the clip's page, where **▶ Play** plays just the clip.
+original file, then cached like a thumbnail: made once, made one at a time while someone
+watches, warmed after scans, and remade if the video file changes) and its times, and opens the clip's page, where **▶ Play** plays just the clip.
 **Delete** (on a card, or the clip's page) asks first. Numbers aren't reused
 while later clips exist (delete Clip 1 and the next is still Clip 3).
 
@@ -588,7 +589,7 @@ Everything Reel stores is in the data folder: `./data` with Docker, or `REEL_DAT
 data/
 ├── reel.db             SQLite database: libraries, videos, tags, marks, clips, image records
 ├── reel.lock           held by the running Reel (one per data folder)
-├── thumbs/             cached thumbnails of NAS pictures (safe to delete; they're remade)
+├── thumbs/             cached thumbnails of NAS pictures and clips' pictures (safe to delete; they're remade)
 │   └── ab/abcdef….jpg
 ├── hls/                HLS segments being served (emptied at startup)
 └── images/             pictures you uploaded (and frames snapped in the player)
@@ -706,12 +707,12 @@ JSON over HTTP. Every ID is a UUID. There's no authentication yet (see
 | GET | `/api/items/{id}/marks` | The video's marks, earliest first: `[{id, time}]` (also in `GET /api/items/{id}` as `marks`). |
 | POST | `/api/items/{id}/marks` | `{time}`: mark a spot (kept inside the video; nothing new within a second of a mark). Returns the marks. |
 | DELETE | `/api/items/{id}/marks/{mark}` | Delete a mark. Returns the marks left. |
-| GET | `/api/items/{id}/clips` | The video's clips, in the order they were made: `[{id, number, name, start, end}]`, `name` being "Clip 1", "Clip 2"... (also in `GET /api/items/{id}` as `clips`). |
-| GET | `/api/clips/{clip}` | A clip for its page: `{id, number, name, start, end, video}`, `video` as in `GET /api/items/{id}`. |
+| GET | `/api/items/{id}/clips` | The video's clips, in the order they were made: `[{id, number, name, start, end, picture}]` (`picture`: the version of its picture), `name` being "Clip 1", "Clip 2"... (also in `GET /api/items/{id}` as `clips`). |
+| GET | `/api/clips/{clip}` | A clip for its page: `{id, number, name, start, end, picture, video}`, `video` as in `GET /api/items/{id}`. |
+| GET | `/api/clips/{clip}/thumb?v=` | The clip's picture: its video's frame at the clip's start, from the original file, cached and limited like other thumbnails. `v` is its `picture` version (then cacheable for good). |
 | GET | `/api/clips/{clip}/neighbors?path=` | As for a video: where the clip is in the Show all list of folder `path`. |
 | POST | `/api/items/{id}/clips` | `{start, end}`: make a clip between two marks, in either order (to 0.1 s, kept inside the video, at least 0.5 s long). Returns the clips; 400 with the reason if it can't be made. |
 | DELETE | `/api/items/{id}/clips/{clip}` | Delete a clip. Returns the clips left. |
-| GET | `/api/items/{id}/frame?at=` | The frame at `at` seconds, from the original file, as a JPEG at most 480 wide (clips' pictures). At most 2 are made at once. |
 | DELETE | `/api/items/{id}/image` | Remove the uploaded picture (the NAS one, if any, shows again). |
 | POST | `/api/items/{id}/tags` | `{name}`: tag the video. Returns its tags. |
 | DELETE | `/api/items/{id}/tags/{tag}` | Untag. Returns its remaining tags. |
@@ -761,7 +762,7 @@ version); bump `THUMBS` when the server changes how thumbnails are made.
 ### Tests
 
 ```sh
-uv run pytest              # backend: 621 tests
+uv run pytest              # backend: 625 tests
 node --test tests/js/      # frontend: 45 tests
 uv run pytest -m browser   # browser: 26 tests (about 3 minutes; needs Chromium and ffmpeg)
 scripts/docker-smoke.sh    # builds the image and checks it end to end (needs Docker)
@@ -818,7 +819,8 @@ reel/
   playback.py        ffmpeg commands for remux/convert; streaming and killing ffmpeg
   images.py          shrinking/cropping thumbnails; processing uploads
   pictures.py        your pictures for tags, videos and folders: one way to set, remove and clean up
-  thumbnails.py      pictures on cards: finding, thumbnailing (limited), and after-scan warming/cleanup
+  thumbnails.py      pictures on cards (NAS pictures, clips' frames): finding, thumbnailing (limited),
+                     and after-scan warming/cleanup
   marks.py           marks: spots in a video saved from the player
   clips.py           clips: stretches of a video, made on its edit page
   tags.py            tags: add/remove, rename/merge, delete
@@ -835,7 +837,8 @@ reel/
     browse.js        Home, folders, video page (with its clips), tag page, tag editor
     player.js        the player (also plays clips)
     editor.js        a video's edit page: mark twice, make a clip
-    clips.js         the Clips list (video page and edit page), deleting with a question
+    clips.js         clip cards, links, the edit page's Clips list, deleting with a question
+    clippage.js      a clip's page
     caps.js          what this browser can decode (and whether it plays HLS)
     sources.js       file / progressive / HLS delivery behind one interface
     vendor/          hls.js (light build, Apache-2.0)

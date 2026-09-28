@@ -213,3 +213,23 @@ def test_upgrading_keeps_clips_and_drops_other_ranges(tmp_path, monkeypatch):
     assert [(c["id"], c["name"]) for c in list_clips(conn, "b")] == [("b1", "Clip 1")]
     conn.close()
     assert "ranges" not in tables(path)
+
+
+def test_upgrading_renumbers_clips_that_share_a_number(tmp_path, monkeypatch):
+    """Version 13: a video's clip numbers become unique; a duplicate goes after its last."""
+    path = tmp_path / "reel.db"
+    monkeypatch.setattr(db, "MIGRATIONS", [m for m in db.MIGRATIONS if m[0] < 13])
+    init_db(path)
+    conn = connect(path)
+    conn.execute("INSERT INTO libraries (uid, name, path) VALUES ('l', 'L', '/m')")
+    conn.execute("INSERT INTO media_items (uid, library_id, rel_path, title, size, mtime) VALUES ('a', 1, 'a.mp4', 'a', 1, 1)")
+    for uid, number in [("x", 1), ("y", 2), ("z", 2)]:
+        conn.execute('INSERT INTO clips (uid, item_id, number, start, "end") VALUES (?, 1, ?, 0, 1)', (uid, number))
+    conn.commit()
+    conn.close()
+    monkeypatch.undo()
+    init_db(path)
+    from reel.clips import list_clips
+    conn = connect(path)
+    assert [(c["id"], c["name"]) for c in list_clips(conn, "a")] == [("x", "Clip 1"), ("y", "Clip 2"), ("z", "Clip 3")]
+    conn.close()

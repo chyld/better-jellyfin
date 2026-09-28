@@ -5,7 +5,7 @@ so every image the browser sees goes through here. Each image is cropped to
 the shape it's shown in first, so it fills that shape sharply:
 
     poster     2:3, at most 480x720   folders, libraries and tags
-    landscape  16:9, at most 640x360  videos
+    landscape  16:9, at most 640x360  videos, and clips (a frame of the video)
 """
 import hashlib
 import os
@@ -56,14 +56,14 @@ class Thumbnailer:
         out = self.path_for(key_src, rev, shape)
         return out if out.exists() else None
 
-    def _render(self, out: Path, input_args: list[str], shape: str) -> Path:
+    def _render(self, out: Path, input_args: list[str], filters: str) -> Path:
         if out.exists():
             return out
         out.parent.mkdir(parents=True, exist_ok=True)
         tmp = out.with_suffix(f".{os.getpid()}.{threading.get_ident()}.tmp.jpg")
         cmd = [
             "ffmpeg", "-v", "error", "-y", *input_args,
-            "-frames:v", "1", "-vf", SHAPES[shape], "-q:v", "4", str(tmp),
+            "-frames:v", "1", "-vf", filters, "-q:v", "4", str(tmp),
         ]
         with self._slots:
             if out.exists():  # another request made it while we waited
@@ -98,7 +98,16 @@ class Thumbnailer:
         rev = rev or picture_rev(src)
         if rev is None:
             raise ThumbnailError(f"Can't read {src.name}")
-        return self._render(self.path_for(key_src or str(src), rev, shape), ["-i", str(src)], shape)
+        return self._render(self.path_for(key_src or str(src), rev, shape), ["-i", str(src)], SHAPES[shape])
+
+    def frame(self, src: Path, at: float, *, key_src: str, rev: str, interlaced: bool = False) -> Path:
+        """A landscape JPEG of the video's frame at `at` seconds (a clip's picture),
+        from the original file, cached under the video's version (`rev`) and the
+        time. Interlaced video is deinterlaced, as for playback."""
+        seek = ["-ss", f"{at:.3f}"] if at > 0 else []   # before -i: fast, and exact (decodes up to it)
+        filters = ("bwdif=mode=send_frame," if interlaced else "") + SHAPES["landscape"]
+        return self._render(self.path_for(key_src, rev, frame_shape(at)), [*seek, "-i", str(src), "-map", "0:V:0"],
+                            filters)
 
     def from_image(self, src: Path, shape: str = "poster") -> Path:
         """A small JPEG of `src`, cropped to `shape` (keyed by its path and version)."""
@@ -120,6 +129,11 @@ class Thumbnailer:
             path.unlink(missing_ok=True)
             removed += 1
         return removed
+
+
+def frame_shape(at: float) -> str:
+    """The cache key part for a video's frame at `at` seconds (see Thumbnailer.frame)."""
+    return f"frame@{at:.1f}"
 
 
 def picture_rev(path: str | os.PathLike) -> str | None:

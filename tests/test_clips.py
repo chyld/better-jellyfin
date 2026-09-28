@@ -93,3 +93,33 @@ def test_a_clip_for_its_own_page(client, video):
     assert page["video"]["breadcrumbs"] == [{"name": "Tapes", "path": ""}]
     client.delete(f"/api/items/{video['id']}/clips/{clip['id']}")
     assert client.get(f"/api/clips/{clip['id']}").status_code == 404
+
+
+def test_a_clips_picture_version_follows_its_video_file(client, video, media_root):
+    """The picture's version is the video file's recorded size and time: the same
+    in every view of the clip, and new once a rescan sees the file changed."""
+    [clip] = make(client, video["id"], 1, 5).json()
+    listed = next(i for i in client.get(f"/api/libraries/{video['lib']}/browse").json()["items"] if i.get("kind"))
+    assert clip["picture"] == listed["picture"] == client.get(f"/api/clips/{clip['id']}").json()["picture"]
+    (media_root / "Tapes/a.mpg").write_bytes(b"changed, and longer than before")
+    client.post(f"/api/libraries/{video['lib']}/scan")
+    client.scans.wait_idle()
+    assert client.get(f"/api/clips/{clip['id']}").json()["picture"] != clip["picture"]
+
+
+def test_a_videos_clip_numbers_are_unique(client, video, settings):
+    make(client, video["id"], 1, 5)
+    conn = sqlite3.connect(settings.db_path)
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("INSERT INTO clips (uid, item_id, number, start, \"end\") "
+                     "SELECT 'dupe', item_id, number, 1, 2 FROM clips")
+    conn.close()
+
+
+def test_clips_made_at_the_same_moment_get_different_numbers(client, video):
+    import concurrent.futures
+    with concurrent.futures.ThreadPoolExecutor(8) as pool:
+        codes = list(pool.map(lambda t: make(client, video["id"], t, t + 1).status_code, range(0, 40, 2)))
+    assert codes == [200] * 20
+    numbers = [c["number"] for c in client.get(f"/api/items/{video['id']}/clips").json()]
+    assert numbers == list(range(1, 21))

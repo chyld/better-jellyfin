@@ -9,6 +9,13 @@ class NotFound(LookupError):
     pass
 
 
+def video_rev(size: int, mtime: float) -> str:
+    """A video file's version from what the scan recorded (its size and time):
+    pictures taken from the file (clips' pictures) are cached under it, so a
+    replaced file gets new ones, and none needs a trip to the NAS to check."""
+    return f"{size}-{mtime!r}"
+
+
 def clean_dir(rel_dir: str | None) -> str:
     """Normalise a folder path from the URL; reject anything that climbs out."""
     parts = [p for p in (rel_dir or "").split("/") if p not in ("", ".")]
