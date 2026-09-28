@@ -146,8 +146,8 @@ def test_unreadable_video_gives_a_clear_error(client, videos, media_root):
     assert res.status_code == 502 and res.json()["detail"].startswith("Couldn't take a picture")
 
 
-def test_frames_for_the_edit_page_come_from_the_original(client, videos, settings, tmp_path):
-    """The edit page's start/end pictures: the frame at that exact time, from the file
+def test_frames_for_clips_come_from_the_original(client, videos, settings, tmp_path):
+    """Clips' pictures: the frame at that exact time, from the file
     (interlaced ones too), at most 480 wide; nothing is left in the data folder."""
     before = sorted(p.name for p in settings.data_dir.iterdir())
     for name in ("plain", "tape"):

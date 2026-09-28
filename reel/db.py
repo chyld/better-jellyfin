@@ -289,7 +289,7 @@ def _v10_path_order_by_folder(conn: sqlite3.Connection) -> None:
 
 def _v11_ranges(conn: sqlite3.Connection) -> None:
     # Stretches of a video marked on its edit page: just marked, skipped when
-    # playing, or a clip (see ranges.py). The file itself is never changed.
+    # playing, or a clip. The file itself is never changed. (Replaced by clips in 12.)
     conn.execute(
         """
         CREATE TABLE ranges (
@@ -307,6 +307,34 @@ def _v11_ranges(conn: sqlite3.Connection) -> None:
     conn.execute('CREATE INDEX ranges_item ON ranges (item_id, start)')
 
 
+def _v12_clips(conn: sqlite3.Connection) -> None:
+    # The edit page makes only clips now, numbered in the order they were made
+    # ("Clip 1", "Clip 2"...). Clips made as ranges are kept (numbered by where
+    # they start); skipped and plain ranges are gone.
+    conn.execute(
+        """
+        CREATE TABLE clips (
+            id         INTEGER PRIMARY KEY,
+            uid        TEXT NOT NULL UNIQUE,
+            item_id    INTEGER NOT NULL REFERENCES media_items(id) ON DELETE CASCADE,
+            number     INTEGER NOT NULL,
+            start      REAL NOT NULL,
+            "end"      REAL NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO clips (uid, item_id, number, start, "end", created_at)
+        SELECT uid, item_id, ROW_NUMBER() OVER (PARTITION BY item_id ORDER BY start, id), start, "end", created_at
+          FROM ranges WHERE kind = 'clip'
+        """
+    )
+    conn.execute("DROP TABLE ranges")
+    conn.execute("CREATE INDEX clips_item ON clips (item_id, number)")
+
+
 # (version, what it does, function). Append only; functions must not commit.
 MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (2, "fingerprints and probe versions for media items", _v2_identity),
@@ -319,6 +347,7 @@ MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (9, "index each video's full-path order for show-all lists", _v9_path_order),
     (10, "full-path order: folders with look-alike names stay apart", _v10_path_order_by_folder),
     (11, "ranges: stretches of a video to skip, keep as clips, or just mark", _v11_ranges),
+    (12, "clips only: numbered clips replace ranges", _v12_clips),
 ]
 
 

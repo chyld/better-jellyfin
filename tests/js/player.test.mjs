@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-const { clampSeek, clipStart, enterFullscreen, exitFullscreen, isFullscreen, nextMark, prevMark, skipAt, startTime } =
+const { clampSeek, clipStart, enterFullscreen, exitFullscreen, isFullscreen, nextMark, prevMark, startTime } =
   await import("../../reel/static/player.js");
 
 test("jumping a minute moves by 60 seconds", () => {
@@ -105,21 +105,7 @@ test("next and previous mark", () => {
   assert.equal(nextMark([], 10), null);
 });
 
-// ---- Skipped ranges and clips ----
-
-test("inside a skipped range, playback jumps to its end", () => {
-  const skips = [{ start: 10, end: 20 }, { start: 50, end: 55 }];
-  assert.equal(skipAt(skips, 9.9), null);
-  assert.equal(skipAt(skips, 10), skips[0]);
-  assert.equal(skipAt(skips, 15), skips[0]);
-  assert.equal(skipAt(skips, 52), skips[1]);
-  assert.equal(skipAt(skips, 30), null);
-});
-
-test("landing at a skipped range's end doesn't skip again", () => {
-  assert.equal(skipAt([{ start: 10, end: 20 }], 19.8), null);
-  assert.equal(skipAt([{ start: 10, end: 20 }], 20), null);
-});
+// ---- Clips ----
 
 test("a clip starts at its start, unless asked for a time inside it", () => {
   const clip = { start: 30, end: 40 };

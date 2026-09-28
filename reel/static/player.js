@@ -97,12 +97,6 @@ export function prevMark(marks, position) {
   return [...marks].reverse().find((m) => m.time < position - 2) || null;
 }
 
-/** The skipped range `t` is in (playback jumps to its end), or null. The last
- *  0.3 s of a range doesn't count: that's where a jump lands. */
-export function skipAt(skips, t) {
-  return skips.find((r) => t >= r.start && t < r.end - 0.3) || null;
-}
-
 /** Where to start a clip: `start` if it's inside the clip, else the clip's start. */
 export function clipStart(clip, start) {
   return start > clip.start && start < clip.end ? start : clip.start;
@@ -115,7 +109,7 @@ export function startTime(query) {
 }
 
 /** `backUrl`: where the back button goes (the video's page, keeping the list it was opened from).
- *  `clipId`: play just that clip (a range saved on the edit page), as if it were a video. */
+ *  `clipId`: play just that clip (made on the edit page), as if it were a video. */
 export async function renderPlayer(page, itemId, start = 0, backUrl = `#/item/${itemId}`, clipId = null) {
   // Ask the server how *this* browser should play it (see plan.py).
   const caps = await capabilities();
@@ -125,10 +119,9 @@ export async function renderPlayer(page, itemId, start = 0, backUrl = `#/item/${
   ]);
   if (plan.mode === "unsupported" || item.missing) throw new Error("This video can't be played.");
   // A clip is a window on the video: the seek bar, clock and controls cover just
-  // that stretch. Otherwise, ranges saved as "skip" are jumped over.
-  const clip = clipId ? (item.ranges || []).find((r) => r.id === clipId && r.kind === "clip") : null;
+  // that stretch, and it stops at its end.
+  const clip = clipId ? (item.clips || []).find((c) => c.id === clipId) : null;
   if (clipId && !clip) throw new Error("This clip doesn't exist any more.");
-  const skips = clip ? [] : (item.ranges || []).filter((r) => r.kind === "skip");
   const from = clip ? clip.start : 0;
 
   const streamed = plan.streamed;
@@ -163,12 +156,10 @@ export async function renderPlayer(page, itemId, start = 0, backUrl = `#/item/${
   const tip = h("div", { class: "seek-tip" });
   // Your marks, as ticks on the seek bar: click one to go there.
   const ticks = h("div", { class: "seek-marks" });
-  // Skipped ranges, shaded on the rail.
-  const skipBands = h("div", { class: "seek-skips", "aria-hidden": "true" });
   const seekBar = h(
     "div",
     { class: "seek", role: "slider", tabindex: 0, "aria-label": "Seek", "aria-valuemin": 0 },
-    h("div", { class: "seek-rail" }, buffered, fillBar, skipBands),
+    h("div", { class: "seek-rail" }, buffered, fillBar),
     ticks,
     knob,
     tip,
@@ -194,7 +185,7 @@ export async function renderPlayer(page, itemId, start = 0, backUrl = `#/item/${
     h(
       "div",
       { class: "player-heading" },
-      h("span", { class: "player-title" }, clip ? `${item.title} · ${clip.label || "Clip"}` : item.title),
+      h("span", { class: "player-title" }, clip ? `${item.title} · ${clip.name}` : item.title),
       streamed && h("span", { class: "badge" }, h("i", { class: "pulse" }), BADGES[plan.mode] || "Converting"),
     ),
   );
@@ -340,11 +331,6 @@ export async function renderPlayer(page, itemId, start = 0, backUrl = `#/item/${
         ),
       ),
     );
-    skipBands.replaceChildren(
-      ...(total ? skips : []).map((r) =>
-        h("div", { class: "seek-skip", style: `left:${pct(r.start)};width:calc(${pct(r.end)} - ${pct(r.start)})` }),
-      ),
-    );
   }
   let marking = false;
   async function addMark() {
@@ -376,29 +362,12 @@ export async function renderPlayer(page, itemId, start = 0, backUrl = `#/item/${
     } else video.pause();
   }
 
-  // A clip stops at its end; a skipped range is jumped over (a skip to the very
-  // end just stops there).
-  let skipping = false;
-  function keepInBounds() {
-    const at = position();
-    if (clip) {
-      if (at >= clip.end - 0.05 && !video.paused) {
-        video.pause();
-        showToast("End of clip");
-      }
-      return;
-    }
-    const skip = dragTime === null && !skipping && skipAt(skips, at);
-    if (!skip) return;
-    if (skip.end >= duration() - 1) {
+  // A clip stops at its end.
+  function stopAtClipEnd() {
+    if (clip && position() >= clip.end - 0.05 && !video.paused) {
       video.pause();
-      showToast("The rest is skipped");
-      return;
+      showToast("End of clip");
     }
-    skipping = true;
-    seek(skip.end);
-    showToast(`Skipped ${formatDuration(skip.start) || "0:00"} – ${formatDuration(skip.end)}`);
-    skipping = false;
   }
 
   function toggleFullscreen() {
@@ -466,7 +435,7 @@ export async function renderPlayer(page, itemId, start = 0, backUrl = `#/item/${
     showControls();
   });
   video.addEventListener("timeupdate", updateTime);
-  video.addEventListener("timeupdate", keepInBounds);
+  video.addEventListener("timeupdate", stopAtClipEnd);
   video.addEventListener("progress", updateTime);
   video.addEventListener("durationchange", updateTime);
   video.addEventListener("waiting", () => (spinner.hidden = false));

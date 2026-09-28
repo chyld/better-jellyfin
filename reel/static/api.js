@@ -96,16 +96,6 @@ export function formatTime(seconds) {
   return hours ? `${hours}:${String(mins).padStart(2, "0")}:${secs}` : `${mins}:${secs}`;
 }
 
-/** A typed time as seconds: "1:02:10.5", "2:05", "75" or "75.2". Null if it
- *  isn't one (minutes and seconds after the first part must be under 60). */
-export function parseTime(text) {
-  const parts = String(text ?? "").trim().split(":");
-  const last = parts.length - 1;
-  if (parts.length > 3) return null;
-  const ok = parts.every((p, i) => (i === last ? /^\d+(\.\d+)?$/ : /^\d+$/).test(p) && (i === 0 || Number(p) < 60));
-  return ok ? parts.reduce((total, p) => total * 60 + Number(p), 0) : null;
-}
-
 export function formatSize(bytes) {
   if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(1)} GB`;
   if (bytes >= 1e6) return `${Math.round(bytes / 1e6)} MB`;

@@ -2,6 +2,7 @@
 import { api, artBox, encodePath, fill, formatDuration, formatSize, h, parseTags, pathBelow, plural, tagError } from "./api.js";
 import { openImageDialog } from "./imagedialog.js";
 import { capabilities, capsQuery, hlsSupport } from "./caps.js";
+import { clipsSection } from "./clips.js";
 
 const SORT_KEY = "reel.sort";
 
@@ -731,7 +732,6 @@ export async function renderItem(view, itemId, list = null) {
     ["File", item.rel_path],
   ];
 
-  const clips = (item.ranges || []).filter((r) => r.kind === "clip");
   fill(view,
     // The video's picture, blurred, glowing behind the top of the page.
     image && h("div", { class: "backdrop", style: `background-image:url("${image}")`, "aria-hidden": "true" }),
@@ -761,65 +761,15 @@ export async function renderItem(view, itemId, list = null) {
           playable
             ? h("a", { class: "btn primary play", href: playHref }, "▶ Play")
             : h("button", { class: "btn primary play", disabled: true }, "▶ Play"),
-          !item.missing && item.duration > 0 &&
-            h("a", { class: "btn edit-link", href: `#/edit/${item.id}`, title: "Mark stretches to skip, keep as clips, or find again" }, "Edit video"),
+          playable && item.duration > 0 &&
+            h("a", { class: "btn edit-link", href: `#/edit/${item.id}`, title: "Make clips of this video" }, "Edit video"),
         ),
         tagEditor(item),
         marksSection(item, around ? list : null),
-        rangesSection(item, around ? list : null),
         h("dl", { class: "facts" }, facts.map(([k, v]) => [h("dt", {}, k), h("dd", {}, v)])),
       ),
     ),
-    clips.length > 0 &&
-      h(
-        "section",
-        { class: "clips" },
-        h("h2", { class: "section-title" }, "Clips", h("span", { class: "count" }, clips.length)),
-        h("ul", { class: "grid videos" }, clips.map((clip) => clipCard(item, clip, playable))),
-      ),
+    clipsSection(item, item.clips || [], { playable }).element,
   );
 }
 
-/** A clip (a range saved on the edit page) as a card: its first frame, name and
- *  times; it plays just that stretch. */
-function clipCard(item, clip, playable) {
-  const art = artBox({ kind: "video", shape: "landscape", src: `/api/items/${item.id}/frame?at=${clip.start.toFixed(1)}`, alt: "" });
-  const lines = [
-    h("div", { class: "label" }, clip.label || "Clip"),
-    h("div", { class: "sub" }, `${formatDuration(clip.start) || "0:00"} – ${formatDuration(clip.end)} · ${formatDuration(clip.end - clip.start) || "0:00"}`),
-  ];
-  return h(
-    "li",
-    { class: "card-wrap" },
-    playable ? h("a", { class: "card", href: `#/play/${item.id}?clip=${clip.id}` }, art, lines) : h("div", { class: "card" }, art, lines),
-  );
-}
-
-/** The video's other ranges: marked ones play from their start; skipped ones are
- *  just listed (playing from there would jump straight past). Both are changed on
- *  the edit page. */
-function rangesSection(item, inList) {
-  const others = (item.ranges || []).filter((r) => r.kind !== "clip");
-  if (!others.length) return null;
-  const label = (r) => `${formatDuration(r.start) || "0:00"} – ${formatDuration(r.end)}`;
-  return h(
-    "section",
-    { class: "tags-section ranges-section" },
-    h("div", { class: "section-head" }, h("h3", {}, "Ranges"), h("a", { class: "text-btn", href: `#/edit/${item.id}` }, "Edit")),
-    h(
-      "ul",
-      { class: "tag-cloud" },
-      others.map((r) =>
-        h(
-          "li",
-          { class: `chip range ${r.kind}`, title: r.kind === "skip" ? "Skipped when the video plays" : undefined },
-          r.kind === "skip" && h("span", { class: "chip-kind" }, "Skip"),
-          r.kind === "skip"
-            ? h("span", {}, r.label ? `${r.label} · ${label(r)}` : label(r))
-            : h("a", { href: playUrl(item.id, inList, r.start), title: `Play from ${formatDuration(r.start) || "0:00"}` },
-                r.label ? `${r.label} · ${label(r)}` : label(r)),
-        ),
-      ),
-    ),
-  );
-}

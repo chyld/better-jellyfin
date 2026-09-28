@@ -17,7 +17,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import browse, catalog, fetch, hls, libraries, marks, pictures, playback, ranges, tags, users
+from . import browse, catalog, clips, fetch, hls, libraries, marks, pictures, playback, tags, users
 from .paths import OutsideRoot, resolve_inside
 from .plan import HLS_SUPPORT, Capabilities, Plan, plan as make_plan
 from .config import DataLock, Settings
@@ -27,7 +27,7 @@ from .scan_manager import ScanManager
 from .thumbnails import THUMB_HEADERS, Thumbnails
 
 STATIC_DIR = Path(__file__).parent / "static"
-FRAME_SLOTS = 2     # frames for the edit page taken at once
+FRAME_SLOTS = 2     # frames (clips' pictures) taken at once
 FRAME_WIDTH = 480
 
 
@@ -66,11 +66,9 @@ class MarkAdd(BaseModel):
     time: float = Field(ge=0, allow_inf_nan=False)   # seconds into the video
 
 
-class RangeIn(BaseModel):
-    start: float = Field(ge=0, allow_inf_nan=False)  # seconds into the video
+class ClipIn(BaseModel):
+    start: float = Field(ge=0, allow_inf_nan=False)  # the two marks, in seconds, in either order
     end: float = Field(ge=0, allow_inf_nan=False)
-    kind: str = "range"                              # range | skip | clip (see ranges.py)
-    label: str = Field(default="", max_length=ranges.MAX_LABEL * 2)
 
 
 class Snapshot(BaseModel):
@@ -196,8 +194,8 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
     async def tag_error(request: Request, exc: tags.TagError):
         return JSONResponse({"detail": str(exc)}, status_code=400)
 
-    @app.exception_handler(ranges.RangeError)
-    async def range_error(request: Request, exc: ranges.RangeError):
+    @app.exception_handler(clips.ClipError)
+    async def clip_error(request: Request, exc: clips.ClipError):
         return JSONResponse({"detail": str(exc)}, status_code=400)
 
     @app.exception_handler(ThumbnailError)
@@ -267,7 +265,7 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
     def get_item(item_uid: str, conn: sqlite3.Connection = Db):
         item = browse.item_detail(conn, item_uid)
         return {**item, "tags": tags.item_tags(conn, tags.item_pk(conn, item_uid)),
-                "marks": marks.list_marks(conn, item_uid), "ranges": ranges.list_ranges(conn, item_uid)}
+                "marks": marks.list_marks(conn, item_uid), "clips": clips.list_clips(conn, item_uid)}
 
     @app.get("/api/items/{item_uid}/neighbors")
     def get_neighbors(item_uid: str, path: str = "", conn: sqlite3.Connection = Db):
@@ -288,23 +286,19 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
     def delete_mark(item_uid: str, mark_uid: str, conn: sqlite3.Connection = Db):
         return marks.remove_mark(conn, item_uid, mark_uid)
 
-    @app.get("/api/items/{item_uid}/ranges")
-    def get_ranges(item_uid: str, conn: sqlite3.Connection = Db):
-        return ranges.list_ranges(conn, item_uid)
+    @app.get("/api/items/{item_uid}/clips")
+    def get_clips(item_uid: str, conn: sqlite3.Connection = Db):
+        return clips.list_clips(conn, item_uid)
 
-    @app.post("/api/items/{item_uid}/ranges")
-    def add_range(item_uid: str, body: RangeIn, conn: sqlite3.Connection = Db):
-        """Save a stretch of the video: just marked, skipped when playing, or a clip.
-        Returns the video's ranges, earliest first."""
-        return ranges.add_range(conn, item_uid, body.start, body.end, body.kind, body.label)
+    @app.post("/api/items/{item_uid}/clips")
+    def add_clip(item_uid: str, body: ClipIn, conn: sqlite3.Connection = Db):
+        """Make a clip between two marks (`start` and `end`, in either order).
+        Returns the video's clips, in the order they were made."""
+        return clips.add_clip(conn, item_uid, body.start, body.end)
 
-    @app.put("/api/items/{item_uid}/ranges/{range_uid}")
-    def update_range(item_uid: str, range_uid: str, body: RangeIn, conn: sqlite3.Connection = Db):
-        return ranges.update_range(conn, item_uid, range_uid, body.start, body.end, body.kind, body.label)
-
-    @app.delete("/api/items/{item_uid}/ranges/{range_uid}")
-    def delete_range(item_uid: str, range_uid: str, conn: sqlite3.Connection = Db):
-        return ranges.remove_range(conn, item_uid, range_uid)
+    @app.delete("/api/items/{item_uid}/clips/{clip_uid}")
+    def delete_clip(item_uid: str, clip_uid: str, conn: sqlite3.Connection = Db):
+        return clips.remove_clip(conn, item_uid, clip_uid)
 
     @app.post("/api/items/{item_uid}/tags")
     def add_item_tag(item_uid: str, body: TagAdd, conn: sqlite3.Connection = Db):
@@ -402,8 +396,7 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
     @app.get("/api/items/{item_uid}/frame")
     async def get_frame(item_uid: str, at: float = Query(0, ge=0, allow_inf_nan=False)):
         """The frame at `at` seconds, from the original file (so it's exactly what's
-        there, whatever the browser was sent), as a JPEG at most 480 wide. For the
-        edit page's start and end, and clips' pictures."""
+        there, whatever the browser was sent), as a JPEG at most 480 wide: clips' pictures."""
         row, path = await run_in_threadpool(stream_source, item_uid)
         if row["duration"]:
             at = min(at, max(0.0, row["duration"] - 0.5))  # the very end may have no frame

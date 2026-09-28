@@ -186,3 +186,30 @@ def test_a_failed_upgrade_from_before_versioning_changes_nothing(tmp_path, monke
     monkeypatch.undo()
     init_db(path)                                                  # and it works later
     assert version_of(path) == latest_version()
+
+
+def test_upgrading_keeps_clips_and_drops_other_ranges(tmp_path, monkeypatch):
+    """Version 12: ranges made as clips become Clip 1, 2... (by where they start),
+    each video counting from 1; skipped and plain ranges are gone."""
+    path = tmp_path / "reel.db"
+    monkeypatch.setattr(db, "MIGRATIONS", [m for m in db.MIGRATIONS if m[0] < 12])
+    init_db(path)
+    conn = connect(path)
+    conn.execute("INSERT INTO libraries (uid, name, path) VALUES ('l', 'L', '/m')")
+    for name in ("a", "b"):
+        conn.execute("INSERT INTO media_items (uid, library_id, rel_path, title, size, mtime) "
+                     "VALUES (?, 1, ?, ?, 1, 1)", (name, f"{name}.mp4", name))
+    for uid, item, start, kind in [("c2", 1, 30, "clip"), ("s", 1, 5, "skip"), ("c1", 1, 10, "clip"),
+                                   ("r", 1, 1, "range"), ("b1", 2, 50, "clip")]:
+        conn.execute('INSERT INTO ranges (uid, item_id, start, "end", kind) VALUES (?, ?, ?, ?, ?)',
+                     (uid, item, start, start + 5, kind))
+    conn.commit()
+    conn.close()
+    monkeypatch.undo()
+    init_db(path)
+    from reel.clips import list_clips
+    conn = connect(path)
+    assert [(c["id"], c["name"], c["start"]) for c in list_clips(conn, "a")] == [("c1", "Clip 1", 10), ("c2", "Clip 2", 30)]
+    assert [(c["id"], c["name"]) for c in list_clips(conn, "b")] == [("b1", "Clip 1")]
+    conn.close()
+    assert "ranges" not in tables(path)
