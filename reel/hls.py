@@ -99,7 +99,10 @@ class HlsGone(HlsError):
 
 
 class HlsDiskFull(HlsError):
-    """The data folder's disk is below its free-space reserve: no new encoder."""
+    """The data folder's disk is below its free-space reserve: no encoder runs."""
+
+
+DISK_FULL = "the disk is nearly full"   # why an encoder was stopped (see _watch)
 
 
 def segment_count(duration: float) -> int:
@@ -318,6 +321,8 @@ class HlsManager:
                             self.publish(session)
                             if path.exists():
                                 continue                          # it made it after all
+                            if viewer.last_failure == DISK_FULL:
+                                raise HlsDiskFull("The server's disk is nearly full, so it can't convert videos right now.")
                             raise HlsError(self._failure(viewer))  # it didn't: the watcher says why
                         await self._start(session, viewer, n)
                         started = True
@@ -328,6 +333,20 @@ class HlsManager:
             await asyncio.sleep(POLL)
         self._trim(session)
         return path
+
+    async def segment_bytes(self, session: Session, viewer_id: str, n: int) -> bytes:
+        """Segment n's contents, for the response. Read here, not opened later by
+        the response: the cache clean-up (enforce_cache_limit) decides from where
+        viewers were a moment ago and deletes in a worker thread, so a segment
+        found now may be gone by the time a response would open it. If it's gone
+        before it's read, it's made again (a segment is a few MB)."""
+        for _ in range(3):
+            path = await self.media_segment(session, viewer_id, n)
+            try:
+                return await anyio.to_thread.run_sync(path.read_bytes)
+            except FileNotFoundError:
+                continue       # cleaned up in between: find (or make) it again
+        raise HlsError("The video's segments keep being cleared from the cache.")
 
     @staticmethod
     def _failure(viewer: Viewer) -> str:
@@ -446,6 +465,7 @@ class HlsManager:
         it, free its slot and keep the reason it failed."""
         proc = enc.proc
         reader = asyncio.create_task(drain(proc.stderr, enc.errors))
+        checked = enc.start - 1   # the last segment after which the free space was checked
         try:
             while proc.returncode is None:
                 try:
@@ -459,6 +479,12 @@ class HlsManager:
                 if produced - self._needed(session, enc, produced) >= AHEAD_LIMIT:
                     proc.kill()  # far enough ahead; a later request restarts it
                     break
+                if produced > checked:   # a new segment: is there still room for the next?
+                    checked = produced
+                    if await anyio.to_thread.run_sync(self.low_on_disk):
+                        enc.failure = DISK_FULL
+                        proc.kill()      # the viewer is told when it asks for what's missing
+                        break
                 limit = STARTUP_TIMEOUT if produced < enc.start else STALL_TIMEOUT
                 if time.monotonic() - enc.progress_at > limit:
                     enc.failure = f"no progress for {limit:g} seconds"
@@ -543,14 +569,21 @@ class HlsManager:
         What to keep is decided here, on the event loop, from the sessions as they
         are now; the file work (walking, stat, delete) runs in a worker thread, so
         a slow disk never holds up playback requests."""
+        # Below the free-space reserve, the target is nothing: everything no viewer
+        # is about to play goes, even if the cache is under REEL_HLS_CACHE_MB.
+        low = await anyio.to_thread.run_sync(self.low_on_disk)
+        limit = 0 if low else self.cache_limit
         plan = []
         for session in list(self.sessions.values()):
             wanted = set()
             for v in session.viewers.values():
                 wanted.update(range(v.position - 1, v.position - 1 + KEEP_NEAR))
             plan.append((session.folder, session.last_used, wanted, [v.position for v in session.viewers.values()]))
-        total, freed = await anyio.to_thread.run_sync(_evict, self.cache_dir, self.cache_limit, plan)
+        total, freed = await anyio.to_thread.run_sync(_evict, self.cache_dir, limit, plan)
         self._cache_bytes = total - freed
+        if low and freed:
+            log.warning("the data folder's disk is below REEL_MIN_FREE_MB: freed %d MB of HLS cache",
+                        freed // 1024**2)
         over = self._cache_bytes > self.cache_limit
         if over and not self._over_limit:
             log.warning("HLS cache is over REEL_HLS_CACHE_MB (%d MB, target %d MB): what's left is "

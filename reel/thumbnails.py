@@ -86,12 +86,13 @@ IMMUTABLE_HEADERS = {"Cache-Control": "private, max-age=31536000, immutable"}
 
 class Thumbnails:
     def __init__(self, db_path: Path, media_root: Path, images_dir: Path, thumbnailer: Thumbnailer,
-                 watching: Callable[[], bool]):
+                 watching: Callable[[], bool], low_on_disk: Callable[[], bool] = lambda: False):
         self.db_path = db_path
         self.media_root = media_root
         self.images_dir = images_dir
         self.thumbnailer = thumbnailer
         self.watching = watching
+        self.low_on_disk = low_on_disk    # below the free-space reserve: make none
         self.slots = Slots(SLOTS, watching)
 
     # ---- Finding a card's picture (the catalog only, a short connection) ----------------
@@ -180,7 +181,10 @@ class Thumbnails:
     def make(self, found: dict) -> Path:
         """In a worker thread: check the NAS picture (or a clip's video) is still
         inside its library (it may have been swapped for a link since the scan),
-        then thumbnail it (or take the clip's frame)."""
+        then thumbnail it (or take the clip's frame). None are made while the disk
+        is below the free-space reserve: the card shows its placeholder."""
+        if self.low_on_disk():
+            raise ThumbnailError("the disk is nearly full")
         try:
             resolve_inside(self.media_root, found["root"])
             src = resolve_inside(found["root"], found["rel"])

@@ -9,11 +9,13 @@ per picture, never overwritten:
     images/videos/<video uuid>-<version>.jpg
     images/folders/<folder picture uuid>-<version>.jpg   (one folder_images row per folder)
 
-Setting one always goes: write the new file, record its version (in one
-commit), then retire the previous file. Removing: forget it, then retire the
-file. A retired file isn't deleted at once: its time is set to now and prune()
+Setting one always goes: write the new file, retire the previous file, then
+record the new version (in one commit). Removing: retire the file, then forget
+it. A retired file isn't deleted at once: its time is set to now and prune()
 deletes it later, since prune() only deletes unreferenced files older than
-ORPHAN_GRACE_SECONDS. So a request that picked the old file a moment before can
+ORPHAN_GRACE_SECONDS. It's retired *before* the database stops pointing at it,
+so there's no moment when it's unreferenced but still looks old to a prune()
+running alongside. So a request that picked the old file a moment before can
 still send it, a file that's written but not yet recorded is never removed from
 under an upload, and a failure in between leaves at worst an unused file for prune().
 
@@ -154,10 +156,10 @@ def set_picture(conn: sqlite3.Connection, images_dir: Path, owner: Owner, write:
     file_id, old = owner.current(conn)
     version = _new_version()
     write(picture_path(images_dir, owner.kind, file_id, version))   # 1. the new file
+    if old:                                                          # 2. retire the old one,
+        retire(picture_path(images_dir, owner.kind, file_id, old))   #    while it's still referenced
     owner.record(conn, file_id, version)
-    conn.commit()                                                    # 2. point at it
-    if old:                                                          # 3. retire the old one
-        retire(picture_path(images_dir, owner.kind, file_id, old))
+    conn.commit()                                                    # 3. point at the new one
     return version
 
 
@@ -171,9 +173,9 @@ def remove_picture(conn: sqlite3.Connection, images_dir: Path, owner: Owner) -> 
     file_id, old = owner.current(conn)
     if old is None:
         return
+    retire(picture_path(images_dir, owner.kind, file_id, old))   # first: see set_picture()
     owner.record(conn, file_id, None)
     conn.commit()
-    retire(picture_path(images_dir, owner.kind, file_id, old))
 
 
 def picture_file(conn: sqlite3.Connection, images_dir: Path, owner: Owner) -> tuple[Path, str] | None:

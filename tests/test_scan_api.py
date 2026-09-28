@@ -449,3 +449,43 @@ def test_no_scan_can_be_queued_while_a_library_is_being_removed(settings):
     assert manager.status(1) is None
     assert manager.request(1)["state"] == "queued"
     assert not manager.claim_for_removal(1)          # busy: can't be removed now
+
+
+def test_a_scan_asked_for_a_removed_library_doesnt_scan_one_that_took_its_place(settings, media_root):
+    """A library's integer id is reused after it's removed. A scan request delayed
+    across the removal and a new library isn't run on the new one."""
+    from reel.db import connect
+    from reel.libraries import create_library, delete_library
+
+    (media_root / "Old").mkdir()
+    (media_root / "New").mkdir()
+    init_db(settings.db_path)
+    conn = connect(settings.db_path)
+    old_id = create_library(conn, media_root, "Old", str(media_root / "Old"))
+    old_uid = conn.execute("SELECT uid FROM libraries WHERE id = ?", (old_id,)).fetchone()[0]
+    delete_library(conn, old_id)
+    new_id = create_library(conn, media_root, "New", str(media_root / "New"))
+    new_uid = conn.execute("SELECT uid FROM libraries WHERE id = ?", (new_id,)).fetchone()[0]
+    conn.close()
+    assert new_id == old_id                                   # the id was reused
+
+    scanned = []
+    manager = ScanManager(settings.db_path, scan_fn=lambda conn, library_id, **kw: scanned.append(library_id) or {})
+    manager.start()
+    try:
+        manager.request(old_id, old_uid)                      # the delayed request, for the old library
+        manager.wait_idle()
+        assert scanned == [] and manager.status(new_id) is None
+        manager.request(new_id, new_uid)
+        manager.wait_idle()
+        assert scanned == [new_id] and manager.status(new_id)["state"] == "done"
+    finally:
+        manager.stop()
+
+
+def test_a_status_doesnt_show_what_the_manager_keeps_for_itself(settings):
+    init_db(settings.db_path)
+    manager = ScanManager(settings.db_path)
+    manager._status[1] = {"state": "done", "done": 3, "total": 3}
+    assert manager.claim_for_removal(1)
+    assert manager.request(1) == manager.status(1) == {"state": "removing"}

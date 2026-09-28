@@ -98,7 +98,8 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
         media_root=settings.media_root, busy=watching,
     )
     thumbs = Thumbnailer(settings.thumbs_dir)
-    thumbnails = Thumbnails(settings.db_path, settings.media_root, settings.images_dir, thumbs, watching)
+    thumbnails = Thumbnails(settings.db_path, settings.media_root, settings.images_dir, thumbs, watching,
+                            low_on_disk=settings.low_on_disk)
     hls_sessions = hls.HlsManager(settings.hls_dir, streams, cache_limit=settings.hls_cache_mb * 1024**2,
                                   low_on_disk=settings.low_on_disk)
     # Pictures whose video, folder or tag is gone are cleaned up after every scan
@@ -109,7 +110,7 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
 
     def after_batch(library_ids: list[int], should_stop) -> bool:
         thumbnails.prune()
-        return thumbnails.warm(library_ids, lambda: should_stop() or watching())
+        return thumbnails.warm(library_ids, lambda: should_stop() or watching() or settings.low_on_disk())
 
     scans.after_batch = after_batch
     tools: dict[str, str | None] = {}   # ffmpeg/ffprobe versions, checked at startup
@@ -382,6 +383,7 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
         async def upload_picture(request: Request, owner=Depends(owner_of), conn: sqlite3.Connection = Db):
             await run_in_threadpool(room_for_pictures)
             data = await read_upload(request)
+            await run_in_threadpool(room_for_pictures)   # again: it may have filled while this arrived
             version = await run_in_threadpool(pictures.set_uploaded, conn, settings.images_dir, owner, data)
             return answer(conn, owner, version)
 
@@ -389,7 +391,9 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
         def picture_from_url(body: ImageUrl, owner=Depends(owner_of), conn: sqlite3.Connection = Db):
             owner.check(conn)  # 404 before downloading anything
             room_for_pictures()
-            version = pictures.set_uploaded(conn, settings.images_dir, owner, download(body.url))
+            data = download(body.url)
+            room_for_pictures()   # again: it may have filled while this downloaded
+            version = pictures.set_uploaded(conn, settings.images_dir, owner, data)
             return answer(conn, owner, version)
 
         @app.delete(path)
@@ -521,7 +525,7 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
             session = hls_sessions.get(sid)
         watching.saw_playback()
         try:
-            path = await hls_sessions.media_segment(session, viewer, number)
+            data = await hls_sessions.segment_bytes(session, viewer, number)
         except playback.StreamBusy as exc:
             raise HTTPException(503, str(exc), headers={"Retry-After": "5"})
         except hls.HlsGone as exc:
@@ -530,7 +534,7 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
             raise HTTPException(507, str(exc))
         except hls.HlsError as exc:
             raise HTTPException(502, str(exc))
-        return FileResponse(path, media_type="video/mp2t", headers={"Cache-Control": "no-cache"})
+        return Response(data, media_type="video/mp2t", headers={"Cache-Control": "no-cache"})
 
     @app.get("/api/items/{item_uid}/stream")
     async def get_item_stream(item_uid: str, start: float = 0, video: str | None = None, audio: str | None = None):
@@ -659,11 +663,11 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
 
     @app.post("/api/libraries/scan", status_code=202)
     def scan_all(conn: sqlite3.Connection = Db):
-        return {row["uid"]: scans.request(row["id"]) for row in libraries.list_libraries(conn)}
+        return {row["uid"]: scans.request(row["id"], row["uid"]) for row in libraries.list_libraries(conn)}
 
     @app.post("/api/libraries/{library_uid}/scan", status_code=202)
     def scan_one(library_uid: str, conn: sqlite3.Connection = Db):
-        return scans.request(library_pk(conn, library_uid))
+        return scans.request(library_pk(conn, library_uid), library_uid)
 
     app.mount("/", AppFiles(directory=STATIC_DIR, html=True), name="static")
     return app

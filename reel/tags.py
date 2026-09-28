@@ -112,12 +112,12 @@ def rename_tag(conn: sqlite3.Connection, tag_uid: str, name: str, images_dir: Pa
     id is then the other tag's; the renamed one is gone).
 
     Image files follow the upload protocol: the surviving tag's file is made
-    first (a new name, nothing overwritten), the database change is saved, and
-    only then is the old file deleted. A failure in between leaves an unused file
-    for prune(), never a tag pointing at a missing one.
+    first (a new name, nothing overwritten), the old file is retired (see
+    pictures.retire) while still referenced, then the database change is saved.
+    A failure in between leaves an unused file for prune(), never a tag pointing
+    at a missing one.
     """
     name = clean_name(name)
-    old_file = None
     with write_transaction(conn):   # the checks and the change as one
         tag = find_tag(conn, tag_uid)
         other = conn.execute(
@@ -130,6 +130,7 @@ def rename_tag(conn: sqlite3.Connection, tag_uid: str, name: str, images_dir: Pa
             # The surviving tag keeps its own image, or takes this one's if it has none.
             if tag["image_version"]:
                 old_file = image_path(images_dir, tag["uid"], tag["image_version"])
+                retire(old_file)   # before the change is saved, not after (see pictures.py)
                 if not other["image_version"]:
                     version = new_uid()[:8]   # a fresh name: never one an earlier try left behind
                     try:
@@ -147,18 +148,16 @@ def rename_tag(conn: sqlite3.Connection, tag_uid: str, name: str, images_dir: Pa
             )
             conn.execute("DELETE FROM tags WHERE id = ?", (tag["id"],))
             result_id, merged = other["id"], True
-    if old_file is not None:
-        retire(old_file)  # saved: the renamed tag's own file is no longer used
     return {**_tag_with_count(conn, result_id), "merged": merged}
 
 
 def delete_tag(conn: sqlite3.Connection, tag_uid: str, images_dir: Path) -> None:
     """Delete a tag, removing it from every video. The videos are untouched."""
     tag = find_tag(conn, tag_uid)
+    if tag["image_version"]:
+        retire(image_path(images_dir, tag["uid"], tag["image_version"]))   # first: see pictures.py
     conn.execute("DELETE FROM tags WHERE id = ?", (tag["id"],))
     conn.commit()
-    if tag["image_version"]:
-        retire(image_path(images_dir, tag["uid"], tag["image_version"]))
 
 
 # ---- Tag images ---------------------------------------------------------------------

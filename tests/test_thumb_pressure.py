@@ -227,3 +227,23 @@ def test_requests_and_warming_share_one_limit():
         for t in threads:
             t.join()
         assert peak[0] == most and slots.running == 0
+
+
+def test_no_thumbnails_are_made_while_the_disk_is_nearly_full(settings, media_root, fake_probe, monkeypatch, tmp_path):
+    """Below the free-space reserve a card gets its placeholder (404), without ffmpeg."""
+    from fastapi.testclient import TestClient
+
+    make_files(media_root, "Tapes/v.mp4", "Tapes/v.png")
+    made = []
+    monkeypatch.setattr(Thumbnailer, "cached", lambda self, *args, **kwargs: None)
+    monkeypatch.setattr(Thumbnailer, "make", lambda self, *args, **kwargs: made.append(1) or tmp_path / "x.jpg")
+    init_db(settings.db_path)
+    app = create_app(settings, ScanManager(settings.db_path, scan_fn=partial(scan_library, probe_fn=fake_probe)))
+    app.state.scans.after_batch = None
+    with TestClient(app) as c:
+        lib = c.post("/api/libraries", json={"name": "Tapes", "path": str(media_root / "Tapes")}).json()["id"]
+        c.post(f"/api/libraries/{lib}/scan")
+        app.state.scans.wait_idle()
+        video = c.get(f"/api/libraries/{lib}/browse").json()["items"][0]["id"]
+        app.state.thumbnails.low_on_disk = lambda: True
+        assert c.get(f"/api/items/{video}/thumb").status_code == 404 and made == []

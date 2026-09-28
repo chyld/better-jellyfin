@@ -1,6 +1,7 @@
 """Runs scans one at a time on a background thread and tracks their progress."""
 import logging
 import queue
+import sqlite3
 import threading
 from collections.abc import Callable
 from functools import partial
@@ -27,6 +28,10 @@ class ScanManager:
         self._queue: queue.Queue[int | None] = queue.Queue()
         self._lock = threading.Lock()
         self._status: dict[int, dict] = {}
+        # Which library (by its UUID) each queued scan was asked for. A library's
+        # integer id can be reused once it's removed, so a request delayed across a
+        # removal and a new library must not scan the new one: checked when it runs.
+        self._asked_for: dict[int, str] = {}
         self._thread: threading.Thread | None = None
         self._stopping = False
         self._cancel = threading.Event()
@@ -84,16 +89,19 @@ class ScanManager:
                 log.warning("the scan didn't stop within %s seconds", timeout)
             self._thread = None
 
-    def request(self, library_id: int) -> dict:
+    def request(self, library_id: int, library_uid: str | None = None) -> dict:
         """Queue a scan. Asking again while one is queued or running does nothing,
-        and so does asking while the library is being removed."""
+        and so does asking while the library is being removed. With `library_uid`,
+        the scan only runs if library_id is still that library then."""
         with self._lock:
             current = self._status.get(library_id)
             if current and current["state"] in ("queued", "scanning", "removing"):
-                return dict(current)
+                return _public(current)
             self._status[library_id] = {"state": "queued", "done": 0, "total": 0}
+            if library_uid is not None:
+                self._asked_for[library_id] = library_uid
             self._queue.put(library_id)
-            status = dict(self._status[library_id])
+            status = _public(self._status[library_id])
         # Each job is contained (see _run), so this shouldn't happen; if the thread
         # died anyway, start a new one rather than queue work nobody will do.
         if self._thread is not None and not self._thread.is_alive() and not self._stopping:
@@ -104,7 +112,7 @@ class ScanManager:
     def status(self, library_id: int) -> dict | None:
         with self._lock:
             current = self._status.get(library_id)
-            return dict(current) if current else None
+            return _public(current) if current else None
 
     def is_busy(self, library_id: int) -> bool:
         status = self.status(library_id)
@@ -184,6 +192,14 @@ class ScanManager:
         with self._lock:
             if library_id not in self._status:
                 return  # library was deleted while queued
+            asked_for = self._asked_for.pop(library_id, None)
+        if asked_for is not None and not self._still(library_id, asked_for):
+            # Asked for a library that's gone; its id now names another (or none).
+            log.info("skipped a scan of a removed library (id %s is now another)", library_id)
+            with self._lock:
+                if self._status.get(library_id, {}).get("state") == "queued":
+                    self._status.pop(library_id)
+            return
         self._update(library_id, state="scanning")
         conn = None
         try:
@@ -221,6 +237,19 @@ class ScanManager:
             if conn is not None:
                 conn.close()
 
+    def _still(self, library_id: int, library_uid: str) -> bool:
+        """Is library_id still the library `library_uid`? If the database can't say,
+        yes: the scan then runs into the same problem and reports it."""
+        try:
+            conn = connect(self._db_path)
+            try:
+                row = conn.execute("SELECT uid FROM libraries WHERE id = ?", (library_id,)).fetchone()
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            return True
+        return row is not None and row["uid"] == library_uid
+
     def _record_error(self, conn, library_id: int, message: str) -> None:
         """Keep the error on the library for later (best effort: the database may be
         what failed; the in-memory status already says it)."""
@@ -239,3 +268,8 @@ class ScanManager:
                     conn.close()
         except Exception:
             log.exception("couldn't record the scan error for library %s", library_id)
+
+
+def _public(status: dict) -> dict:
+    """A status as the API shows it (without what's kept for the manager's own use)."""
+    return {k: v for k, v in status.items() if k != "before"}

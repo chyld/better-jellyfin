@@ -159,3 +159,37 @@ def test_a_picture_replaced_while_a_request_sends_it_is_still_there(client, lib,
     conn.close()
     client.delete(f"/api/tags/{tag['id']}/image")
     assert path.read_bytes()
+
+
+@pytest.mark.parametrize("change", ["replace", "remove"])
+def test_an_old_picture_replaced_during_a_cleanup_is_still_there(client, lib, picture, settings, monkeypatch, change):
+    """The picture being replaced is hours old, and a clean-up runs right when the
+    database stops pointing at it: it was retired first, so the clean-up keeps it
+    (a request that picked it can still send it)."""
+    import os
+    import time
+
+    from reel import pictures
+    from reel.db import connect
+
+    video = video_id(client, lib)
+    client.put(f"/api/items/{video}/image", content=picture)
+    found = client.app.state.thumbnails.item_picture(video)
+    old = time.time() - 7200
+    os.utime(found["file"], (old, old))                                  # long since uploaded
+
+    real_record = pictures.VideoPicture.record
+
+    def record_then_clean_up(self, conn, file_id, version):
+        real_record(self, conn, file_id, version)
+        conn.commit()                                                    # the old one is unreferenced now...
+        other = connect(settings.db_path)
+        pictures.prune(other, settings.images_dir)                       # ...and a clean-up runs
+        other.close()
+
+    monkeypatch.setattr(pictures.VideoPicture, "record", record_then_clean_up)
+    if change == "replace":
+        client.put(f"/api/items/{video}/image", content=picture)
+    else:
+        client.delete(f"/api/items/{video}/image")
+    assert found["file"].read_bytes()

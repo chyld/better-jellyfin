@@ -169,7 +169,7 @@ documents each one.
 | `REEL_PROBE_WORKERS` | `4` | How many ffprobe processes run at once during a scan. |
 | `REEL_MAX_STREAMS` | `3` | How many videos may be converted or repackaged at once. More viewers get a "try again in a moment" message. |
 | `REEL_HLS_CACHE_MB` | `2048` | Size target for the HLS segment cache (`<data>/hls`). Over it, segments no viewer is near are deleted first. A soft target: see [HLS details](#playback). |
-| `REEL_MIN_FREE_MB` | `2048` | Free space kept on the data folder's disk. Below it, no new conversion starts ("the server's disk is nearly full", HTTP 507) and no picture is saved, so the database and your pictures never compete with the HLS cache for the last of the disk. Videos already converting, and ones that need no conversion, carry on. `/api/health` shows the free space. |
+| `REEL_MIN_FREE_MB` | `2048` | Free space Reel tries to keep on the data folder's disk, for the database and your pictures. Below it: no conversion starts, and a running one stops after its next segment ("the server's disk is nearly full", HTTP 507); the HLS cache gives back every segment no viewer is about to play, even under `REEL_HLS_CACHE_MB` (checked every 15 seconds); no picture or thumbnail is saved (cards show their placeholder). Videos that need no conversion play as usual. It's a line Reel stops writing at, not a hard guarantee: a segment or picture already being written is finished. `/api/health` shows the free space. |
 | `REEL_MISSING_GRACE_DAYS` | `7` | How long a video a scan can no longer find stays in the catalog (hidden, with its tags and pictures) before it's removed. |
 | `REEL_IMAGE_URLS` | `internet` | Where pictures may be downloaded from when you paste a URL: `internet` (public addresses only), `lan` (also your local network) or `off`. |
 | `FORWARDED_ALLOW_IPS` | `127.0.0.1` | *(uvicorn)* Behind a reverse proxy, set this to the proxy's address so its forwarded headers are trusted. Nothing else's are. |
@@ -451,7 +451,9 @@ length is known and any point can be sought. ffmpeg encodes ahead of the viewer 
   Reel logs a warning when that happens instead of interrupting playback. The check runs every
   15 seconds: what to keep is decided from the sessions in memory, and the disk work (measuring,
   deleting) happens in a worker thread, so a slow disk doesn't hold up playback. The size shown
-  in `/api/health` is from that last check.
+  in `/api/health` is from that last check. A segment is read before it's sent, so one deleted
+  just as it was asked for is made again rather than lost. Below `REEL_MIN_FREE_MB` the target
+  is zero: everything no viewer is about to play goes.
 
 Encoders use the same `REEL_MAX_STREAMS` slots. Safari plays HLS natively; other browsers use the
 bundled [hls.js](https://github.com/video-dev/hls.js) (light build, Apache-2.0). (Segments are
@@ -558,10 +560,12 @@ Rules:
     another ("DNS rebinding").
 - **Each upload gets its own file** (`<uuid>-<version>.jpg`), which is never overwritten. An
   upload writes its new file (flushed to disk, so a power cut can't lose a picture the
-  database already points at), records it, then retires the previous one: it's left for the
-  clean-up after scans and at startup, which deletes unreferenced files once they've been
-  unused for an hour. So a picture that's just been uploaded is never removed before it's
-  recorded, and one that a page was loading when it was replaced is still there to send.
+  database already points at), retires the previous one, then records the new one. A
+  retired file is left for the clean-up after scans and at startup, which deletes
+  unreferenced files once they've been unused for an hour; it's retired while still in use, so
+  a clean-up running at that moment can't take it. So a picture that's just been uploaded is
+  never removed before it's recorded, and one that a page was loading when it was replaced is
+  still there to send.
 - Uploads are stored in the data folder, never on the NAS (see below).
 
 ### IDs and URLs
@@ -766,7 +770,7 @@ version); bump `THUMBS` when the server changes how thumbnails are made.
 ### Tests
 
 ```sh
-uv run pytest              # backend: 638 tests
+uv run pytest              # backend: 646 tests
 node --test tests/js/      # frontend: 48 tests
 uv run pytest -m browser   # browser: 28 tests (about 3 minutes; needs Chromium and ffmpeg)
 scripts/docker-smoke.sh    # builds the image and checks it end to end (needs Docker)

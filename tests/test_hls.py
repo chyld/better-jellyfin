@@ -824,3 +824,80 @@ def test_no_encoder_starts_when_the_disk_is_nearly_full(tmp_path, long_clip):
         await m.shutdown()
 
     run(scenario())
+
+
+@requires_ffmpeg
+def test_a_segment_the_cache_clean_up_deletes_just_after_its_found_is_made_again(tmp_path, long_clip):
+    """The clean-up works from where viewers were a moment ago, in a worker thread:
+    a segment found for a request can be deleted before it's sent. It's read before
+    answering, and if it's gone by then it's made again, not lost."""
+    m = manager(tmp_path)
+
+    async def scenario():
+        s = m.get(await m.open("a", source(long_clip)))
+        first = await m.segment_bytes(s, V, 0)
+        await forget_from(m, s, 1)
+        real = m.media_segment
+        evicted = []
+
+        async def found_then_evicted(session, viewer_id, n):
+            path = await real(session, viewer_id, n)
+            if not evicted:
+                path.unlink()                    # the clean-up, just after it was found
+                evicted.append(n)
+            return path
+
+        m.media_segment = found_then_evicted
+        again = await m.segment_bytes(s, V, 0)
+        assert evicted == [0] and len(again) > 1000 and again[:1] == first[:1] == b"G"   # a TS packet
+        await m.shutdown()
+
+    run(scenario())
+
+
+@requires_ffmpeg
+def test_a_running_encoder_stops_when_the_disk_gets_nearly_full(tmp_path, long_clip):
+    """It stops after its next segment; asking for what it didn't make says why (507)."""
+    low = [False]
+    m = manager(tmp_path)
+    m.low_on_disk = lambda: low[0]
+
+    async def scenario():
+        s = m.get(await m.open("a", source(long_clip)))
+        await m.segment_bytes(s, V, 0)
+        low[0] = True
+        viewer = s.viewers[V]
+        await asyncio.wait({viewer.encoder.watcher})             # it notices and stops
+        assert viewer.last_failure == hls.DISK_FULL
+        made = sorted(int(p.stem) for p in s.folder.glob("*.ts"))
+        with pytest.raises(hls.HlsDiskFull):
+            await m.media_segment(s, V, made[-1] + 1)
+        assert m.streams.active == set()
+        await m.shutdown()
+
+    run(scenario())
+
+
+@requires_ffmpeg
+def test_below_the_reserve_the_cache_gives_back_what_no_one_is_near(tmp_path, long_clip):
+    """Even under its size target: below the free-space reserve, cached segments no
+    viewer is about to play are deleted; the ones near the viewer stay."""
+    low = [False]
+    m = manager(tmp_path)
+    m.low_on_disk = lambda: low[0]
+
+    async def scenario():
+        s = m.get(await m.open("a", source(long_clip)))
+        last = s.count - 1
+        for n in range(s.count):
+            await m.segment_bytes(s, V, n)                       # all of it cached
+        await forget_from(m, s, s.count)                         # (stop the encoder; keep what's made)
+        s.viewers[V].position = last                             # the viewer is near the end
+        assert await m.enforce_cache_limit() == 0                # above the reserve, under target: nothing
+        low[0] = True
+        assert await m.enforce_cache_limit() > 0
+        kept = sorted(int(p.stem) for p in s.folder.glob("*.ts"))
+        assert kept == list(range(last - 1, s.count))            # just what's near the viewer
+        await m.shutdown()
+
+    run(scenario())
