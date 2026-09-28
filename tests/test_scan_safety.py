@@ -327,3 +327,22 @@ def test_a_new_video_whose_poster_cant_be_read_still_gets_it(conn, media_root, f
     scan_library(conn, lib, probe_fn=fake_probe)
     row = conn.execute("SELECT poster_path, poster_rev FROM media_items").fetchone()
     assert (row["poster_path"], row["poster_rev"]) == ("Tapes/b.png", None)   # version filled in next time
+
+
+def test_an_unreadable_folder_the_walk_doesnt_name_stops_the_scan(conn, lib, media_root, fake_probe, monkeypatch):
+    """An error that doesn't say which folder: nothing can be known to be gone, so
+    the scan stops with nothing changed (instead of crashing on the missing name)."""
+    from reel import scanner
+
+    before = rows(conn, lib)
+    (media_root / "Tapes/a.mpg").unlink()
+    real_walk = os.walk
+
+    def walk(top, onerror=None, **kwargs):
+        onerror(OSError(5, "Input/output error"))          # no filename
+        yield from real_walk(top, onerror=onerror, **kwargs)
+
+    monkeypatch.setattr(scanner.os, "walk", walk)
+    with pytest.raises(ScanError, match="Couldn't read part of the library"):
+        scan_library(conn, lib, probe_fn=fake_probe)
+    assert rows(conn, lib) == before

@@ -11,7 +11,7 @@ Clips belong to the video's catalog row, so they follow a moved or renamed file
 import sqlite3
 
 from .catalog import NotFound, video_rev
-from .db import new_uid
+from .db import new_uid, write_transaction
 
 MIN_LENGTH = 0.5    # seconds
 
@@ -53,14 +53,14 @@ def add_clip(conn: sqlite3.Connection, item_uid: str, a: float, b: float) -> lis
         end = min(end, round(video["duration"], 1))
     if end - start < MIN_LENGTH:
         raise ClipError(f"The marks must be at least {MIN_LENGTH:g} seconds apart.")
-    # The next number is worked out in the insert itself, so two clips made at
-    # once can't both get it (and the index refuses a duplicate anyway).
-    conn.execute(
-        'INSERT INTO clips (uid, item_id, number, start, "end") '
-        "SELECT ?, ?, COALESCE(MAX(number), 0) + 1, ?, ? FROM clips WHERE item_id = ?",
-        (new_uid(), video["id"], start, end, video["id"]),
-    )
-    conn.commit()
+    # The next number and the insert as one step under SQLite's write lock, so two
+    # clips made at once can't both get it (and the index refuses a duplicate anyway).
+    with write_transaction(conn):
+        conn.execute(
+            'INSERT INTO clips (uid, item_id, number, start, "end") '
+            "SELECT ?, ?, COALESCE(MAX(number), 0) + 1, ?, ? FROM clips WHERE item_id = ?",
+            (new_uid(), video["id"], start, end, video["id"]),
+        )
     return list_clips(conn, item_uid)
 
 

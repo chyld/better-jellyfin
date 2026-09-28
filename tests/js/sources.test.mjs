@@ -79,3 +79,29 @@ test("hls: a changed video (410) reloads the playlist, but not in a loop", () =>
   assert.equal(shouldReload(404, 0, 60_000), false);
   assert.equal(shouldReload(undefined, 0, 60_000), false);
 });
+
+// ---- Giving up on a video that keeps failing ----
+
+const { MAX_RECOVERIES, nextRecovery, streamErrorText } = await import("../../reel/static/sources.js");
+
+test("a decode error is recovered from a few times, then it gives up", () => {
+  let count = 0;
+  let last = 0;
+  const now = 1_000_000;
+  for (let i = 0; i < MAX_RECOVERIES; i++) {
+    count = nextRecovery(count, last, now + i);
+    last = now + i;
+    assert.equal(count, i + 1);
+  }
+  assert.equal(nextRecovery(count, last, now + 10), null);
+});
+
+test("the count starts over after a while without errors", () => {
+  assert.equal(nextRecovery(MAX_RECOVERIES, 1_000_000, 1_000_000 + 31_000), 1);
+});
+
+test("stream errors say what happened", () => {
+  assert.match(streamErrorText(503), /busy/);
+  assert.match(streamErrorText(507), /disk is nearly full/);
+  assert.equal(streamErrorText(500), "The video stopped loading.");
+});

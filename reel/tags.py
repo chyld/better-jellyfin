@@ -8,7 +8,7 @@ from .browse import item_out
 from .plan import Capabilities
 from .catalog import NotFound, page_bounds
 from .db import NOW_MS, new_uid, write_transaction
-from .pictures import picture_path
+from .pictures import picture_path, retire
 
 MAX_TAG_LENGTH = 50
 # Tags are lowercase letters, digits and dashes only: "family", "1990s", "road-trip".
@@ -148,7 +148,7 @@ def rename_tag(conn: sqlite3.Connection, tag_uid: str, name: str, images_dir: Pa
             conn.execute("DELETE FROM tags WHERE id = ?", (tag["id"],))
             result_id, merged = other["id"], True
     if old_file is not None:
-        old_file.unlink(missing_ok=True)  # saved: the renamed tag's own file is no longer used
+        retire(old_file)  # saved: the renamed tag's own file is no longer used
     return {**_tag_with_count(conn, result_id), "merged": merged}
 
 
@@ -158,7 +158,7 @@ def delete_tag(conn: sqlite3.Connection, tag_uid: str, images_dir: Path) -> None
     conn.execute("DELETE FROM tags WHERE id = ?", (tag["id"],))
     conn.commit()
     if tag["image_version"]:
-        image_path(images_dir, tag["uid"], tag["image_version"]).unlink(missing_ok=True)
+        retire(image_path(images_dir, tag["uid"], tag["image_version"]))
 
 
 # ---- Tag images ---------------------------------------------------------------------

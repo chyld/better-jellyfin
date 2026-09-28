@@ -9,7 +9,7 @@ from reel.db import connect
 from reel.libraries import LibraryError, create_library
 from reel.scanner import scan_library
 
-from conftest import make_files
+from conftest import make_files, settle_pictures
 
 
 def all_at_once(n, work):
@@ -88,6 +88,7 @@ def test_a_merge_that_fails_to_save_leaves_the_tag_and_its_picture(conn, setting
     merged = tags.rename_tag(conn, vacation, "holiday", images)                  # and it works later
     assert merged["merged"] and merged["image"]
     assert tags.image_path(images, merged["id"], merged["image"]).read_bytes() == b"jpeg"
+    settle_pictures(settings)
     assert not picture.exists()
 
 

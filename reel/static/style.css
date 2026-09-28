@@ -2,7 +2,7 @@
 
 @font-face {
   font-family: "Inter";
-  src: url("fonts/inter-latin-wght-normal.woff2") format("woff2");
+  src: url("fonts/inter-latin-wght-normal.woff2?v=1") format("woff2");   /* ?v: kept for good; bump when replaced */
   font-weight: 100 900;
   font-display: swap;
 }

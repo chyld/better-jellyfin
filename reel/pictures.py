@@ -10,15 +10,18 @@ per picture, never overwritten:
     images/folders/<folder picture uuid>-<version>.jpg   (one folder_images row per folder)
 
 Setting one always goes: write the new file, record its version (in one
-commit), then delete the previous file. Removing: forget it, then delete the
-file. prune() only deletes unreferenced files older than ORPHAN_GRACE_SECONDS,
-so a file that's written but not yet recorded is never removed from under an
-upload, and a failure in between leaves at worst an unused file for prune().
+commit), then retire the previous file. Removing: forget it, then retire the
+file. A retired file isn't deleted at once: its time is set to now and prune()
+deletes it later, since prune() only deletes unreferenced files older than
+ORPHAN_GRACE_SECONDS. So a request that picked the old file a moment before can
+still send it, a file that's written but not yet recorded is never removed from
+under an upload, and a failure in between leaves at worst an unused file for prune().
 
 The owners differ only in where the version lives: a column of the tag's or
 video's own row, or a folder_images row (a folder isn't a row of its own, so
 that row has its own uuid, which names the file).
 """
+import os
 import sqlite3
 import time
 from collections.abc import Callable
@@ -32,6 +35,16 @@ from .images import ORPHAN_GRACE_SECONDS, save_upload, upload_name
 
 def picture_path(images_dir: Path, kind: str, file_id: str, version: str) -> Path:
     return images_dir / kind / upload_name(file_id, version)
+
+
+def retire(path: Path) -> None:
+    """A picture file nothing points at any more: left for prune() to delete once
+    it's been unused for the grace period (its time is set to now), so a request
+    already sending it isn't cut off."""
+    try:
+        os.utime(path)
+    except FileNotFoundError:
+        pass
 
 
 def _new_version() -> str:
@@ -143,8 +156,8 @@ def set_picture(conn: sqlite3.Connection, images_dir: Path, owner: Owner, write:
     write(picture_path(images_dir, owner.kind, file_id, version))   # 1. the new file
     owner.record(conn, file_id, version)
     conn.commit()                                                    # 2. point at it
-    if old:                                                          # 3. drop the old one
-        picture_path(images_dir, owner.kind, file_id, old).unlink(missing_ok=True)
+    if old:                                                          # 3. retire the old one
+        retire(picture_path(images_dir, owner.kind, file_id, old))
     return version
 
 
@@ -154,22 +167,23 @@ def set_uploaded(conn: sqlite3.Connection, images_dir: Path, owner: Owner, data:
 
 
 def remove_picture(conn: sqlite3.Connection, images_dir: Path, owner: Owner) -> None:
-    """Forget the owner's picture, then delete its file (a NAS picture, if any, shows again)."""
+    """Forget the owner's picture, then retire its file (a NAS picture, if any, shows again)."""
     file_id, old = owner.current(conn)
     if old is None:
         return
     owner.record(conn, file_id, None)
     conn.commit()
-    picture_path(images_dir, owner.kind, file_id, old).unlink(missing_ok=True)
+    retire(picture_path(images_dir, owner.kind, file_id, old))
 
 
-def picture_file(conn: sqlite3.Connection, images_dir: Path, owner: Owner) -> Path | None:
-    """The owner's picture file, if it has one that exists."""
+def picture_file(conn: sqlite3.Connection, images_dir: Path, owner: Owner) -> tuple[Path, str] | None:
+    """The owner's picture file and its version, from one read (so they always
+    match), if it has one that exists."""
     file_id, version = owner.current(conn)
     if version is None:
         return None
     path = picture_path(images_dir, owner.kind, file_id, version)
-    return path if path.is_file() else None
+    return (path, version) if path.is_file() else None
 
 
 # ---- Housekeeping ---------------------------------------------------------------------------

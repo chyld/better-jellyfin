@@ -30,25 +30,29 @@ def test_waiting_thumbnails_dont_hold_up_other_requests(slow, settings, media_ro
     jpeg = tmp_path / "t.jpg"
     jpeg.write_bytes(b"\xff\xd8\xff" + b"0" * 100)
 
-    gate = threading.Event()   # thumbnails take as long as the test says (a slow NAS, big PNGs)
+    gate = threading.Event()     # thumbnails take as long as the test says (a slow NAS, big PNGs)
+    entered = threading.Event()  # and the slow step was really reached
 
     def slow_thumbnail(self, src, shape="poster", **kwargs):
         if slow == "making":
+            entered.set()
             gate.wait(30)
         return jpeg
 
     monkeypatch.setattr(Thumbnailer, "cached", lambda self, *args, **kwargs: None)
     monkeypatch.setattr(Thumbnailer, "make", slow_thumbnail)
     if slow == "nas lookups":
-        from reel import main
+        from reel import thumbnails
         from reel.paths import resolve_inside
 
         def slow_resolve(root, rel, **kwargs):
             if str(rel).endswith(".png"):
+                entered.set()
                 gate.wait(30)                              # a hung NAS answering slowly
             return resolve_inside(root, rel, **kwargs)
 
-        monkeypatch.setattr(main, "resolve_inside", slow_resolve)
+        # Where the thumbnail code looks it up (it has its own import).
+        monkeypatch.setattr(thumbnails, "resolve_inside", slow_resolve)
     init_db(settings.db_path)
     app = create_app(settings, ScanManager(settings.db_path, scan_fn=partial(scan_library, probe_fn=fake_probe)))
     app.state.scans.after_batch = None      # no thumbnails made after the scan: all 60 are requested cold
@@ -80,6 +84,7 @@ def test_waiting_thumbnails_dont_hold_up_other_requests(slow, settings, media_ro
 
         with concurrent.futures.ThreadPoolExecutor(61) as pool:
             thumbs = [pool.submit(call, "GET", f"/api/items/{i['id']}/thumb") for i in items]
+            assert entered.wait(10), f"the slow step ({slow}) was never reached"
             time.sleep(0.5)                              # they're all waiting now
             listing = pool.submit(call, "GET", f"/api/libraries/{lib}/browse")
             try:
@@ -177,3 +182,48 @@ def test_warming_makes_a_few_at_once_and_stops_when_asked(settings, media_root, 
     made[0] = 0
     assert warm.warm(ids, lambda: made[0] >= 4) is False
     assert made[0] < 12
+
+
+def test_requests_and_warming_share_one_limit():
+    """Slots is the one limit: thread holders (warming) and async ones (requests)
+    together never pass it, and it drops to one while someone is watching."""
+    import asyncio
+
+    from reel.thumbnails import Slots
+
+    watching = [False]
+    slots = Slots(4, lambda: watching[0])
+    lock = threading.Lock()
+    running, peak = [0], [0]
+
+    def work():
+        with lock:
+            running[0] += 1
+            peak[0] = max(peak[0], running[0])
+        time.sleep(0.05)
+        with lock:
+            running[0] -= 1
+
+    def warm():
+        for _ in range(5):
+            with slots.held():
+                work()
+
+    async def requests():
+        async def one():
+            await slots.acquire_async()
+            try:
+                await asyncio.to_thread(work)
+            finally:
+                slots.release()
+        await asyncio.gather(*(one() for _ in range(12)))
+
+    for watch, most in ((False, 4), (True, 1)):
+        watching[0], peak[0] = watch, 0
+        threads = [threading.Thread(target=warm) for _ in range(3)]
+        for t in threads:
+            t.start()
+        asyncio.run(requests())
+        for t in threads:
+            t.join()
+        assert peak[0] == most and slots.running == 0

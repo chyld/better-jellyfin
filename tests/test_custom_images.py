@@ -5,7 +5,7 @@ import pytest
 
 from reel import fetch
 
-from conftest import make_files, requires_ffmpeg
+from conftest import make_files, requires_ffmpeg, settle_pictures
 
 pytestmark = requires_ffmpeg
 
@@ -87,6 +87,7 @@ def test_replace_and_remove_a_video_image(client, lib, tmp_path, settings):
     assert first != second
     assert client.delete(f"/api/items/{video}/image").json() == {"custom_image": None}
     assert client.get(f"/api/items/{video}/thumb").status_code == 404
+    settle_pictures(settings)
     assert images_on_disk(settings, "videos") == []
 
 
@@ -162,11 +163,13 @@ def test_replace_and_remove_a_folder_image(client, lib, tmp_path, settings):
     first = upload_folder(client, lib, "Tapes", png(tmp_path / "1.png", "red")).json()["custom_art"]
     second = upload_folder(client, lib, "Tapes", png(tmp_path / "2.png", "blue")).json()["custom_art"]
     assert first != second
+    settle_pictures(settings)
     assert len(images_on_disk(settings, "folders")) == 1  # replaced, not added
     res = client.delete(f"/api/libraries/{lib}/folder-image", params={"path": "Tapes"})
     assert res.json() == {"custom_art": None}
     assert folders(client, lib)["Tapes"]["custom_art"] is None
     assert client.get(f"/api/libraries/{lib}/folder-art", params={"path": "Tapes"}).status_code == 404
+    settle_pictures(settings)
     assert images_on_disk(settings, "folders") == []
 
 
@@ -245,3 +248,33 @@ def test_old_tag_image_folder_is_moved(settings, picture):
     assert not old.exists()
     # The tag doesn't exist in this database, so the moved file is then pruned.
     assert images_on_disk(settings, "tags") == []
+
+
+def test_pictures_arent_saved_when_the_disk_is_nearly_full(settings, media_root, fake_probe, picture, monkeypatch):
+    """Below the free-space reserve, uploads, URL images and snapshots are refused
+    with a 507 saying why; health reports the disk either way."""
+    import dataclasses
+    from functools import partial
+
+    from fastapi.testclient import TestClient
+
+    from reel.db import init_db
+    from reel.main import create_app
+    from reel.scan_manager import ScanManager
+    from reel.scanner import scan_library
+
+    make_files(media_root, "Tapes/a.mpg")
+    tight = dataclasses.replace(settings, min_free_mb=10**9)             # more than any disk has
+    init_db(tight.db_path)
+    manager = ScanManager(tight.db_path, scan_fn=partial(scan_library, probe_fn=fake_probe))
+    with TestClient(create_app(tight, manager)) as c:
+        lib = c.post("/api/libraries", json={"name": "Tapes", "path": str(media_root / "Tapes")}).json()["id"]
+        c.post(f"/api/libraries/{lib}/scan")
+        manager.wait_idle()
+        video = c.get(f"/api/libraries/{lib}/browse").json()["items"][0]["id"]
+        for res in (c.put(f"/api/items/{video}/image", content=picture),
+                    c.post(f"/api/items/{video}/image-url", json={"url": "https://example.com/a.png"}),
+                    c.post(f"/api/items/{video}/snapshot", json={"time": 1})):
+            assert res.status_code == 507 and "disk is nearly full" in res.json()["detail"]
+        disk = c.get("/api/health").json()["disk"]
+        assert disk["low"] is True and disk["reserve_mb"] == 10**9 and disk["free_mb"] > 0

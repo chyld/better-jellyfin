@@ -58,6 +58,7 @@ import secrets
 import shutil
 import time
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
@@ -95,6 +96,10 @@ class HlsError(Exception):
 
 class HlsGone(HlsError):
     """The session's file has changed: the player must load a new playlist."""
+
+
+class HlsDiskFull(HlsError):
+    """The data folder's disk is below its free-space reserve: no new encoder."""
 
 
 def segment_count(duration: float) -> int:
@@ -229,10 +234,12 @@ class Session:
 
 
 class HlsManager:
-    def __init__(self, cache_dir: Path, streams: StreamManager, cache_limit: int = CACHE_LIMIT):
+    def __init__(self, cache_dir: Path, streams: StreamManager, cache_limit: int = CACHE_LIMIT,
+                 low_on_disk: Callable[[], bool] = lambda: False):
         self.cache_dir = cache_dir
         self.streams = streams
         self.cache_limit = cache_limit
+        self.low_on_disk = low_on_disk   # below the free-space reserve: start no encoder
         self.sessions: dict[str, Session] = {}
         self._runs = itertools.count(1)
         self._instances = itertools.count(1)
@@ -413,6 +420,8 @@ class HlsManager:
             # raised and let go. Marked retired now, so no one starts on it meanwhile.
             asyncio.create_task(self.retire(session))
             raise HlsGone("The video has changed or is missing. Reload the player.")
+        if await anyio.to_thread.run_sync(self.low_on_disk):
+            raise HlsDiskFull("The server's disk is nearly full, so it can't convert videos right now.")
         await self.streams.acquire_slot()
         staging = session.folder / f"enc-{viewer.id}-{next(self._runs)}"
         try:

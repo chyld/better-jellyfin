@@ -12,7 +12,7 @@ from reel.probe import probe
 from reel.scan_manager import ScanManager
 from reel.scanner import scan_library
 
-from conftest import requires_ffmpeg
+from conftest import requires_ffmpeg, settle_pictures
 
 pytestmark = requires_ffmpeg
 
@@ -101,6 +101,7 @@ def test_snapshot_becomes_the_preview_and_replaces_an_earlier_one(client, videos
     second = snapshot(client, video, 7.0).json()["custom_image"]
     assert second != first.json()["custom_image"]
     assert colour(thumb(client, video), tmp_path) == "blue"
+    settle_pictures(settings)
     stored = list((settings.images_dir / "videos").glob("*.jpg"))
     assert [p.name for p in stored] == [f"{video['id']}-{second}.jpg"]    # the old one is gone
 
@@ -187,3 +188,17 @@ def test_a_clips_picture_is_its_videos_frame_at_its_start(client, videos, settin
     for clip_id in pictures:
         found = thumbs.clip_picture(clip_id)
         assert thumbs.thumbnailer.cached(str(found["root"] / found["rel"]), found["rev"], found["shape"])
+
+
+def test_a_saved_picture_is_flushed_to_disk_before_it_counts(tmp_path, monkeypatch):
+    """The file's data, then the folder's entry for it: a power cut after the
+    database records it can't lose it."""
+    from reel import images
+
+    synced = []
+    real = images.os.fsync
+    monkeypatch.setattr(images.os, "fsync", lambda fd: synced.append(fd) or real(fd))
+    clip = make_clip(tmp_path / "c.mp4", "-c:v", "libx264", "-pix_fmt", "yuv420p")
+    out = tmp_path / "pics" / "shot.jpg"
+    save_frame(clip, 2.0, out)
+    assert out.exists() and len(synced) == 2

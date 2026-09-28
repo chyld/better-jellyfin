@@ -163,6 +163,8 @@ body.playing main { padding: 0; max-width: none; }
   background: var(--glass); box-shadow: 0 0 0 1px var(--glass-edge);
 }
 .player-message[hidden] { display: none; }
+.player-message { display: grid; gap: 12px; justify-items: center; }
+.player-message .retry { pointer-events: auto; }
 
 .player-toast {
   position: absolute; top: 76px; left: 50%; transform: translateX(-50%); max-width: calc(100% - 32px);

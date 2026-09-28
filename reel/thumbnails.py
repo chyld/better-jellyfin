@@ -6,16 +6,20 @@ size and modification time), and thumbnails are cached under it, so:
 
 - serving a thumbnail already made touches only the catalog and the cache,
   never the NAS; the version is in the URL, so the browser may keep it for good;
-- making one waits for a slot (at most SLOTS at once, one while someone is
-  watching) before it takes a request thread, then re-checks the picture is
-  still inside its library and runs ffmpeg;
+- making one waits for a slot (Slots: at most SLOTS at once, one while someone
+  is watching; the one limit for requests and after-scan warming alike) before
+  it takes a request thread, then re-checks the picture is still inside its
+  library and runs ffmpeg;
 - after scans, missing thumbnails are made in the background (WARM_SLOTS at a
   time, none while someone is watching) and old versions are deleted (see warm()
   and prune(), called by the scan manager).
 """
 import asyncio
+import logging
 import sqlite3
-from collections.abc import Callable
+import threading
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -28,8 +32,54 @@ from .db import connect
 from .images import Thumbnailer, ThumbnailError, frame_shape
 from .paths import OutsideRoot, resolve_inside
 
-SLOTS = 4  # NAS pictures thumbnailed at once (one while someone is watching)
-WARM_SLOTS = 2  # made at once after a scan (leaving room for folders being opened)
+SLOTS = 4  # thumbnails made at once (one while someone is watching)
+WARM_SLOTS = 2  # of those, at most this many for after-scan warming (leaving room for folders being opened)
+
+log = logging.getLogger(__name__)
+
+
+class Slots:
+    """How many thumbnails ffmpeg makes at once: `total`, or one while someone is
+    watching. The one limit for requests (which wait here without holding a
+    worker thread) and for after-scan warming (which waits in its own threads)."""
+
+    def __init__(self, total: int, watching: Callable[[], bool]):
+        self.total = total
+        self.watching = watching
+        self.running = 0
+        self._cond = threading.Condition()
+
+    def _limit(self) -> int:
+        return 1 if self.watching() else self.total
+
+    def try_acquire(self) -> bool:
+        with self._cond:
+            if self.running >= self._limit():
+                return False
+            self.running += 1
+            return True
+
+    def release(self) -> None:
+        with self._cond:
+            self.running -= 1
+            self._cond.notify_all()
+
+    @contextmanager
+    def held(self) -> Iterator[None]:
+        """In a worker thread: wait for a slot, hold it."""
+        with self._cond:
+            while self.running >= self._limit():
+                self._cond.wait(0.1)        # also notices watching() changing
+            self.running += 1
+        try:
+            yield
+        finally:
+            self.release()
+
+    async def acquire_async(self) -> None:
+        """On the event loop: wait for a slot without taking a thread."""
+        while not self.try_acquire():
+            await asyncio.sleep(0.05)
 THUMB_HEADERS = {"Cache-Control": "private, max-age=3600"}
 IMMUTABLE_HEADERS = {"Cache-Control": "private, max-age=31536000, immutable"}
 
@@ -42,8 +92,7 @@ class Thumbnails:
         self.images_dir = images_dir
         self.thumbnailer = thumbnailer
         self.watching = watching
-        self._slots = asyncio.Semaphore(SLOTS)
-        self._one = asyncio.Semaphore(1)
+        self.slots = Slots(SLOTS, watching)
 
     # ---- Finding a card's picture (the catalog only, a short connection) ----------------
 
@@ -61,7 +110,7 @@ class Thumbnails:
             owner = pictures.VideoPicture(row["uid"])
             uploaded = pictures.picture_file(conn, self.images_dir, owner)
             if uploaded:
-                return {"file": uploaded, "version": owner.current(conn)[1]}
+                return {"file": uploaded[0], "version": uploaded[1]}
             if row["poster_path"]:
                 return {"root": _library_root(conn, row["library_id"]), "rel": row["poster_path"],
                         "rev": row["poster_rev"], "shape": "landscape"}
@@ -79,7 +128,7 @@ class Thumbnails:
             owner = pictures.FolderPicture(lib["id"], clean_dir(rel_dir))
             uploaded = pictures.picture_file(conn, self.images_dir, owner)
             if uploaded:
-                return {"file": uploaded, "version": owner.current(conn)[1]}
+                return {"file": uploaded[0], "version": uploaded[1]}
             row = conn.execute(
                 "SELECT art_path, art_rev FROM folder_art WHERE library_id = ? AND rel_dir = ?",
                 (lib["id"], owner.rel_dir),
@@ -116,15 +165,14 @@ class Thumbnails:
             current = found["rev"]
             path = self.thumbnailer.cached(_key(found), current, found["shape"]) if current else None
             if path is None:
+                await self.slots.acquire_async()
                 try:
-                    async with self._slots:
-                        if self.watching():
-                            async with self._one:
-                                path = await run_in_threadpool(self.make, found)
-                        else:
-                            path = await run_in_threadpool(self.make, found)
-                except ThumbnailError:
+                    path = await run_in_threadpool(self.make, found)
+                except ThumbnailError as exc:
+                    log.warning("no thumbnail for %s: %s", _key(found), exc)
                     raise NotFound("No image.")
+                finally:
+                    self.slots.release()
         # The URL names the version: while it's current, the browser may keep it for good.
         headers = IMMUTABLE_HEADERS if requested and requested == current else THUMB_HEADERS
         return FileResponse(path, media_type="image/jpeg", headers=headers)
@@ -202,10 +250,14 @@ class Thumbnails:
         def one(found: dict) -> bool:
             if should_stop():
                 return False
-            try:
-                self.make(found)
-            except ThumbnailError:
-                pass  # a broken picture (or Reel stopping): the browser shows the placeholder
+            with self.slots.held():
+                if should_stop():
+                    return False
+                try:
+                    self.make(found)
+                except ThumbnailError as exc:
+                    # A broken picture (or Reel stopping): the browser shows the placeholder.
+                    log.warning("no thumbnail for %s: %s", _key(found), exc)
             return True
 
         with ThreadPoolExecutor(WARM_SLOTS) as pool:

@@ -2,6 +2,7 @@ import asyncio
 import contextlib
 import functools
 import logging
+import math
 import shutil
 import sqlite3
 import subprocess
@@ -33,11 +34,20 @@ class AppFiles(StaticFiles):
 
     Without this, browsers guess a cache lifetime and can keep running an old
     script after an update. Re-checking is a cheap 304 when nothing changed.
+    The exception is what never changes: the vendored hls.js and the font. They're
+    linked with their version in the URL (?v=...), so a new one gets a new URL,
+    and browsers may keep them for good.
     """
 
-    def file_response(self, *args, **kwargs):
-        response = super().file_response(*args, **kwargs)
-        response.headers["Cache-Control"] = "no-cache"
+    KEPT = ("vendor", "fonts")
+
+    def file_response(self, full_path, *args, **kwargs):
+        response = super().file_response(full_path, *args, **kwargs)
+        try:
+            kept = Path(full_path).resolve().relative_to(STATIC_DIR.resolve()).parts[0] in self.KEPT
+        except ValueError:
+            kept = False
+        response.headers["Cache-Control"] = "public, max-age=31536000, immutable" if kept else "no-cache"
         return response
 
 
@@ -89,7 +99,8 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
     )
     thumbs = Thumbnailer(settings.thumbs_dir)
     thumbnails = Thumbnails(settings.db_path, settings.media_root, settings.images_dir, thumbs, watching)
-    hls_sessions = hls.HlsManager(settings.hls_dir, streams, cache_limit=settings.hls_cache_mb * 1024**2)
+    hls_sessions = hls.HlsManager(settings.hls_dir, streams, cache_limit=settings.hls_cache_mb * 1024**2,
+                                  low_on_disk=settings.low_on_disk)
     # Pictures whose video, folder or tag is gone are cleaned up after every scan
     # (and at startup). Once the scan queue runs dry, thumbnails of old picture
     # versions are deleted and missing ones made, giving way to new scans, to
@@ -345,10 +356,10 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
 
     @app.get("/api/tags/{tag_uid}/image")
     def get_tag_image(tag_uid: str, conn: sqlite3.Connection = Db):
-        path = pictures.picture_file(conn, settings.images_dir, pictures.TagPicture(tag_uid))
-        if path is None:
+        found = pictures.picture_file(conn, settings.images_dir, pictures.TagPicture(tag_uid))
+        if found is None:
             raise HTTPException(404, "This tag has no image.")
-        return FileResponse(path, media_type="image/jpeg", headers=THUMB_HEADERS)
+        return FileResponse(found[0], media_type="image/jpeg", headers=THUMB_HEADERS)
 
     @app.get("/api/items/{item_uid}/thumb")
     async def get_item_thumb(item_uid: str, v: str | None = None):
@@ -357,6 +368,11 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
 
     # ---- Your pictures for tags, videos and folders (they win over NAS pictures) ----
 
+    def room_for_pictures() -> None:
+        """Pictures aren't saved below the free-space reserve (see min_free_mb)."""
+        if settings.low_on_disk():
+            raise HTTPException(507, "The server's disk is nearly full, so pictures can't be saved right now.")
+
     def picture_routes(path: str, owner_of, answer) -> None:
         """Upload (PUT, the body is the image), from a URL (POST <path>-url) and
         remove (DELETE) a picture. `owner_of` finds whose it is from the request;
@@ -364,6 +380,7 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
 
         @app.put(path)
         async def upload_picture(request: Request, owner=Depends(owner_of), conn: sqlite3.Connection = Db):
+            await run_in_threadpool(room_for_pictures)
             data = await read_upload(request)
             version = await run_in_threadpool(pictures.set_uploaded, conn, settings.images_dir, owner, data)
             return answer(conn, owner, version)
@@ -371,6 +388,7 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
         @app.post(path + "-url")
         def picture_from_url(body: ImageUrl, owner=Depends(owner_of), conn: sqlite3.Connection = Db):
             owner.check(conn)  # 404 before downloading anything
+            room_for_pictures()
             version = pictures.set_uploaded(conn, settings.images_dir, owner, download(body.url))
             return answer(conn, owner, version)
 
@@ -392,6 +410,7 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
     @app.post("/api/items/{item_uid}/snapshot")
     def video_image_from_frame(item_uid: str, body: Snapshot, conn: sqlite3.Connection = Db):
         """Use the frame at `time` seconds as the video's picture, replacing any."""
+        room_for_pictures()
         row, path = media_file(conn, item_uid)
         # The very last moment may have no frame to decode: stay a little before it.
         at = min(body.time, max(0.0, row["duration"] - 0.5)) if row["duration"] else body.time
@@ -507,6 +526,8 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
             raise HTTPException(503, str(exc), headers={"Retry-After": "5"})
         except hls.HlsGone as exc:
             raise HTTPException(410, str(exc))
+        except hls.HlsDiskFull as exc:
+            raise HTTPException(507, str(exc))
         except hls.HlsError as exc:
             raise HTTPException(502, str(exc))
         return FileResponse(path, media_type="video/mp2t", headers={"Cache-Control": "no-cache"})
@@ -526,7 +547,8 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
             # The browser could play the file itself; stream it as a straight copy anyway.
             p = Plan("remux", video="copy", audio=None if row["audio_codec"] is None else "copy",
                      delivery="progressive")
-        if start < 0 or (row["duration"] and start >= row["duration"]):
+        # (nan and inf aren't times: nan passes every comparison below.)
+        if not math.isfinite(start) or start < 0 or (row["duration"] and start >= row["duration"]):
             raise HTTPException(416, "Start time is outside the video.")
         cmd = playback.stream_command(
             path,
@@ -567,20 +589,37 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
     def me(user: dict = Depends(current_user)):
         return {"id": user["uid"], "name": user["name"]}
 
+    def disk_status() -> dict:
+        """The data folder's free space, and whether it's below the reserve."""
+        free = settings.free_bytes()
+        return {"free_mb": None if free is None else round(free / 1024**2), "reserve_mb": settings.min_free_mb,
+                "low": settings.low_on_disk()}
+
     @app.get("/api/health")
-    def health(conn: sqlite3.Connection = Db):
+    def health():
         """For Docker's health check (503 when not ready): the database answers,
         ffmpeg and ffprobe were found at startup, and the scanner is running. Also
-        how busy the server is."""
-        conn.execute("SELECT 1").fetchone()
-        ready = bool(tools.get("ffmpeg") and tools.get("ffprobe")) and scans.alive()
+        how busy the server is. A broken database is a 503 like the rest, not an error."""
+        try:
+            conn = connect(settings.db_path)
+            try:
+                conn.execute("SELECT 1").fetchone()
+            finally:
+                conn.close()
+            database = True
+        except sqlite3.Error:
+            logging.getLogger("reel").exception("health check: the database didn't answer")
+            database = False
+        ready = database and bool(tools.get("ffmpeg") and tools.get("ffprobe")) and scans.alive()
         body = {
             "ok": ready,
+            "database": database,
             "ffmpeg": tools.get("ffmpeg"),
             "ffprobe": tools.get("ffprobe"),
             "scanner": {"alive": scans.alive(), "queued": scans.queued()},
             "streams": {"active": len(streams.active), "limit": settings.max_streams},
             "hls": hls_sessions.status(),
+            "disk": disk_status(),
         }
         return JSONResponse(body, status_code=200 if ready else 503)
 
@@ -606,9 +645,14 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
     @app.delete("/api/libraries/{library_uid}", status_code=204)
     def delete(library_uid: str, conn: sqlite3.Connection = Db):
         library_id = library_pk(conn, library_uid)
-        if scans.is_busy(library_id):
+        # Checked and claimed as one step: no scan can be queued in between.
+        if not scans.claim_for_removal(library_id):
             raise HTTPException(409, "Wait for the scan to finish before removing this library.")
-        libraries.delete_library(conn, library_id)
+        try:
+            libraries.delete_library(conn, library_id)
+        except BaseException:
+            scans.unclaim(library_id)
+            raise
         scans.forget(library_id)
         pictures.prune(conn, settings.images_dir)
         return Response(status_code=204)

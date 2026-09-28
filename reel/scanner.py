@@ -200,6 +200,10 @@ def walk_library(root: Path, cancel: threading.Event | None = None) -> Walk:
     art_unreadable: set[str] = set()
 
     def on_error(err: OSError) -> None:
+        if err.filename is None:
+            # Something below couldn't be read, but it isn't said what: nothing can be
+            # known to be gone, so stop here (a scan that stops changes nothing).
+            raise ScanError(f"Couldn't read part of the library: {err.strerror or err}")
         if Path(err.filename) == root:
             raise ScanError(f"Can't read library folder: {err.strerror}")
         # Keep going, but remember: nothing below this folder may be treated as gone.

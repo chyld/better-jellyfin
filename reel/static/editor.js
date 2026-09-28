@@ -79,8 +79,9 @@ export async function renderEditor(view, itemId) {
     if (video.paused) video.play().catch(() => {});
     else video.pause();
   }
+  let dragTime = null; // while dragging on the timeline: where it would go
   function showPosition() {
-    const at = position();
+    const at = dragTime ?? position();
     clock.textContent = `${formatTime(at)} / ${formatTime(total)}`;
     head.style.left = pct(at);
     timeline.setAttribute("aria-valuenow", Math.round(at));
@@ -142,20 +143,31 @@ export async function renderEditor(view, itemId) {
   clearBtn.addEventListener("click", clearMarks);
   makeBtn.addEventListener("click", makeClip);
 
-  // Click or drag on the timeline to move there.
+  // Click or drag on the timeline to move there. Dragging only moves the playhead;
+  // the video seeks once, on release (a converted stream starts a new ffmpeg for
+  // every seek, so seeking on every move could take all the server's stream slots).
   const timeAt = (clientX) => {
     const rect = timeline.getBoundingClientRect();
     return (Math.min(Math.max(clientX - rect.left, 0), rect.width) / rect.width) * total;
   };
-  let dragging = false;
   timeline.addEventListener("pointerdown", (e) => {
-    dragging = true;
     timeline.setPointerCapture(e.pointerId);
-    seek(timeAt(e.clientX));
+    dragTime = timeAt(e.clientX);
+    showPosition();
   });
-  timeline.addEventListener("pointermove", (e) => dragging && seek(timeAt(e.clientX)));
-  timeline.addEventListener("pointerup", () => (dragging = false));
-  timeline.addEventListener("pointercancel", () => (dragging = false));
+  timeline.addEventListener("pointermove", (e) => {
+    if (dragTime === null) return;
+    dragTime = timeAt(e.clientX);
+    showPosition();
+  });
+  const endDrag = () => {
+    if (dragTime === null) return;
+    const target = dragTime;
+    dragTime = null;
+    seek(target);
+  };
+  timeline.addEventListener("pointerup", endDrag);
+  timeline.addEventListener("pointercancel", endDrag);
 
   function onKey(e) {
     if (["INPUT", "TEXTAREA", "SELECT"].includes(e.target.tagName) || e.ctrlKey || e.metaKey || e.altKey) return;

@@ -7,7 +7,7 @@ import pytest
 from reel.db import connect, init_db
 from reel.images import MAX_UPLOAD_BYTES, image_kind
 
-from conftest import make_files, requires_ffmpeg
+from conftest import make_files, requires_ffmpeg, settle_pictures
 
 
 def make_image(tmp_path, name, size="1600x900", color="orange"):
@@ -118,6 +118,7 @@ def test_remove_an_image(client, tags, tmp_path, settings):
     res = client.delete(f"/api/tags/{tags['family']}/image")
     assert res.status_code == 200 and res.json()["image"] is None
     assert client.get(f"/api/tags/{tags['family']}/image").status_code == 404
+    settle_pictures(settings)
     assert list(settings.tag_images_dir.glob("*.jpg")) == []
 
 
@@ -125,6 +126,7 @@ def test_remove_an_image(client, tags, tmp_path, settings):
 def test_deleting_a_tag_deletes_its_image(client, tags, tmp_path, settings):
     upload(client, tags["family"], make_image(tmp_path, "a.png"))
     client.delete(f"/api/tags/{tags['family']}")
+    settle_pictures(settings)
     assert list(settings.tag_images_dir.glob("*.jpg")) == []
 
 
@@ -135,6 +137,7 @@ def test_merge_gives_the_survivor_an_image_if_it_had_none(client, tags, tmp_path
     merged = client.patch(f"/api/tags/{tags['vhs']}", json={"name": "family"}).json()
     assert merged["merged"] and merged["image"]
     assert client.get(f"/api/tags/{tags['family']}/image").content == picture
+    settle_pictures(settings)
     assert len(list(settings.tag_images_dir.glob("*.jpg"))) == 1
 
 
@@ -145,6 +148,7 @@ def test_merge_keeps_the_survivors_own_image(client, tags, tmp_path, settings):
     keep = client.get(f"/api/tags/{tags['family']}/image").content
     client.patch(f"/api/tags/{tags['vhs']}", json={"name": "family"})
     assert client.get(f"/api/tags/{tags['family']}/image").content == keep
+    settle_pictures(settings)
     assert len(list(settings.tag_images_dir.glob("*.jpg"))) == 1  # the merged tag's image is gone
 
 

@@ -801,3 +801,26 @@ def test_a_session_reopened_while_the_old_one_is_being_deleted_keeps_its_files(t
         return result
 
     assert run(scenario()) == (True, True, True, True, False)
+
+
+@requires_ffmpeg
+def test_no_encoder_starts_when_the_disk_is_nearly_full(tmp_path, long_clip):
+    """Below the free-space reserve a segment that needs converting is refused
+    (the route answers 507), without taking a stream slot; ones already made are
+    still served."""
+    low = [False]
+    m = manager(tmp_path)
+    m.low_on_disk = lambda: low[0]
+
+    async def scenario():
+        s = m.get(await m.open("a", source(long_clip)))
+        await m.media_segment(s, V, 0)
+        await forget_from(m, s, 1)                     # nothing from segment 1 on, no encoder
+        low[0] = True
+        assert (await m.media_segment(s, V, 0)).exists()   # made already: served
+        with pytest.raises(hls.HlsDiskFull):
+            await m.media_segment(s, V, 3)
+        assert m.streams.active == set() and m.streams._slots._value == m.streams.limits.max_streams
+        await m.shutdown()
+
+    run(scenario())

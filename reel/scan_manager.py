@@ -85,10 +85,11 @@ class ScanManager:
             self._thread = None
 
     def request(self, library_id: int) -> dict:
-        """Queue a scan. Asking again while one is queued or running does nothing."""
+        """Queue a scan. Asking again while one is queued or running does nothing,
+        and so does asking while the library is being removed."""
         with self._lock:
             current = self._status.get(library_id)
-            if current and current["state"] in ("queued", "scanning"):
+            if current and current["state"] in ("queued", "scanning", "removing"):
                 return dict(current)
             self._status[library_id] = {"state": "queued", "done": 0, "total": 0}
             self._queue.put(library_id)
@@ -108,6 +109,27 @@ class ScanManager:
     def is_busy(self, library_id: int) -> bool:
         status = self.status(library_id)
         return bool(status) and status["state"] in ("queued", "scanning")
+
+    def claim_for_removal(self, library_id: int) -> bool:
+        """Before a library is removed: False if a scan of it is queued or running.
+        Otherwise no scan can be queued for it until forget() (removed) or
+        unclaim() (the removal failed), so none starts on a library that's gone."""
+        with self._lock:
+            current = self._status.get(library_id)
+            if current and current["state"] in ("queued", "scanning", "removing"):
+                return False
+            self._status[library_id] = {"state": "removing", "before": current}
+            return True
+
+    def unclaim(self, library_id: int) -> None:
+        """The removal failed: the library keeps the scan status it had."""
+        with self._lock:
+            current = self._status.get(library_id)
+            if current and current["state"] == "removing":
+                if current["before"] is None:
+                    self._status.pop(library_id)
+                else:
+                    self._status[library_id] = current["before"]
 
     def forget(self, library_id: int) -> None:
         with self._lock:

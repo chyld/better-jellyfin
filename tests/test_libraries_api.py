@@ -166,6 +166,20 @@ def test_frontend_files_are_revalidated(client):
     assert client.get("/api.js", headers={"If-None-Match": etag}).status_code == 304
 
 
+def test_vendored_files_are_kept_and_linked_by_version(client):
+    """hls.js and the font never change under the same URL: they're linked with
+    their version, so browsers may keep them for good."""
+    from pathlib import Path
+
+    static = Path(__file__).resolve().parent.parent / "reel" / "static"
+    for path in ("/vendor/hls.light.min.mjs?v=1", "/fonts/inter-latin-wght-normal.woff2?v=1"):
+        res = client.get(path)
+        assert res.status_code == 200 and "immutable" in res.headers["cache-control"]
+    version = (static / "vendor" / "hls.VERSION").read_text().strip()
+    assert f'import("./vendor/hls.light.min.mjs?v={version}")' in (static / "sources.js").read_text()
+    assert 'fonts/inter-latin-wght-normal.woff2?v=' in (static / "style.css").read_text()
+
+
 def test_unwritable_data_folder_gives_a_clear_error(tmp_path, media_root):
     import os
     from reel.config import Settings
@@ -322,3 +336,30 @@ def test_one_library_is_answered_without_listing_them_all(client, media_root, mo
     assert renamed["name"] == "Home tapes" and renamed["item_count"] == 2
     assert {k: v for k, v in renamed.items() if k not in ("name", "scan")} == \
            {k: v for k, v in listed["Tapes"].items() if k not in ("name", "scan")}
+
+
+def test_health_with_a_broken_database_is_not_ready(client, settings, monkeypatch):
+    """A 503 saying so (as for anything else not ready), not a server error."""
+    import sqlite3
+
+    from reel import main
+
+    def broken(*args, **kwargs):
+        raise sqlite3.DatabaseError("file is not a database")
+
+    monkeypatch.setattr(main, "connect", broken)
+    res = client.get("/api/health")
+    assert res.status_code == 503 and res.json()["ok"] is False and res.json()["database"] is False
+
+
+def test_free_space_reserve_from_environment(monkeypatch, tmp_path):
+    from reel.config import Settings
+
+    monkeypatch.setenv("REEL_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("REEL_MIN_FREE_MB", "0")
+    settings = Settings.from_env()
+    assert settings.min_free_mb == 0 and not settings.low_on_disk() and settings.free_bytes() > 0
+    monkeypatch.setenv("REEL_MIN_FREE_MB", str(10**9))
+    assert Settings.from_env().low_on_disk()
+    monkeypatch.delenv("REEL_MIN_FREE_MB")
+    assert Settings.from_env().min_free_mb == 2048

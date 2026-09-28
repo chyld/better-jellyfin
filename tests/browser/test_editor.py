@@ -239,3 +239,29 @@ def test_deleting_a_clip_from_its_page(server, page):
     page.js("document.querySelector('dialog.confirm-dialog .btn.danger').click()")
     page.wait_for(f"location.hash === '#/item/{video}' && !!document.querySelector('.detail')", message="the video's page")
     assert server.call("GET", f"/api/items/{video}/clips") == []
+
+
+def test_dragging_the_timeline_seeks_once_on_release(server, page):
+    """A progressive stream starts a new ffmpeg for every seek: a drag across the
+    timeline moves the playhead, and seeks (asks for a new stream) only on release."""
+    video = server.videos["remux.mkv"]
+    plan = server.call("GET", f"/api/items/{video}/plan?video=h264&audio=aac&hls_support=mse")
+    assert plan["delivery"] == "progressive"
+    open_editor(server, page, "remux.mkv")
+    page.js("""(() => { const v = document.querySelector('.edit-video'); window.srcs = [v.src];
+        new MutationObserver(() => window.srcs.push(v.src)).observe(v, {attributes: true, attributeFilter: ['src']});
+        return true; })()""")
+    box = page.js("(() => { const r = document.querySelector('.edit-timeline').getBoundingClientRect();"
+                  " return {x: r.left, y: r.top + r.height / 2, w: r.width}; })()")
+    mouse = lambda kind, x: page.cdp("Input.dispatchMouseEvent", type=kind, x=x, y=box["y"], button="left",
+                                     buttons=1 if kind != "mouseReleased" else 0, clickCount=1)
+    mouse("mousePressed", box["x"] + box["w"] * 0.1)
+    for i in range(2, 9):
+        mouse("mouseMoved", box["x"] + box["w"] * i / 10)
+    time.sleep(0.3)
+    assert page.js("window.srcs.length") == 1                            # nothing yet: still dragging
+    assert page.js("document.querySelector('.edit-clock').textContent").startswith("1:12")   # 80% of 1:30
+    mouse("mouseReleased", box["x"] + box["w"] * 0.8)
+    page.wait_for("window.srcs.length === 2", message="one seek")
+    time.sleep(0.3)
+    assert page.js("window.srcs.length") == 2 and "start=72.0" in page.js("window.srcs[1]")

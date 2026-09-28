@@ -8,7 +8,7 @@ import pytest
 from reel import pictures
 from reel.db import connect
 
-from conftest import make_files, requires_ffmpeg
+from conftest import make_files, requires_ffmpeg, settle_pictures
 
 pytestmark = requires_ffmpeg
 
@@ -72,9 +72,14 @@ def test_cleanup_during_a_tag_upload_keeps_the_new_picture(client, lib, picture,
 
 
 def test_each_upload_gets_its_own_file_and_the_old_one_goes(client, lib, picture, settings):
+    """The old file is retired, not deleted at once (a request may be sending it),
+    and goes with the clean-up once the grace period has passed."""
     video = video_id(client, lib)
     first = client.put(f"/api/items/{video}/image", content=picture).json()["custom_image"]
     second = client.put(f"/api/items/{video}/image", content=picture).json()["custom_image"]
+    assert sorted(p.name for p in (settings.images_dir / "videos").glob("*.jpg")) == sorted(
+        [f"{video}-{first}.jpg", f"{video}-{second}.jpg"])
+    settle_pictures(settings)
     assert sorted(p.name for p in (settings.images_dir / "videos").glob("*.jpg")) == [f"{video}-{second}.jpg"]
     assert first != second
 
@@ -126,3 +131,31 @@ def test_two_first_uploads_to_a_folder_leave_a_working_picture(client, lib, pict
     assert client.put(f"/api/libraries/{lib}/folder-image", params={"path": "Tapes"}, content=picture).status_code == 200
     conn = connect(settings.db_path)
     assert pictures.picture_file(conn, settings.images_dir, pictures.FolderPicture(lib_pk, "Tapes")) is not None
+
+
+def test_a_picture_replaced_while_a_request_sends_it_is_still_there(client, lib, picture, settings):
+    """A request picks the picture (its file and version, from one read); the picture
+    is then replaced, and the clean-up runs, before the request opens the file. The
+    file it picked is still there, and still the version it named."""
+    from reel import pictures
+    from reel.db import connect
+
+    video = video_id(client, lib)
+    first = client.put(f"/api/items/{video}/image", content=picture).json()["custom_image"]
+    thumbs = client.app.state.thumbnails
+    found = thumbs.item_picture(video)                                   # the request picks it...
+    assert found["version"] == first and found["file"].name == f"{video}-{first}.jpg"
+    second = client.put(f"/api/items/{video}/image", content=picture).json()["custom_image"]   # ...it's replaced...
+    conn = connect(settings.db_path)
+    pictures.prune(conn, settings.images_dir)                            # ...and cleaned up
+    conn.close()
+    assert found["file"].read_bytes()                                    # still there to send
+    assert thumbs.item_picture(video)["version"] == second
+    # A tag's picture the same way.
+    tag = client.post(f"/api/items/{video}/tags", json={"name": "family"}).json()[0]
+    client.put(f"/api/tags/{tag['id']}/image", content=picture)
+    conn = connect(settings.db_path)
+    path, _ = pictures.picture_file(conn, settings.images_dir, pictures.TagPicture(tag["id"]))
+    conn.close()
+    client.delete(f"/api/tags/{tag['id']}/image")
+    assert path.read_bytes()

@@ -1,4 +1,5 @@
 import os
+import shutil
 import tempfile
 from dataclasses import dataclass
 from datetime import timedelta
@@ -39,6 +40,10 @@ class Settings:
     max_streams: int = 3
     # How much disk the HLS segment cache may use, in MB.
     hls_cache_mb: int = 2048
+    # Free space (MB) kept on the data folder's disk: below it, no new conversions
+    # start and no pictures are saved, so the database and your pictures never
+    # compete with the HLS cache for the last of the disk.
+    min_free_mb: int = 2048
 
     @property
     def db_path(self) -> Path:
@@ -92,7 +97,20 @@ class Settings:
             image_urls=_choice("REEL_IMAGE_URLS", ("internet", "lan", "off"), "internet"),
             max_streams=_number("REEL_MAX_STREAMS", "3", minimum=1),
             hls_cache_mb=_number("REEL_HLS_CACHE_MB", "2048", minimum=100),
+            min_free_mb=_number("REEL_MIN_FREE_MB", "2048", minimum=0),
         )
+
+    def free_bytes(self) -> int | None:
+        """Free space on the data folder's disk (None if it can't be read)."""
+        try:
+            return shutil.disk_usage(self.data_dir).free
+        except OSError:
+            return None
+
+    def low_on_disk(self) -> bool:
+        """Below the free-space reserve (min_free_mb)?"""
+        free = self.free_bytes()
+        return free is not None and free < self.min_free_mb * 1024 * 1024
 
 
 class DataFolderInUse(RuntimeError):

@@ -169,6 +169,7 @@ documents each one.
 | `REEL_PROBE_WORKERS` | `4` | How many ffprobe processes run at once during a scan. |
 | `REEL_MAX_STREAMS` | `3` | How many videos may be converted or repackaged at once. More viewers get a "try again in a moment" message. |
 | `REEL_HLS_CACHE_MB` | `2048` | Size target for the HLS segment cache (`<data>/hls`). Over it, segments no viewer is near are deleted first. A soft target: see [HLS details](#playback). |
+| `REEL_MIN_FREE_MB` | `2048` | Free space kept on the data folder's disk. Below it, no new conversion starts ("the server's disk is nearly full", HTTP 507) and no picture is saved, so the database and your pictures never compete with the HLS cache for the last of the disk. Videos already converting, and ones that need no conversion, carry on. `/api/health` shows the free space. |
 | `REEL_MISSING_GRACE_DAYS` | `7` | How long a video a scan can no longer find stays in the catalog (hidden, with its tags and pictures) before it's removed. |
 | `REEL_IMAGE_URLS` | `internet` | Where pictures may be downloaded from when you paste a URL: `internet` (public addresses only), `lan` (also your local network) or `off`. |
 | `FORWARDED_ALLOW_IPS` | `127.0.0.1` | *(uvicorn)* Behind a reverse proxy, set this to the proxy's address so its forwarded headers are trusted. Nothing else's are. |
@@ -556,9 +557,11 @@ Rules:
     name). A DNS server can't pass the check with one answer and redirect the connection with
     another ("DNS rebinding").
 - **Each upload gets its own file** (`<uuid>-<version>.jpg`), which is never overwritten. An
-  upload writes its new file, records it, then deletes the previous one. Clean-up only
-  deletes unreferenced files older than an hour, so a picture that's just been uploaded is
-  never removed before it's recorded.
+  upload writes its new file (flushed to disk, so a power cut can't lose a picture the
+  database already points at), records it, then retires the previous one: it's left for the
+  clean-up after scans and at startup, which deletes unreferenced files once they've been
+  unused for an hour. So a picture that's just been uploaded is never removed before it's
+  recorded, and one that a page was loading when it was replaced is still there to send.
 - Uploads are stored in the data folder, never on the NAS (see below).
 
 ### IDs and URLs
@@ -729,9 +732,10 @@ JSON over HTTP. Every ID is a UUID. There's no authentication yet (see
 | POST | `/api/tags/{id}/image-url` | `{url}`: set the tag picture from a URL. |
 
 **Other:** `GET /api/me` returns the current user (for now, always the built-in local user).
-`GET /api/health` returns `{"ok", "ffmpeg", "ffprobe", "streams": {"active", "limit"}, "hls":
-{"sessions", "cache_mb", "target_mb"}}`. It answers **503** with `ok: false` when ffmpeg or ffprobe
-is missing, so Docker marks the container unhealthy. The tools' versions are checked once, at
+`GET /api/health` returns `{"ok", "database", "ffmpeg", "ffprobe", "streams": {"active", "limit"}, "hls":
+{"sessions", "cache_mb", "target_mb"}, "disk": {"free_mb", "reserve_mb", "low"}}`. It answers **503**
+with `ok: false` when the database doesn't answer or ffmpeg or ffprobe is missing, so Docker marks
+the container unhealthy. (A disk below the reserve is reported, but doesn't make it unhealthy.) The tools' versions are checked once, at
 startup (with a time limit), not on every poll. It's used by the Docker health check and kept
 out of the access log. The Libraries page shows the same numbers ("Streams in use: 1 of 3 · HLS
 cache: 120 MB of 2048 MB"), which is what a "try again in a moment" is about.
@@ -762,9 +766,9 @@ version); bump `THUMBS` when the server changes how thumbnails are made.
 ### Tests
 
 ```sh
-uv run pytest              # backend: 625 tests
-node --test tests/js/      # frontend: 45 tests
-uv run pytest -m browser   # browser: 26 tests (about 3 minutes; needs Chromium and ffmpeg)
+uv run pytest              # backend: 638 tests
+node --test tests/js/      # frontend: 48 tests
+uv run pytest -m browser   # browser: 28 tests (about 3 minutes; needs Chromium and ffmpeg)
 scripts/docker-smoke.sh    # builds the image and checks it end to end (needs Docker)
 ```
 

@@ -220,7 +220,7 @@ def test_stream_from_a_start_time(client, items, tmp_path):
 
 
 @requires_ffmpeg
-@pytest.mark.parametrize("start", [-1, 1.5, 99])
+@pytest.mark.parametrize("start", [-1, 1.5, 99, "nan", "inf", "-inf"])
 def test_start_outside_video(client, items, start):
     assert client.get(f"/api/items/{items['xvid_mp3.avi']}/stream", params={"start": start}).status_code == 416
 

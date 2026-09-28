@@ -27,10 +27,9 @@ class ThumbnailError(Exception):
 
 
 class Thumbnailer:
-    def __init__(self, cache_dir: Path, *, max_concurrent: int = 4):
+    def __init__(self, cache_dir: Path):
+        # How many run at once is up to the caller (thumbnails.Slots).
         self.cache_dir = cache_dir
-        # Limit how many ffmpeg processes a page full of new thumbnails can start.
-        self._slots = threading.Semaphore(max_concurrent)
         # The ffmpeg processes running now, so stopping Reel can end them (a
         # thumbnail of a huge picture on a slow NAS can take a while).
         self._running: set[subprocess.Popen] = set()
@@ -65,25 +64,22 @@ class Thumbnailer:
             "ffmpeg", "-v", "error", "-y", *input_args,
             "-frames:v", "1", "-vf", filters, "-q:v", "4", str(tmp),
         ]
-        with self._slots:
-            if out.exists():  # another request made it while we waited
-                return out
+        with self._lock:
+            if self._stopped:
+                raise ThumbnailError("Reel is stopping")
+            proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.PIPE, text=True)
+            self._running.add(proc)
+        try:
+            _, stderr = proc.communicate(timeout=FFMPEG_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate()
+            tmp.unlink(missing_ok=True)
+            raise ThumbnailError("ffmpeg timed out")
+        finally:
             with self._lock:
-                if self._stopped:
-                    raise ThumbnailError("Reel is stopping")
-                proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                        stderr=subprocess.PIPE, text=True)
-                self._running.add(proc)
-            try:
-                _, stderr = proc.communicate(timeout=FFMPEG_TIMEOUT)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.communicate()
-                tmp.unlink(missing_ok=True)
-                raise ThumbnailError("ffmpeg timed out")
-            finally:
-                with self._lock:
-                    self._running.discard(proc)
+                self._running.discard(proc)
         if proc.returncode != 0 or not tmp.exists() or tmp.stat().st_size == 0:
             tmp.unlink(missing_ok=True)
             raise ThumbnailError(stderr.strip() or "ffmpeg made no image")
@@ -157,6 +153,20 @@ def picture_rev(path: str | os.PathLike) -> str | None:
 ORPHAN_GRACE_SECONDS = 3600
 
 
+def durable_replace(tmp: Path, out: Path) -> None:
+    """Put a finished file in place so a power cut can't lose it once it's been
+    recorded: its data is flushed to disk, then it's renamed, then the rename is.
+    (SQLite's own commits are durable; a picture file beside it has to be made so.)"""
+    with open(tmp, "rb") as f:
+        os.fsync(f.fileno())
+    os.replace(tmp, out)
+    fd = os.open(out.parent, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 def upload_name(uid: str, version: str) -> str:
     return f"{uid}-{version}.jpg"
 
@@ -203,7 +213,7 @@ def save_upload(data: bytes, out: Path, *, width: int = UPLOAD_WIDTH) -> None:
             raise ThumbnailError("The image took too long to process.")
         if proc.returncode != 0 or not tmp.exists() or tmp.stat().st_size == 0:
             raise ThumbnailError("That image couldn't be read. Is the file damaged?")
-        os.replace(tmp, out)
+        durable_replace(tmp, out)
     finally:
         src.unlink(missing_ok=True)
         tmp.unlink(missing_ok=True)
@@ -237,6 +247,6 @@ def save_frame(src: Path, seconds: float, out: Path, *, interlaced: bool = False
         if proc.returncode != 0 or not tmp.exists() or tmp.stat().st_size == 0:
             detail = proc.stderr.strip().splitlines()
             raise ThumbnailError(detail[-1] if detail else "ffmpeg made no picture")
-        os.replace(tmp, out)
+        durable_replace(tmp, out)
     finally:
         tmp.unlink(missing_ok=True)

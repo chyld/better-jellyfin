@@ -433,3 +433,19 @@ def test_scans_probe_one_file_at_a_time_while_someone_watches(watching, most, co
 
     scan_library(conn, lib, probe_fn=probe, workers=4, busy=lambda: watching)
     assert peak[0] == most
+
+
+def test_no_scan_can_be_queued_while_a_library_is_being_removed(settings):
+    """Removing claims the library first: a scan asked for meanwhile isn't queued
+    (it would run on a library that's gone), and a failed removal gives it back."""
+    from reel.scan_manager import ScanManager
+
+    init_db(settings.db_path)
+    manager = ScanManager(settings.db_path)          # not started: nothing runs
+    assert manager.claim_for_removal(1)
+    assert manager.request(1)["state"] == "removing" and manager._queue.empty()
+    assert not manager.claim_for_removal(1)
+    manager.unclaim(1)                               # the removal failed
+    assert manager.status(1) is None
+    assert manager.request(1)["state"] == "queued"
+    assert not manager.claim_for_removal(1)          # busy: can't be removed now

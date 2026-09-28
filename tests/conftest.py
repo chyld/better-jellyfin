@@ -130,3 +130,23 @@ def clips(tmp_path_factory) -> Path:
     cover.unlink()
     (folder / "corrupt.mp4").write_bytes(b"this is not a video" * 100)
     return folder
+
+
+def settle_pictures(settings) -> None:
+    """Replaced or removed pictures are retired, not deleted at once (a request may
+    still be sending one): let them age past the grace period, then run the
+    clean-up that deletes them."""
+    import os
+    import time
+
+    from reel import pictures
+    from reel.images import ORPHAN_GRACE_SECONDS
+
+    old = time.time() - 2 * ORPHAN_GRACE_SECONDS
+    for path in settings.images_dir.rglob("*.jpg"):
+        os.utime(path, (old, old))
+    conn = connect(settings.db_path)
+    try:
+        pictures.prune(conn, settings.images_dir)
+    finally:
+        conn.close()

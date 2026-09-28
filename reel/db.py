@@ -155,7 +155,7 @@ def write_transaction(conn: sqlite3.Connection) -> Iterator[None]:
 
 def connect(db_path: Path, *, synchronous: str = "FULL") -> sqlite3.Connection:
     """A connection in WAL mode. FULL (the default) makes every commit survive a
-    power cut: your edits, and picture references whose old files are deleted
+    power cut: your edits, and picture references whose old files are retired
     right after the commit. Scans use NORMAL: in WAL mode that can't corrupt the
     database, but a power cut may roll back recent commits, which for scan results
     just means those files are probed again next time."""

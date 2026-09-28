@@ -87,6 +87,23 @@ function nativeHlsSource(video, url) {
   return source;
 }
 
+export const MAX_RECOVERIES = 3;
+
+/** hls.js can often get past a decode error (recoverMediaError), but a file that
+ *  keeps failing mustn't loop forever: up to MAX_RECOVERIES tries, counted afresh
+ *  after 30 seconds without one. Returns the new count, or null to give up. */
+export function nextRecovery(count, lastAt, now = Date.now()) {
+  const recent = now - lastAt > 30_000 ? 0 : count;
+  return recent < MAX_RECOVERIES ? recent + 1 : null;
+}
+
+/** What to tell the viewer about an HTTP error the stream stopped on. */
+export function streamErrorText(code) {
+  if (code === 503) return "The server is busy converting other videos. Try again in a moment.";
+  if (code === 507) return "The server's disk is nearly full, so it can't convert videos right now.";
+  return "The video stopped loading.";
+}
+
 /** Whether to reload after an HLS error: the server answers 410 when the file
  *  changed under a session, and a fresh playlist fixes that. At most once per
  *  10 seconds, so a persistent problem still ends in an error. */
@@ -95,22 +112,33 @@ export function shouldReload(code, lastReload, now = Date.now()) {
 }
 
 async function hlsJsSource(video, url, onError) {
-  const { default: Hls } = await import("./vendor/hls.light.min.mjs");
+  // The version (vendor/hls.VERSION) is in the URL: browsers keep the file for good.
+  const { default: Hls } = await import("./vendor/hls.light.min.mjs?v=1.7.3");
   let hls = null;
   let lastReload = 0;
+  let recoveries = 0;
+  let lastRecovery = 0;
   const source = {
     load(start) {
       hls?.destroy();
+      recoveries = 0;
       hls = new Hls({ startPosition: start || 0, maxBufferLength: 30, backBufferLength: 60 });
       hls.on(Hls.Events.ERROR, (_event, data) => {
         if (!data.fatal) return;
         if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
-          hls.recoverMediaError(); // the usual fix for a decode hiccup
+          const next = nextRecovery(recoveries, lastRecovery);
+          if (next === null) {
+            onError("This video keeps failing to play here.");
+          } else {
+            recoveries = next;
+            lastRecovery = Date.now();
+            hls.recoverMediaError(); // the usual fix for a decode hiccup
+          }
         } else if (shouldReload(data.response?.code, lastReload)) {
           lastReload = Date.now();
           source.load(video.currentTime);
         } else {
-          onError(data.response?.code === 503 ? "The server is busy converting other videos. Try again in a moment." : "The video stopped loading.");
+          onError(streamErrorText(data.response?.code));
         }
       });
       hls.loadSource(url);

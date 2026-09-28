@@ -131,7 +131,21 @@ export async function renderPlayer(page, itemId, start = 0, backUrl = `#/item/${
   const video = h("video", { class: "screen", autoplay: true, playsinline: true });
   const spinner = h("div", { class: "spinner", hidden: true });
   const flash = h("div", { class: "flash" });
-  const message = h("div", { class: "player-message", hidden: true });
+  const message = h("div", { class: "player-message", role: "alert", hidden: true });
+  // A stopped video says why, with Retry: it starts again where it was.
+  function showError(text) {
+    spinner.hidden = true;
+    message.hidden = false;
+    message.replaceChildren(
+      h("span", {}, text),
+      h("button", { type: "button", class: "btn small retry", onclick: retry }, "Retry"),
+    );
+  }
+  function retry() {
+    message.hidden = true;
+    spinner.hidden = false;
+    load(position());
+  }
 
   const startBtn = iconButton("start", "Go to beginning", "Home");
   const backBtn = iconButton("back", "Back 1 minute", "Shift + ←", "jump");
@@ -209,11 +223,7 @@ export async function renderPlayer(page, itemId, start = 0, backUrl = `#/item/${
     source = await makeSource(
       video,
       plan,
-      (text) => {
-        spinner.hidden = true;
-        message.hidden = false;
-        message.textContent = text;
-      },
+      (text) => showError(text),
       { nativeHls: hlsSupport() === "native" },
     );
   } catch (err) {
@@ -448,11 +458,7 @@ export async function renderPlayer(page, itemId, start = 0, backUrl = `#/item/${
     volume.value = video.muted ? 0 : video.volume;
     volume.style.setProperty("--level", `${Number(volume.value) * 100}%`);
   });
-  video.addEventListener("error", () => {
-    spinner.hidden = true;
-    message.hidden = false;
-    message.textContent = "This video couldn't be played.";
-  });
+  video.addEventListener("error", () => showError("This video couldn't be played."));
   function onFullscreen() {
     setIcon(fullBtn, isFullscreen(player, video) ? "shrink" : "expand");
   }

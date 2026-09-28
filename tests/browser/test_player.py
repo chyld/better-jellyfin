@@ -305,3 +305,15 @@ def test_next_and_previous_mark_buttons(server, page):
                   " return Number(s.getAttribute('aria-valuenow')) < 30; })()", message="back at 20")
     state = page.playing_past(19)
     assert state["t"] < 30
+
+
+def test_a_stopped_video_offers_retry_from_where_it_was(server, page):
+    page.play(server, "direct.mp4")
+    page.playing_past(3)
+    page.js("document.querySelector('video.screen').dispatchEvent(new Event('error'))")
+    page.wait_for("!document.querySelector('.player-message').hidden", message="the error")
+    assert "couldn't be played" in page.js("document.querySelector('.player-message span').textContent")
+    at = page.video_state()["t"]
+    page.js("document.querySelector('.player-message .retry').click()")
+    state = page.playing_past(at)
+    assert page.js("document.querySelector('.player-message').hidden") and state["t"] < at + 10
