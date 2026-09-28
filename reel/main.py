@@ -653,6 +653,7 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
         if not scans.claim_for_removal(library_id):
             raise HTTPException(409, "Wait for the scan to finish before removing this library.")
         try:
+            pictures.retire_library(conn, settings.images_dir, library_id)   # first, as for any picture
             libraries.delete_library(conn, library_id)
         except BaseException:
             scans.unclaim(library_id)

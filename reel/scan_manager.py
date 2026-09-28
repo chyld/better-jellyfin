@@ -96,6 +96,10 @@ class ScanManager:
         with self._lock:
             current = self._status.get(library_id)
             if current and current["state"] in ("queued", "scanning", "removing"):
+                if current["state"] == "queued" and library_uid is not None:
+                    # The queued scan becomes this request's: it names the library that
+                    # has this id now (a queued one may be for a library since removed).
+                    self._asked_for[library_id] = library_uid
                 return _public(current)
             self._status[library_id] = {"state": "queued", "done": 0, "total": 0}
             if library_uid is not None:
@@ -142,6 +146,7 @@ class ScanManager:
     def forget(self, library_id: int) -> None:
         with self._lock:
             self._status.pop(library_id, None)
+            self._asked_for.pop(library_id, None)
 
     def wait_idle(self, timeout: float = 30) -> None:
         """Block until every queued scan has finished (used by tests)."""
@@ -189,16 +194,20 @@ class ScanManager:
             log.exception("background work after scanning failed")
 
     def _scan_one(self, library_id: int) -> None:
-        with self._lock:
-            if library_id not in self._status:
-                return  # library was deleted while queued
-            asked_for = self._asked_for.pop(library_id, None)
-        if asked_for is not None and not self._still(library_id, asked_for):
-            # Asked for a library that's gone; its id now names another (or none).
-            log.info("skipped a scan of a removed library (id %s is now another)", library_id)
+        while True:
             with self._lock:
+                if library_id not in self._status:
+                    return  # library was deleted while queued
+                asked_for = self._asked_for.pop(library_id, None)
+            if asked_for is None or self._still(library_id, asked_for):
+                break
+            with self._lock:
+                if library_id in self._asked_for:
+                    continue  # asked for again meanwhile (by the library there now): check that
+                # Asked for a library that's gone; its id now names another (or none).
                 if self._status.get(library_id, {}).get("state") == "queued":
                     self._status.pop(library_id)
+            log.info("skipped a scan of a removed library (id %s is now another)", library_id)
             return
         self._update(library_id, state="scanning")
         conn = None

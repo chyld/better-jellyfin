@@ -489,3 +489,66 @@ def test_a_status_doesnt_show_what_the_manager_keeps_for_itself(settings):
     manager._status[1] = {"state": "done", "done": 3, "total": 3}
     assert manager.claim_for_removal(1)
     assert manager.request(1) == manager.status(1) == {"state": "removing"}
+
+
+
+def test_a_scan_asked_for_the_new_library_isnt_lost_behind_a_stale_one(settings, media_root):
+    """A stale request (for a removed library whose id was reused) and a real one for
+    the library there now, both queued before either runs: the real one takes the
+    queued scan over, and the new library is scanned."""
+    from reel.db import connect
+    from reel.libraries import create_library, delete_library
+
+    (media_root / "Old").mkdir()
+    (media_root / "New").mkdir()
+    init_db(settings.db_path)
+    conn = connect(settings.db_path)
+    old_id = create_library(conn, media_root, "Old", str(media_root / "Old"))
+    old_uid = conn.execute("SELECT uid FROM libraries WHERE id = ?", (old_id,)).fetchone()[0]
+    delete_library(conn, old_id)
+    new_id = create_library(conn, media_root, "New", str(media_root / "New"))
+    new_uid = conn.execute("SELECT uid FROM libraries WHERE id = ?", (new_id,)).fetchone()[0]
+    conn.close()
+    assert new_id == old_id
+
+    scanned = []
+    manager = ScanManager(settings.db_path, scan_fn=lambda conn, library_id, **kw: scanned.append(library_id) or {})
+    assert manager.request(old_id, old_uid)["state"] == "queued"      # the stale one
+    assert manager.request(new_id, new_uid)["state"] == "queued"      # the real one, before it runs
+    manager.start()
+    try:
+        manager.wait_idle()
+        assert scanned == [new_id] and manager.status(new_id)["state"] == "done"
+    finally:
+        manager.stop()
+
+
+def test_forgetting_a_library_forgets_which_one_its_scan_was_for(settings):
+    init_db(settings.db_path)
+    manager = ScanManager(settings.db_path)
+    manager.request(1, "some-uid")
+    manager.forget(1)
+    assert manager.status(1) is None and 1 not in manager._asked_for
+
+
+def test_a_scan_asked_for_while_a_stale_one_is_being_checked_still_runs(settings):
+    """The real request arrives just as the worker finds the queued one stale: it's
+    checked in turn, not dropped with it."""
+    init_db(settings.db_path)
+    scanned = []
+    manager = ScanManager(settings.db_path, scan_fn=lambda conn, library_id, **kw: scanned.append(library_id) or {})
+
+    def still(library_id, library_uid):
+        if library_uid == "stale":
+            manager.request(library_id, "real")      # arrives mid-check
+            return False
+        return library_uid == "real"
+
+    manager._still = still
+    manager.request(1, "stale")
+    manager.start()
+    try:
+        manager.wait_idle()
+        assert scanned == [1] and manager.status(1)["state"] == "done"
+    finally:
+        manager.stop()

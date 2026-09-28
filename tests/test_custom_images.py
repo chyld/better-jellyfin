@@ -229,7 +229,13 @@ def test_removing_a_library_removes_its_images(client, lib, picture, settings):
     client.put(f"/api/items/{items(client, lib, 'Tapes')['a']['id']}/image", content=picture)
     upload_folder(client, lib, "", picture)
     age_images(settings)
+    found = client.app.state.thumbnails.item_picture(items(client, lib, "Tapes")["a"]["id"])   # a request picks it
     assert client.delete(f"/api/libraries/{lib}").status_code == 204
+    # Retired first, so the clean-up that runs with the removal keeps them for now:
+    # the request can still send the (hours-old) picture it picked...
+    assert found["file"].read_bytes()
+    assert len(images_on_disk(settings, "videos")) == 1 and len(images_on_disk(settings, "folders")) == 1
+    settle_pictures(settings)                                             # ...and then they go
     assert images_on_disk(settings, "videos") == [] and images_on_disk(settings, "folders") == []
 
 

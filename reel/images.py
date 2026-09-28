@@ -145,10 +145,11 @@ def picture_rev(path: str | os.PathLike) -> str | None:
 # ---- Uploaded images ---------------------------------------------------------------
 #
 # Every upload gets its own file, "<uuid>-<version>.jpg", which is never
-# overwritten. An upload writes its new file, then records the version in the
-# database, then deletes the previous version's file. Clean-up only deletes
-# unreferenced files older than ORPHAN_GRACE, so a file that's about to be
-# recorded can't be removed from under an upload.
+# overwritten. An upload writes its new file, retires the previous version's
+# file (sets its time to now, while the database still points at it), then
+# records the new version. Clean-up only deletes unreferenced files older than
+# ORPHAN_GRACE, so neither a file that's about to be recorded nor one a request
+# has just picked can be removed from under it (see pictures.py).
 
 ORPHAN_GRACE_SECONDS = 3600
 

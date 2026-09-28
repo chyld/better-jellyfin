@@ -901,3 +901,22 @@ def test_below_the_reserve_the_cache_gives_back_what_no_one_is_near(tmp_path, lo
         await m.shutdown()
 
     run(scenario())
+
+
+@requires_ffmpeg
+def test_playlists_loaded_at_once_share_one_session(tmp_path, long_clip):
+    """Many playlist loads of a video at once (while an older session of it, from
+    another version of the file, is being retired: the one wait in open()) end with
+    one session and one folder. open() looks the session up and makes it with no
+    wait in between, so two loads can't both make one."""
+    m = manager(tmp_path)
+
+    async def scenario():
+        stale = Source(long_clip, CONVERT, 40.0, False, 240, "mp3", "an-older-version")
+        await m.open("a", stale)
+        sids = await asyncio.gather(*(m.open("a", source(long_clip)) for _ in range(8)))
+        assert len(set(sids)) == 1 and list(m.sessions) == [sids[0]]
+        assert [p.name for p in m.cache_dir.iterdir()] == [m.get(sids[0]).folder.name]
+        await m.shutdown()
+
+    run(scenario())

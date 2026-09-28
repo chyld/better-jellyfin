@@ -169,13 +169,25 @@ def set_uploaded(conn: sqlite3.Connection, images_dir: Path, owner: Owner, data:
 
 
 def remove_picture(conn: sqlite3.Connection, images_dir: Path, owner: Owner) -> None:
-    """Forget the owner's picture, then retire its file (a NAS picture, if any, shows again)."""
+    """Retire the owner's picture file, then forget it (a NAS picture, if any, shows again)."""
     file_id, old = owner.current(conn)
     if old is None:
         return
     retire(picture_path(images_dir, owner.kind, file_id, old))   # first: see set_picture()
     owner.record(conn, file_id, None)
     conn.commit()
+
+
+def retire_library(conn: sqlite3.Connection, images_dir: Path, library_id: int) -> None:
+    """Before a library's rows go: retire its videos' and folders' pictures (see
+    retire()), so prune() leaves them for the grace period, like any replaced one."""
+    for uid, version in conn.execute(
+            "SELECT uid, custom_image FROM media_items WHERE library_id = ? AND custom_image IS NOT NULL",
+            (library_id,)).fetchall():
+        retire(picture_path(images_dir, "videos", uid, version))
+    for uid, version in conn.execute("SELECT uid, version FROM folder_images WHERE library_id = ?",
+                                     (library_id,)).fetchall():
+        retire(picture_path(images_dir, "folders", uid, version))
 
 
 def picture_file(conn: sqlite3.Connection, images_dir: Path, owner: Owner) -> tuple[Path, str] | None:

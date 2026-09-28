@@ -629,7 +629,8 @@ data/
   - To restore, stop Reel, put `reel.db` (renamed from `reel-backup.db` if needed) and
     `images/` back in the data folder, delete any `reel.db-wal` and `reel.db-shm`, and start it.
 - Uploaded images whose tag, video, folder or library is gone are cleaned up at startup, after
-  every scan, and when a library is removed.
+  every scan, and when a library is removed, once they've been unused for an hour (a removed
+  library's pictures too: a page that was loading one can still get it).
 - **Upgrades are automatic.** The schema version is kept in the database (`PRAGMA user_version`),
   and numbered migrations run once, in order, each in a transaction, so a failed one changes
   nothing. A database from a newer Reel is refused rather than misread. Databases from before
@@ -770,7 +771,7 @@ version); bump `THUMBS` when the server changes how thumbnails are made.
 ### Tests
 
 ```sh
-uv run pytest              # backend: 646 tests
+uv run pytest              # backend: 650 tests
 node --test tests/js/      # frontend: 48 tests
 uv run pytest -m browser   # browser: 28 tests (about 3 minutes; needs Chromium and ffmpeg)
 scripts/docker-smoke.sh    # builds the image and checks it end to end (needs Docker)
