@@ -254,33 +254,72 @@ def clip_out(clip: sqlite3.Row, video: sqlite3.Row) -> dict:
     }
 
 
-def neighbors(conn: sqlite3.Connection, item_uid: str, rel_dir: str | None) -> dict:
-    """Where a video is in the "Show all" list of `rel_dir` (in the video's own
-    library), for the prev/next buttons on its page: its position (from 1), the
-    list's length, and the videos just before and after it (None at either end).
-    Each is one step along the path_key index. NotFound if the video isn't in
-    that list (any more).
+def neighbors(conn: sqlite3.Connection, uid: str, rel_dir: str | None, kind: str = "video") -> dict:
+    """Where a video, or a clip (`kind="clip"`), is in the "Show all" list of
+    `rel_dir` (in its video's library), for the prev/next buttons on its page.
+
+    The list is the one on screen: each video followed by its clips (in the order
+    made). Returns the position (from 1), the list's length (videos and clips),
+    and the entries just before and after it (None at either end): a video's next
+    is its first clip, if it has any; a clip's previous is its video, or the clip
+    before it. Videos are one step along the path_key index. NotFound if it isn't
+    in that list (any more).
     """
-    item = conn.execute("SELECT library_id FROM media_items WHERE uid = ?", (item_uid,)).fetchone()
-    if item is None:
-        raise NotFound("Video not found.")
-    where, args = _all_below(item["library_id"], clean_dir(rel_dir))
-    here = conn.execute(f"SELECT path_key FROM media_items WHERE {where} AND uid = ?", (*args, item_uid)).fetchone()
+    number = None
+    if kind == "clip":
+        found = conn.execute(
+            "SELECT c.number, m.uid, m.library_id FROM clips c JOIN media_items m ON m.id = c.item_id WHERE c.uid = ?",
+            (uid,)).fetchone()
+        if found is None:
+            raise NotFound("Clip not found.")
+        number, video_uid = found["number"], found["uid"]
+    else:
+        found = conn.execute("SELECT uid, library_id FROM media_items WHERE uid = ?", (uid,)).fetchone()
+        if found is None:
+            raise NotFound("Video not found.")
+        video_uid = found["uid"]
+    where, args = _all_below(found["library_id"], clean_dir(rel_dir))
+    here = conn.execute(f"SELECT * FROM media_items WHERE {where} AND uid = ?", (*args, video_uid)).fetchone()
     if here is None:
-        raise NotFound("That video isn't in this list.")
+        raise NotFound(f"That {'clip' if number is not None else 'video'} isn't in this list.")
     key = here["path_key"]
 
-    def step(op: str, direction: str) -> dict | None:
-        row = conn.execute(
-            f"SELECT uid, title, rel_path FROM media_items WHERE {where} AND path_key {op} ? "
-            f"ORDER BY path_key {direction} LIMIT 1",
+    def clips_of(video: sqlite3.Row) -> list[sqlite3.Row]:
+        return conn.execute('SELECT uid, number, start, "end" FROM clips WHERE item_id = ? ORDER BY number',
+                            (video["id"],)).fetchall()
+
+    def video_entry(video: sqlite3.Row) -> dict:
+        return {"kind": "video", "id": video["uid"], "title": video["title"], "rel_path": video["rel_path"]}
+
+    def step(op: str, direction: str) -> sqlite3.Row | None:
+        return conn.execute(
+            f"SELECT * FROM media_items WHERE {where} AND path_key {op} ? ORDER BY path_key {direction} LIMIT 1",
             (*args, key),
         ).fetchone()
-        return {"id": row["uid"], "title": row["title"], "rel_path": row["rel_path"]} if row else None
 
-    before = conn.execute(f"SELECT COUNT(*) FROM media_items WHERE {where} AND path_key < ?", (*args, key)).fetchone()[0]
-    total = conn.execute(f"SELECT COUNT(*) FROM media_items WHERE {where}", args).fetchone()[0]
-    return {"position": before + 1, "total": total, "prev": step("<", "DESC"), "next": step(">", "ASC")}
+    mine = clips_of(here)
+    at = next((i for i, c in enumerate(mine) if c["number"] == number), None)   # the clip's place among its video's
+    if at is None:   # the video: next is its first clip; previous is the last clip of the video before
+        after = clip_out(mine[0], here) if mine else None
+        prev_video = step("<", "DESC")
+        before_it = clips_of(prev_video) if prev_video else []
+        before = clip_out(before_it[-1], prev_video) if before_it else (video_entry(prev_video) if prev_video else None)
+    else:            # a clip: between its video's other clips, then its video / the next video
+        after = clip_out(mine[at + 1], here) if at + 1 < len(mine) else None
+        before = clip_out(mine[at - 1], here) if at > 0 else video_entry(here)
+    if after is None:
+        next_video = step(">", "ASC")
+        after = video_entry(next_video) if next_video else None
+
+    videos_before = conn.execute(f"SELECT COUNT(*) FROM media_items WHERE {where} AND path_key < ?", (*args, key)).fetchone()[0]
+    clips_before = conn.execute(
+        f"SELECT COUNT(*) FROM clips WHERE item_id IN (SELECT id FROM media_items WHERE {where} AND path_key < ?)",
+        (*args, key)).fetchone()[0]
+    videos = conn.execute(f"SELECT COUNT(*) FROM media_items WHERE {where}", args).fetchone()[0]
+    clips = conn.execute(f"SELECT COUNT(*) FROM clips WHERE item_id IN (SELECT id FROM media_items WHERE {where})",
+                         args).fetchone()[0]
+    position = videos_before + clips_before + 1 + (0 if at is None else at + 1)
+    return {"position": position, "total": videos + clips, "prev": before, "next": after}
 
 
 def item_detail(conn: sqlite3.Connection, item_uid: str) -> dict:

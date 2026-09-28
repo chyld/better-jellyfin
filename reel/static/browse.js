@@ -2,7 +2,7 @@
 import { api, artBox, encodePath, fill, formatDuration, formatSize, h, parseTags, pathBelow, plural, tagError } from "./api.js";
 import { openImageDialog } from "./imagedialog.js";
 import { capabilities, capsQuery, hlsSupport } from "./caps.js";
-import { clipTimes, clipsSection } from "./clips.js";
+import { clipPageUrl, clipPlayUrl, clipTimes, clipsSection, confirmDelete } from "./clips.js";
 
 const SORT_KEY = "reel.sort";
 
@@ -133,11 +133,6 @@ export function itemUrl(id, list = null) {
 function playUrl(id, list, t = 0) {
   const query = [t ? `t=${t}` : "", listParam(list)].filter(Boolean).join("&");
   return `#/play/${id}${query ? `?${query}` : ""}`;
-}
-
-/** The player, playing just a clip, remembering the list its video is in. */
-function clipPlayUrl(videoId, clipId, list) {
-  return `#/play/${videoId}?clip=${clipId}${list === null ? "" : `&${listParam(list)}`}`;
 }
 
 /** A folder's page; with `all`, every video in it and its subfolders ("Show all"). */
@@ -441,7 +436,7 @@ function videoCard(item, { from = "", list = null } = {}) {
 }
 
 /** A clip in a Show all list, right after its video: its first frame, the video's
- *  title and its name, the video's path, and its times. It plays the clip. */
+ *  title and its name, the video's path, and its times. It opens the clip's page. */
 function clipEntryCard(clip, { from = "", list = null }) {
   const name = `${clip.title} · ${clip.name}`;
   return h(
@@ -449,7 +444,7 @@ function clipEntryCard(clip, { from = "", list = null }) {
     { class: "card-wrap clip-entry" },
     h(
       "a",
-      { class: "card", href: clipPlayUrl(clip.video_id, clip.id, list), title: name },
+      { class: "card", href: clipPageUrl(clip.id, list), title: name },
       artBox({ kind: "video", shape: "landscape", src: `/api/items/${clip.video_id}/frame?at=${clip.start.toFixed(1)}` }),
       h("div", { class: "label" }, name),
       h("div", { class: "sub where" }, pathBelow(clip.rel_path, from)),
@@ -695,16 +690,19 @@ function codecLabel(codec) {
  * however many steps were taken.
  */
 function listNav(around, list) {
-  const step = (video, label, text) => {
-    if (!video) return h("button", { type: "button", class: "btn small", disabled: true }, text);
-    const href = itemUrl(video.id, list);
+  // An entry is a video or a clip (of the video before it in the list).
+  const step = (entry, label, text) => {
+    if (!entry) return h("button", { type: "button", class: "btn small", disabled: true }, text);
+    const clip = entry.kind === "clip";
+    const href = clip ? clipPageUrl(entry.id, list) : itemUrl(entry.id, list);
+    const name = pathBelow(entry.rel_path, list) + (clip ? ` · ${entry.name}` : "");
     return h(
       "a",
       {
         class: "btn small",
         href,
-        title: pathBelow(video.rel_path, list),
-        "aria-label": `${label}: ${pathBelow(video.rel_path, list)}`,
+        title: name,
+        "aria-label": `${label}: ${name}`,
         onclick: (event) => {
           event.preventDefault();
           location.replace(href);
@@ -716,9 +714,9 @@ function listNav(around, list) {
   return h(
     "nav",
     { class: "list-nav", "aria-label": "Show all list" },
-    step(around.prev, "Previous video", "‹ Prev"),
+    step(around.prev, "Previous", "‹ Prev"),
     h("span", { class: "list-pos" }, `${around.position} of ${around.total}`),
-    step(around.next, "Next video", "Next ›"),
+    step(around.next, "Next", "Next ›"),
   );
 }
 
@@ -796,7 +794,88 @@ export async function renderItem(view, itemId, list = null) {
         h("dl", { class: "facts" }, facts.map(([k, v]) => [h("dt", {}, k), h("dd", {}, v)])),
       ),
     ),
-    clipsSection(item, item.clips || [], { playable }).element,
+    clipsSection(item, item.clips || [], { list: around ? list : null }).element,
+  );
+}
+
+/** A clip's page, like a video's: its first frame, name and times, Play (just
+ *  the clip), its video, and Delete (asks first). `list`: the folder whose "Show
+ *  all" list it was opened from (prev/next through videos and clips), or null. */
+export async function renderClip(view, clipId, list = null) {
+  const caps = await capabilities();
+  const clip = await api("GET", `/api/clips/${clipId}`);
+  const video = clip.video;
+  const [plan, around] = await Promise.all([
+    api("GET", `/api/items/${video.id}/plan?${capsQuery(caps)}&hls_support=${hlsSupport()}`),
+    list === null ? null : api("GET", `/api/clips/${clipId}/neighbors?path=${encodeURIComponent(list)}`).catch(() => null),
+  ]);
+  const inList = around ? list : null;
+  const playable = plan.mode !== "unsupported" && !video.missing;
+  const image = `/api/items/${video.id}/frame?at=${clip.start.toFixed(1)}`;
+  const playHref = clipPlayUrl(video.id, clip.id, inList);
+  const videoHref = itemUrl(video.id, inList);
+  const time = (t) => formatDuration(t) || "0:00";
+  const error = h("p", { class: "error", hidden: true, role: "alert" });
+
+  async function remove() {
+    if (!(await confirmDelete(`Delete ${clip.name}?`, `${clip.name} (${clipTimes(clip)}) will be deleted. The video file is not touched.`))) return;
+    try {
+      await api("DELETE", `/api/items/${video.id}/clips/${clip.id}`);
+      location.replace(videoHref); // Back shouldn't return to a clip that's gone
+    } catch (err) {
+      error.textContent = err.message;
+      error.hidden = false;
+    }
+  }
+
+  const facts = [
+    ["Clip of", h("a", { href: videoHref }, video.title)],
+    ["Starts", time(clip.start)],
+    ["Ends", time(clip.end)],
+    ["Length", time(clip.end - clip.start)],
+    ["File", video.rel_path],
+  ];
+  fill(view,
+    h("div", { class: "backdrop", style: `background-image:url("${image}")`, "aria-hidden": "true" }),
+    h("div", { class: "page-head" }, crumbs(video.library_id, video.breadcrumbs, { linkLast: true }), around && listNav(around, list)),
+    h(
+      "article",
+      { class: "detail clip-detail" },
+      h("div", { class: "card-wrap hero-wrap" }, artBox(
+        {
+          kind: "video",
+          shape: "landscape hero",
+          src: image,
+          alt: `${video.title} · ${clip.name}`,
+          tag: playable ? "a" : "div",
+          attrs: playable ? { href: playHref, "aria-label": `Play ${clip.name}` } : {},
+        },
+        playable && h("span", { class: "hero-play" }, "▶"),
+      )),
+      h(
+        "div",
+        { class: "info" },
+        h("h2", {}, `${video.title} · ${clip.name}`),
+        h(
+          "div",
+          { class: "pills" },
+          h("span", { class: "pill clip" }, "Clip"),
+          h("span", { class: "pill" }, time(clip.end - clip.start)),
+          h("span", { class: "pill" }, `${time(clip.start)} – ${time(clip.end)}`),
+        ),
+        h(
+          "div",
+          { class: "detail-actions" },
+          playable
+            ? h("a", { class: "btn primary play", href: playHref }, "▶ Play")
+            : h("button", { class: "btn primary play", disabled: true }, "▶ Play"),
+          h("a", { class: "btn edit-link", href: videoHref }, "Go to video"),
+          h("button", { type: "button", class: "btn danger edit-link", onclick: remove }, "Delete"),
+        ),
+        error,
+        h("dl", { class: "facts" }, facts.map(([k, v]) => [h("dt", {}, k), h("dd", {}, v)])),
+      ),
+    ),
   );
 }
 

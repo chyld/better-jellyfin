@@ -36,6 +36,19 @@ def list_clips(conn: sqlite3.Connection, item_uid: str) -> list[dict]:
              "end": r["end"]} for r in rows]
 
 
+def clip_detail(conn: sqlite3.Connection, clip_uid: str) -> dict:
+    """A clip for its own page: its name and times, and its video (as on the
+    video's page: title, library, breadcrumbs...)."""
+    from .browse import item_detail
+
+    row = conn.execute('SELECT c.uid, c.number, c.start, c."end", m.uid AS video FROM clips c '
+                       "JOIN media_items m ON m.id = c.item_id WHERE c.uid = ?", (clip_uid,)).fetchone()
+    if row is None:
+        raise NotFound("Clip not found.")
+    return {"id": row["uid"], "number": row["number"], "name": f"Clip {row['number']}", "start": row["start"],
+            "end": row["end"], "video": item_detail(conn, row["video"])}
+
+
 def add_clip(conn: sqlite3.Connection, item_uid: str, a: float, b: float) -> list[dict]:
     """A clip between two marks, in either order (to a tenth of a second, kept
     inside the video). Returns the video's clips."""

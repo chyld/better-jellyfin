@@ -217,12 +217,52 @@ def test_neighbors_step_through_the_show_all_list(client, big):
     ids = [i["id"] for i in items]
     first = neighbors(client, ids[0]).json()
     assert first["position"] == 1 and first["total"] == 26 and first["prev"] is None
-    assert first["next"] == {"id": ids[1], "title": items[1]["title"], "rel_path": items[1]["rel_path"]}
+    assert first["next"] == {"kind": "video", "id": ids[1], "title": items[1]["title"], "rel_path": items[1]["rel_path"]}
     middle = neighbors(client, ids[12]).json()
     assert middle["position"] == 13 and middle["prev"]["id"] == ids[11] and middle["next"]["id"] == ids[13]
     last = neighbors(client, ids[-1]).json()
     assert last["position"] == 26 and last["next"] is None and last["prev"]["id"] == ids[-2]
 
+
+def test_prev_and_next_walk_the_list_with_its_clips(client, big):
+    """Next from a video goes to its first clip, and on through its clips to the
+    next video; prev walks back the same way. Positions and the total count
+    clips too: the list is the one Show all shows."""
+    videos = {i["rel_path"]: i["id"] for i in get(client, big, all="true")["items"]}
+    for path, marks in [("Many/clip1.mp4", [(1, 2)]), ("Many/clip2.mp4", [(1, 2), (5, 6)]),
+                        ("Many/Sub/deep.mp4", [(7, 9)])]:
+        for start, end in marks:
+            client.post(f"/api/items/{videos[path]}/clips", json={"start": start, "end": end})
+    shown = [(i.get("kind", "video"), i["id"]) for i in get(client, big, all="true", limit=500)["items"]]
+    assert len(shown) == 30
+
+    def around(kind, uid):
+        url = f"/api/{'clips' if kind == 'clip' else 'items'}/{uid}/neighbors"
+        res = client.get(url, params={"path": "Many"})
+        assert res.status_code == 200, res.text
+        return res.json()
+
+    walked, entry = [], {"kind": "video", "id": shown[0][1]}
+    while entry:
+        here = around(entry["kind"], entry["id"])
+        walked.append((entry["kind"], entry["id"]))
+        assert here["position"] == len(walked) and here["total"] == 30
+        entry = here["next"]
+    assert walked == shown
+    back, entry = [], {"kind": shown[-1][0], "id": shown[-1][1]}
+    while entry:
+        back.append((entry["kind"], entry["id"]))
+        entry = around(entry["kind"], entry["id"])["prev"]
+    assert back == shown[::-1]
+    # A clip's entry names it, its times, and its video.
+    clip = around("video", videos["Many/clip2.mp4"])["next"]
+    assert clip["kind"] == "clip" and clip["name"] == "Clip 1" and clip["video_id"] == videos["Many/clip2.mp4"]
+    assert (clip["start"], clip["end"], clip["title"], clip["rel_path"]) == (1.0, 2.0, "clip2", "Many/clip2.mp4")
+    # Not in the list: a clip whose video isn't below the folder, or no such clip.
+    [deep_clip] = client.get(f"/api/items/{videos['Many/Sub/deep.mp4']}/clips").json()
+    assert client.get(f"/api/clips/{deep_clip['id']}/neighbors", params={"path": "Many/Sub"}).json()["total"] == 2
+    assert client.get(f"/api/clips/{shown[1][1]}/neighbors", params={"path": "Many/Sub"}).status_code == 404
+    assert client.get("/api/clips/nope/neighbors", params={"path": "Many"}).status_code == 404
 
 def test_neighbors_of_a_video_outside_the_list(client, big):
     deep = next(i for i in get(client, big, all="true")["items"] if i["rel_path"] == "Many/Sub/deep.mp4")

@@ -296,6 +296,16 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
         Returns the video's clips, in the order they were made."""
         return clips.add_clip(conn, item_uid, body.start, body.end)
 
+    @app.get("/api/clips/{clip_uid}")
+    def get_clip(clip_uid: str, conn: sqlite3.Connection = Db):
+        """A clip, for its page: name, times, and its video."""
+        return clips.clip_detail(conn, clip_uid)
+
+    @app.get("/api/clips/{clip_uid}/neighbors")
+    def get_clip_neighbors(clip_uid: str, path: str = "", conn: sqlite3.Connection = Db):
+        """As for a video: before and after this clip in the "Show all" list of `path`."""
+        return browse.neighbors(conn, clip_uid, path, kind="clip")
+
     @app.delete("/api/items/{item_uid}/clips/{clip_uid}")
     def delete_clip(item_uid: str, clip_uid: str, conn: sqlite3.Connection = Db):
         return clips.remove_clip(conn, item_uid, clip_uid)

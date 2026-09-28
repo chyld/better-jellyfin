@@ -1,10 +1,18 @@
 // A video's clips (made on its edit page): the list shown on the video's page and
-// on the edit page, each clip a card that plays it, with a Delete that asks first.
+// on the edit page, each clip a card that opens its page, with a Delete that asks first.
 import { api, artBox, fill, formatDuration, h } from "./api.js";
 
+// `list`: the folder whose "Show all" list it was opened from (prev/next), or null.
+const listQuery = (list, sep) => (list === null || list === undefined ? "" : `${sep}all=${encodeURIComponent(list)}`);
+
+/** A clip's page. */
+export function clipPageUrl(clipId, list = null) {
+  return `#/clip/${clipId}${listQuery(list, "?")}`;
+}
+
 /** The player, playing just this clip. */
-export function clipUrl(itemId, clip) {
-  return `#/play/${itemId}?clip=${clip.id}`;
+export function clipPlayUrl(videoId, clipId, list = null) {
+  return `#/play/${videoId}?clip=${clipId}${listQuery(list, "&")}`;
 }
 
 /** "0:12 – 0:40 · 0:28" */
@@ -43,12 +51,12 @@ export function confirmDelete(title, text) {
 }
 
 /**
- * The "Clips" section: a card per clip (its first frame, name and times; it plays
- * the clip) with a Delete button. `onChange(clips)` is told after a delete.
+ * The "Clips" section: a card per clip (its first frame, name and times; it opens
+ * the clip's page, keeping `list`) with a Delete button. `onChange(clips)` is told after a delete.
  * With `emptyText`, an empty list says so; without, the section hides itself.
  * Returns { element, show(clips) }.
  */
-export function clipsSection(item, clips, { playable = true, emptyText = null, onChange = () => {} } = {}) {
+export function clipsSection(item, clips, { emptyText = null, list = null, onChange = () => {} } = {}) {
   const count = h("span", { class: "count" });
   const grid = h("ul", { class: "grid videos clip-grid" });
   const empty = h("p", { class: "summary" }, emptyText || "");
@@ -73,9 +81,7 @@ export function clipsSection(item, clips, { playable = true, emptyText = null, o
     return h(
       "li",
       { class: "card-wrap clip" },
-      playable
-        ? h("a", { class: "card", href: clipUrl(item.id, clip), "aria-label": `Play ${clip.name}` }, art, lines)
-        : h("div", { class: "card" }, art, lines),
+      h("a", { class: "card", href: clipPageUrl(clip.id, list), title: clip.name }, art, lines),
       h("button", { type: "button", class: "btn small danger clip-delete", "aria-label": `Delete ${clip.name}`, onclick: () => remove(clip) }, "Delete"),
     );
   }

@@ -81,3 +81,15 @@ def test_clips_follow_a_moved_file_and_go_with_the_video(client, media_root, vid
     conn = sqlite3.connect(settings.db_path)
     assert conn.execute("SELECT COUNT(*) FROM clips").fetchone()[0] == 0
     conn.close()
+
+
+def test_a_clip_for_its_own_page(client, video):
+    [clip] = make(client, video["id"], 1, 5).json()
+    res = client.get(f"/api/clips/{clip['id']}")
+    assert res.status_code == 200
+    page = res.json()
+    assert (page["id"], page["name"], page["start"], page["end"]) == (clip["id"], "Clip 1", 1.0, 5.0)
+    assert page["video"]["id"] == video["id"] and page["video"]["title"] == "a"
+    assert page["video"]["breadcrumbs"] == [{"name": "Tapes", "path": ""}]
+    client.delete(f"/api/items/{video['id']}/clips/{clip['id']}")
+    assert client.get(f"/api/clips/{clip['id']}").status_code == 404

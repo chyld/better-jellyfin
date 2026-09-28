@@ -109,8 +109,13 @@ def test_marking_twice_makes_a_clip_listed_everywhere(server, page):
     assert clip_names(page) == ["Clip 2"]
     assert [c["name"] for c in server.call("GET", f"/api/items/{video}/clips")] == ["Clip 2"]
 
-    # A clip plays from its start, with a clock of its own, and stops at its end.
+    # A clip's card opens its page; Play plays from its start, with a clock of its own,
+    # and stops at its end.
     page.js("document.querySelector('.clips .card').click()")
+    page.wait_for("!!document.querySelector('.clip-detail')", message="the clip's page")
+    assert page.js("document.querySelector('.clip-detail h2').textContent") == "long · Clip 2"
+    shot(page, "clip-page")
+    page.js("document.querySelector('.clip-detail .btn.play').click()")
     page.wait_for("!!document.querySelector('video.screen')", message="the player")
     assert page.js("document.querySelector('.player-title').textContent").endswith("Clip 2")
     page.wait_for("document.querySelector('.clock.total').textContent === '0:05'", message="the clip's length")
@@ -151,7 +156,7 @@ def test_the_pages_on_a_phone(server, page):
 
 def test_show_all_lists_each_videos_clips_right_after_it(server, page):
     """Pages of one video (the test forces it), so a video's clips must come with it."""
-    video = server.videos["remux.mkv"]
+    video = server.videos["long.avi"]                                  # a video comes after it
     for start in (10, 2):
         server.call("POST", f"/api/items/{video}/clips", {"start": start, "end": start + 5})
     page.cdp("Page.bringToFront")
@@ -169,13 +174,55 @@ def test_show_all_lists_each_videos_clips_right_after_it(server, page):
         href: c.getAttribute('href'), label: c.querySelector('.label').textContent,
         badge: c.querySelector('.type-badge') && c.querySelector('.type-badge').textContent }))""")
     at = next(i for i, c in enumerate(cards) if c["href"].startswith(f"#/item/{video}"))
-    assert [c["label"] for c in cards[at + 1:at + 3]] == ["remux · Clip 1", "remux · Clip 2"]
+    assert [c["label"] for c in cards[at + 1:at + 3]] == ["long · Clip 1", "long · Clip 2"]
     assert [c["badge"] for c in cards[at + 1:at + 3]] == ["Clip", "Clip"]
     assert sum(c["badge"] == "Clip" for c in cards) == 2
     page.wait_for(f"document.querySelectorAll('.grid.videos .card')[{at + 1}].querySelector('img').naturalWidth > 0",
                   message="the clip's picture")
     shot(page, "show-all-with-clips")
-    page.js(f"document.querySelectorAll('.grid.videos .card')[{at + 1}].click()")
+    # Its video's page steps through the list with the clips: Next is Clip 1.
+    page.js(f"document.querySelectorAll('.grid.videos .card')[{at}].click()")
+    page.wait_for("!!document.querySelector('.list-pos')", message="the video's page")
+    total_count = len(server.videos) + 2
+    assert page.js("document.querySelector('.list-pos').textContent") == f"{at + 1} of {total_count}"
+    page.js("document.querySelectorAll('.list-nav a')[1].click()")           # Next
+    page.wait_for("!!document.querySelector('.clip-detail')", message="the first clip")
+    assert page.js("document.querySelector('.clip-detail h2').textContent") == "long · Clip 1"
+    assert page.js("document.querySelector('.list-pos').textContent") == f"{at + 2} of {total_count}"
+    page.js("document.querySelectorAll('.list-nav a')[1].click()")           # Next
+    page.wait_for("(document.querySelector('.clip-detail h2') || {}).textContent === 'long · Clip 2'",
+                  message="the second clip")
+    page.js("document.querySelectorAll('.list-nav a')[1].click()")           # Next: the next video
+    page.wait_for("!!document.querySelector('.detail') && !document.querySelector('.clip-detail')",
+                  message="the next video")
+    assert page.js("document.querySelector('.list-pos').textContent") == f"{at + 4} of {total_count}"
+    page.js("document.querySelectorAll('.list-nav a')[0].click()")           # Prev: back to Clip 2
+    page.wait_for("(document.querySelector('.clip-detail h2') || {}).textContent === 'long · Clip 2'",
+                  message="back to the second clip")
+    # Play plays just the clip; the player's back button goes to the clip's page.
+    page.js("document.querySelector('.clip-detail .btn.play').click()")
     page.wait_for("!!document.querySelector('.player-title')", message="the player")
-    assert page.js("document.querySelector('.player-title').textContent").endswith("Clip 1")
+    assert page.js("document.querySelector('.player-title').textContent").endswith("Clip 2")
     page.wait_for("document.querySelector('.clock.total').textContent === '0:05'", message="the clip's length")
+    assert page.js("document.querySelector('.player-top a').getAttribute('href')").startswith("#/clip/")
+    # Prev/next replace the page in the history: Back returns to the list.
+    page.js("history.back()")
+    page.wait_for("!!document.querySelector('.clip-detail')", message="the clip's page again")
+    page.js("history.back()")
+    page.wait_for("location.hash.endsWith('?all') && !!document.querySelector('.grid.videos .card')",
+                  message="back at the list")
+
+
+def test_deleting_a_clip_from_its_page(server, page):
+    video = server.videos["direct.mp4"]
+    [clip] = server.call("POST", f"/api/items/{video}/clips", {"start": 2, "end": 6})
+    page.goto(f"{server.base}/#/item/{video}")
+    page.wait_for("!!document.querySelector('.detail')", message="the video's page")
+    page.goto(f"{server.base}/#/clip/{clip['id']}")
+    page.wait_for("!!document.querySelector('.clip-detail')", message="the clip's page")
+    page.js("document.querySelector('.clip-detail .btn.danger').click()")
+    page.wait_for("!!document.querySelector('dialog.confirm-dialog[open]')", message="the question")
+    page.js("document.querySelector('dialog.confirm-dialog .btn.danger').click()")
+    page.wait_for(f"location.hash === '#/item/{video}' && !!document.querySelector('.detail')", message="the video's page")
+    assert page.js("document.querySelector('.clips').hidden")
+    assert server.call("GET", f"/api/items/{video}/clips") == []

@@ -54,10 +54,10 @@ ffmpeg converts on the fly.
 - **Show all videos.** In a folder with subfolders, **Show all videos** flattens it: every video
   in the folder and all its subfolders in one grid, each card showing the video's path from
   that folder down (file name included), and sorted by that path (naturally, so each folder's videos
-  stay together). Each video's [clips](#making-clips) follow it right away, with a **Clip** badge,
-  and play just the clip. A video opened from that list gets **‹ Prev** / **Next ›** buttons and its
-  place ("12 of 312"; these step from video to video, skipping clips); Back returns to the list,
-  however many steps you took.
+  stay together). Each video's [clips](#making-clips) follow it right away, with a **Clip** badge.
+  A video or clip opened from that list gets **‹ Prev** / **Next ›** buttons and its place
+  ("12 of 312"), stepping through the list as shown: from a video with clips, **Next** goes to
+  its first clip. Back returns to the list, however many steps you took.
 - **Playback of everything.** Browser-ready files play directly. Others are repackaged or
   converted live by ffmpeg, starting in about half a second.
 - **A modern player.** A frosted-glass control dock, a gradient seek bar with a time preview,
@@ -191,8 +191,9 @@ permissions. The usual cause is a `./data` that Docker created owned by root.
 | Library / folder | `#/library/<library-uuid>/<folder path>` | Subfolders as posters, then videos. Breadcrumbs and a Name/Year sort. |
 | Show all | `#/library/<library-uuid>/<folder path>?all` | Every video in the folder and its subfolders, each with its path from that folder down (file name included), sorted by that path, and each followed by its clips. **Show folders** goes back. |
 | Video | `#/item/<video-uuid>` | Picture, title, pills (year, length, resolution, play mode), **Play**, **Edit video**, tags, marks and file details, then the video's **Clips**. Opened from a Show all list (`?all=<folder path>`), also prev/next through it. |
+| Clip | `#/clip/<clip-uuid>` | A clip's first frame, name, length and times, **Play** (just the clip), **Go to video** and **Delete**. Opened from a Show all list, also prev/next through it. |
 | Edit video | `#/edit/<video-uuid>` | The video with a timeline, **Mark**, **Clear marks** and **Make clip**, then its clips. See [Making clips](#making-clips). |
-| Player | `#/play/<video-uuid>` | Full-window player. `?t=<seconds>` starts there; `?clip=<clip-uuid>` plays just that clip. |
+| Player | `#/play/<video-uuid>` | Full-window player. `?t=<seconds>` starts there; `?clip=<clip-uuid>` plays just that clip (its back button goes to the clip's page). |
 | Tags | `#/tags` | Every tag: set its image, rename or merge, delete. |
 | Tag | `#/tag/<tag-uuid>` | The videos with that tag. |
 | Libraries | `#/manage` | Add, rename, remove and scan libraries, with live progress. |
@@ -253,7 +254,8 @@ four buttons.
 
 Make as many clips as you like. They're shaded on the timeline and listed under **Clips** on
 the edit page and on the video's page: each card shows the clip's first frame (taken from the
-original file) and its times, and plays the clip. **Delete** asks first. Numbers aren't reused
+original file) and its times, and opens the clip's page, where **▶ Play** plays just the clip.
+**Delete** (on a card, or the clip's page) asks first. Numbers aren't reused
 while later clips exist (delete Clip 1 and the next is still Clip 3).
 
 Nothing is cut from the file: clips are saved in Reel's database, and belong to the video, so
@@ -691,7 +693,7 @@ JSON over HTTP. Every ID is a UUID. There's no authentication yet (see
 |---|---|---|
 | GET | `/api/items/{id}` | Details: codecs, size, path, breadcrumbs, tags. |
 | GET | `/api/items/{id}/thumb` | The video's picture (landscape JPEG). |
-| GET | `/api/items/{id}/neighbors?path=` | Where the video is in the Show all list of folder `path` (in its library): `position`, `total`, and the `prev` / `next` videos (`null` at the ends). 404 if it isn't in that list. |
+| GET | `/api/items/{id}/neighbors?path=` | Where the video is in the Show all list of folder `path` (in its library), counting videos and their clips as the list shows them: `position`, `total`, and the `prev` / `next` entries (`null` at the ends), each with `kind` (`video`, or `clip` with its `name`, times and `video_id`). A video's next is its first clip, if it has any. 404 if it isn't in that list. |
 | GET, HEAD | `/api/items/{id}/file` | The original file, with range requests (direct play). |
 | GET | `/api/items/{id}/plan?video=&audio=&hls_support=` | How this browser should play it: `video`/`audio` list the codecs it decodes (e.g. `video=h264,hevc&audio=aac,ac3`), `hls_support` is `native`, `mse` or `none`. Returns the mode, what happens to each track, the delivery (`file`, `progressive`, `hls`), a `note` when more work is done than the codecs alone need, and the URL to load. An empty `video=`/`audio=` means none; leaving one out means a typical browser. |
 | GET | `/api/items/{id}/hls.m3u8?video=&audio=&hls_support=` | The whole video as an HLS playlist of 6-second segments (video converted). 409 if the plan for this browser isn't HLS. |
@@ -704,6 +706,8 @@ JSON over HTTP. Every ID is a UUID. There's no authentication yet (see
 | POST | `/api/items/{id}/marks` | `{time}`: mark a spot (kept inside the video; nothing new within a second of a mark). Returns the marks. |
 | DELETE | `/api/items/{id}/marks/{mark}` | Delete a mark. Returns the marks left. |
 | GET | `/api/items/{id}/clips` | The video's clips, in the order they were made: `[{id, number, name, start, end}]`, `name` being "Clip 1", "Clip 2"... (also in `GET /api/items/{id}` as `clips`). |
+| GET | `/api/clips/{clip}` | A clip for its page: `{id, number, name, start, end, video}`, `video` as in `GET /api/items/{id}`. |
+| GET | `/api/clips/{clip}/neighbors?path=` | As for a video: where the clip is in the Show all list of folder `path`. |
 | POST | `/api/items/{id}/clips` | `{start, end}`: make a clip between two marks, in either order (to 0.1 s, kept inside the video, at least 0.5 s long). Returns the clips; 400 with the reason if it can't be made. |
 | DELETE | `/api/items/{id}/clips/{clip}` | Delete a clip. Returns the clips left. |
 | GET | `/api/items/{id}/frame?at=` | The frame at `at` seconds, from the original file, as a JPEG at most 480 wide (clips' pictures). At most 2 are made at once. |
@@ -756,9 +760,9 @@ version); bump `THUMBS` when the server changes how thumbnails are made.
 ### Tests
 
 ```sh
-uv run pytest              # backend: 617 tests
+uv run pytest              # backend: 619 tests
 node --test tests/js/      # frontend: 45 tests
-uv run pytest -m browser   # browser: 25 tests (about 3 minutes; needs Chromium and ffmpeg)
+uv run pytest -m browser   # browser: 26 tests (about 3 minutes; needs Chromium and ffmpeg)
 scripts/docker-smoke.sh    # builds the image and checks it end to end (needs Docker)
 ```
 
