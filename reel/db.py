@@ -357,6 +357,12 @@ def _v14_mp4_copies(conn: sqlite3.Connection) -> None:
     conn.execute("ALTER TABLE media_items ADD COLUMN mp4_copy_size INTEGER")
 
 
+def _v15_mp4_copy_times(conn: sqlite3.Connection) -> None:
+    # When each MP4 copy was made, for the Copies page. Copies made before this
+    # take their file's time from the next start (copies.adopt_times).
+    conn.execute("ALTER TABLE media_items ADD COLUMN mp4_copy_at TEXT")
+
+
 # (version, what it does, function). Append only; functions must not commit.
 MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (2, "fingerprints and probe versions for media items", _v2_identity),
@@ -372,6 +378,7 @@ MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (12, "clips only: numbered clips replace ranges", _v12_clips),
     (13, "a video's clip numbers are unique", _v13_unique_clip_numbers),
     (14, "MP4 copies of videos in the wrong container", _v14_mp4_copies),
+    (15, "when each MP4 copy was made", _v15_mp4_copy_times),
 ]
 
 

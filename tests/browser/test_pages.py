@@ -196,3 +196,22 @@ def test_making_and_removing_an_mp4_copy(server, page):
     page.wait_for("document.querySelector('.copy-section').hidden && "
                   "document.querySelector('.pill.mode').textContent === 'Quick repackage'", message="the original again")
     assert server.call("GET", f"/api/items/{video}/plan")["delivery"] == "progressive"
+
+
+def test_the_copies_page(server, page):
+    """Copies from the top bar: a copy being made shows up with its progress, then
+    in the list of copies; Remove (after a question) takes it off."""
+    video = server.videos["remux.mkv"]
+    page.goto(f"{server.base}/#/copies")
+    page.wait_for("!!document.querySelector('.copies-made .empty')", message="the empty page")
+    assert page.js("document.querySelector('.nav a.active').textContent") == "Copies"
+    server.call("POST", f"/api/items/{video}/mp4-copy")
+    page.js("location.hash = '#/'; location.hash = '#/copies'")
+    page.wait_for("document.querySelectorAll('.copies-made .copy-row').length === 1", timeout=60, message="the copy")
+    assert page.js("document.querySelector('.copies-made .copy-title').textContent") == "remux"
+    assert "1 copy" in page.js("document.querySelector('.summary').textContent")
+    page.js("document.querySelector('.copies-made .btn.danger').click()")
+    page.wait_for("!!document.querySelector('dialog.confirm-dialog[open]')", message="the question")
+    page.js("document.querySelector('dialog.confirm-dialog .btn.danger').click()")
+    page.wait_for("!!document.querySelector('.copies-made .empty')", message="the empty page again")
+    assert server.call("GET", f"/api/items/{video}")["copy_size"] is None

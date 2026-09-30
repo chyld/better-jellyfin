@@ -353,6 +353,24 @@ a.chip:hover, .chip:has(a:hover) { border-color: rgb(56 189 248 / 0.5); backgrou
 .tag-row .tag-count { color: var(--muted); font-size: 13px; flex: 1; }
 .tag-row .buttons { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
 
+/* MP4 copies (the Copies page) */
+.copy-list { list-style: none; margin: 0 0 36px; padding: 0; display: grid; gap: 10px; max-width: 1100px; }
+.copy-row {
+  display: grid; grid-template-columns: 128px minmax(0, 1fr) auto; align-items: center; gap: 18px;
+  padding: 12px 16px 12px 12px; border-radius: var(--radius);
+  background: var(--glass); border: 1px solid var(--edge); transition: border-color 0.2s, background 0.2s;
+}
+.copy-row:hover { border-color: var(--edge-2); background: rgb(255 255 255 / 0.05); }
+.copy-art .art { border-radius: 10px; box-shadow: none; }
+.copy-title { color: var(--text); text-decoration: none; font-weight: 650; }
+.copy-title:hover { color: var(--neon-a); }
+.copy-path { color: var(--faint); font-size: 12.5px; overflow-wrap: anywhere; }
+.copy-status { margin-top: 4px; color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+.copy-status.ok { color: var(--ok); }
+.copy-status.err { color: var(--danger); }
+.copy-row .progress { max-width: 420px; }
+.copy-row .buttons { display: flex; gap: 8px; }
+
 /* ---- Dialogs ------------------------------------------------------------------------------ */
 
 dialog {
@@ -474,6 +492,8 @@ dialog .note { margin: 0 0 14px; font-size: 14px; color: var(--warn); }
   .grid.folders { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); }
   .library { grid-template-columns: 1fr; }
   .library .buttons { grid-row: auto; grid-column: auto; margin-top: 10px; flex-wrap: wrap; }
+  .copy-row { grid-template-columns: 88px minmax(0, 1fr); }
+  .copy-row .buttons { grid-column: 1 / -1; }
 }
 
 .load-more { height: 1px; }

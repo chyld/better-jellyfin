@@ -131,6 +131,7 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
             conn = connect(settings.db_path)
             try:
                 pictures.adopt_unversioned_files(conn, settings.images_dir)
+                copies.adopt_times(conn, settings.copies_dir)
                 prune_files(conn)
             finally:
                 conn.close()
@@ -311,6 +312,11 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
             raise HTTPException(507, f"There isn't enough free disk space for an MP4 copy of this video "
                                      f"(it needs about {row['size'] * 2 / 1024**3:.1f} GB).")
         return copies.Job(item_uid, src, row["duration"], row["audio_codec"], catalog.video_rev(row["size"], row["mtime"]))
+
+    @app.get("/api/copies")
+    def list_copies(conn: sqlite3.Connection = Db):
+        """The Copies page: copies being made, waiting or failed, and every copy there is."""
+        return copies.listing(conn, copier.all())
 
     @app.post("/api/items/{item_uid}/mp4-copy", status_code=202)
     async def make_copy(item_uid: str):

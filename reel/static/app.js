@@ -1,5 +1,6 @@
 import { fromList, itemUrl, renderBrowse, renderHome, renderItem, renderTag } from "./browse.js";
 import { renderClip } from "./clippage.js";
+import { renderCopies } from "./copies.js";
 import { clipPageUrl } from "./clips.js";
 import { renderEditor } from "./editor.js";
 import { renderManage } from "./manage.js";
@@ -16,6 +17,7 @@ const router = createRouter({
     [/^#?\/?$/, (page) => renderHome(page)],
     [/^#\/manage$/, (page) => renderManage(page)],
     [/^#\/tags$/, (page) => renderTags(page)],
+    [/^#\/copies$/, (page) => renderCopies(page)],
     [/^#\/library\/([0-9a-f-]{36})(?:\/([^?]*))?(\?.*)?$/, (page, uid, path, query) =>
       renderBrowse(page, uid, decodeURIComponent(path || ""), new URLSearchParams(query?.slice(1)).has("all"))],
     // `?all=<folder>`: opened from that folder's "Show all" list (prev/next buttons).
@@ -44,7 +46,8 @@ const router = createRouter({
   notFound: () => (location.hash = "#/"),
   onVisit(hash) {
     // Tag pages belong to Tags, library settings to Libraries, everything else to Home.
-    const section = hash.startsWith("#/manage") ? "#/manage" : /^#\/tags?(\/|$)/.test(hash) ? "#/tags" : "#/";
+    const section = hash.startsWith("#/manage") ? "#/manage" : hash.startsWith("#/copies") ? "#/copies"
+      : /^#\/tags?(\/|$)/.test(hash) ? "#/tags" : "#/";
     document.querySelectorAll(".nav a").forEach((a) => a.classList.toggle("active", a.getAttribute("href") === section));
   },
   saveScroll: (hash) => scrollPositions.set(hash, window.scrollY),

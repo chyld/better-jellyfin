@@ -108,9 +108,11 @@ def remove(conn: sqlite3.Connection, folder: Path, item_uid: str) -> None:
     if not row["mp4_copy"]:
         return
     _retire(folder / copy_name(row["uid"], row["mp4_copy"]))
-    conn.execute("UPDATE media_items SET mp4_copy = NULL, mp4_copy_of = NULL, mp4_copy_size = NULL WHERE id = ?",
-                 (row["id"],))
+    conn.execute(f"UPDATE media_items SET {FORGET} WHERE id = ?", (row["id"],))
     conn.commit()
+
+
+FORGET = "mp4_copy = NULL, mp4_copy_of = NULL, mp4_copy_size = NULL, mp4_copy_at = NULL"
 
 
 def retire_library(conn: sqlite3.Connection, folder: Path, library_id: int) -> None:
@@ -141,8 +143,7 @@ def prune(conn: sqlite3.Connection, folder: Path, *, grace_seconds: float = ORPH
         else:
             stale.append((row["id"],))
     if stale:
-        conn.executemany("UPDATE media_items SET mp4_copy = NULL, mp4_copy_of = NULL, mp4_copy_size = NULL "
-                         "WHERE id = ?", stale)
+        conn.executemany(f"UPDATE media_items SET {FORGET} WHERE id = ?", stale)
         conn.commit()
     if not folder.is_dir():
         return 0
@@ -159,6 +160,56 @@ def prune(conn: sqlite3.Connection, folder: Path, *, grace_seconds: float = ORPH
         path.unlink(missing_ok=True)
         removed += 1
     return removed
+
+
+def adopt_times(conn: sqlite3.Connection, folder: Path) -> None:
+    """Copies made before their time was recorded take their file's time."""
+    rows = conn.execute("SELECT id, uid, mp4_copy FROM media_items WHERE mp4_copy IS NOT NULL AND mp4_copy_at IS NULL")
+    times = []
+    for row in rows.fetchall():
+        try:
+            mtime = (folder / copy_name(row["uid"], row["mp4_copy"])).stat().st_mtime
+        except OSError:
+            continue
+        times.append((time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(mtime)), row["id"]))
+    if times:
+        conn.executemany("UPDATE media_items SET mp4_copy_at = ? WHERE id = ?", times)
+        conn.commit()
+
+
+def listing(conn: sqlite3.Connection, jobs: list[tuple[str, dict]]) -> dict:
+    """The Copies page: copies being made or waiting (in queue order) and ones that
+    failed, then every copy there is (newest first), each with its video."""
+    fields = """m.uid, m.title, m.rel_path, m.custom_image, m.poster_path, m.poster_rev, m.size, m.mtime,
+                m.mp4_copy, m.mp4_copy_of, m.mp4_copy_size, m.mp4_copy_at, l.uid AS library_uid, l.name AS library_name"""
+
+    def video(row) -> dict:
+        return {"id": row["uid"], "title": row["title"], "rel_path": row["rel_path"],
+                "library_id": row["library_uid"], "library_name": row["library_name"],
+                "custom_image": row["custom_image"], "has_poster": row["poster_path"] is not None,
+                "poster_rev": row["poster_rev"], "file_size": row["size"]}
+
+    uids = [uid for uid, _ in jobs]
+    found = {}
+    if uids:
+        found = {r["uid"]: r for r in conn.execute(
+            f"SELECT {fields} FROM media_items m JOIN libraries l ON l.id = m.library_id "
+            f"WHERE m.uid IN ({','.join('?' * len(uids))})", uids)}
+    waiting = 0
+    out_jobs = []
+    for uid, status in jobs:
+        if uid not in found:
+            continue
+        job = {**video(found[uid]), **status}
+        if status["state"] == "queued":
+            waiting += 1
+            job["place"] = waiting              # 1: next in line
+        out_jobs.append(job)
+    rows = conn.execute(f"SELECT {fields} FROM media_items m JOIN libraries l ON l.id = m.library_id "
+                        "WHERE m.mp4_copy IS NOT NULL ORDER BY m.mp4_copy_at DESC, m.title").fetchall()
+    made = [{**video(r), "copy_size": r["mp4_copy_size"], "made_at": r["mp4_copy_at"], "current": is_current(r)}
+            for r in rows]
+    return {"jobs": out_jobs, "copies": made, "totals": totals(conn)}
 
 
 def totals(conn: sqlite3.Connection) -> dict:
@@ -206,6 +257,13 @@ class CopyManager:
 
     def start(self) -> None:
         self._worker = asyncio.create_task(self._run())
+
+    def all(self) -> list[tuple[str, dict]]:
+        """Every job there is (item uid, status): the running one, then the queued ones
+        in order, then failures."""
+        order = {"running": 0, "queued": 1, "error": 2}
+        jobs = [(uid, dict(job.status)) for uid, job in list(self.jobs.items())]
+        return sorted(jobs, key=lambda j: order.get(j[1]["state"], 3))   # stable: queue order kept
 
     def status(self, item_uid: str) -> dict | None:
         job = self.jobs.get(item_uid)
@@ -322,7 +380,8 @@ class CopyManager:
                     raise CopyError("The video file changed while it was being copied. Try again.")
                 if row["mp4_copy"]:
                     _retire(self.folder / copy_name(row["uid"], row["mp4_copy"]))
-                conn.execute("UPDATE media_items SET mp4_copy = ?, mp4_copy_of = ?, mp4_copy_size = ? WHERE id = ?",
+                conn.execute("UPDATE media_items SET mp4_copy = ?, mp4_copy_of = ?, mp4_copy_size = ?, "
+                             "mp4_copy_at = datetime('now') WHERE id = ?",
                              (version, job.rev, out.stat().st_size, row["id"]))
         finally:
             conn.close()

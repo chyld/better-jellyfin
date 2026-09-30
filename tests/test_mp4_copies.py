@@ -230,3 +230,65 @@ def test_the_copy_command_copies_both_tracks_with_the_index_first(tmp_path):
     assert cmd[cmd.index("-c") + 1] == "copy" and "aac_adtstoasc" in cmd and "+faststart" in cmd
     assert cmd[cmd.index("-map") + 1] == "0:V:0"
     assert "aac_adtstoasc" not in copies.command(tmp_path / "a.mkv", tmp_path / "a.part", "mp3")
+
+
+# ---- The Copies page ------------------------------------------------------------------------
+
+
+def test_the_copies_page_lists_copies_and_failures(client, videos):
+    assert client.get("/api/copies").json() == {"jobs": [], "copies": [], "totals": {"count": 0, "mb": 0}}
+    good, bad = videos["transport_stream.mp4"], videos["h264_aac.mkv"]
+    client.post(f"/api/items/{good}/mp4-copy")
+    wait_for_copy(client, good)
+    (videos["folder"] / "h264_aac.mkv").write_bytes(b"not a video any more")
+    client.post(f"/api/items/{bad}/mp4-copy")
+    wait_for_copy(client, bad)
+
+    page = client.get("/api/copies").json()
+    [failed] = page["jobs"]
+    assert (failed["id"], failed["state"], failed["title"], failed["library_name"]) == (bad, "error", "h264_aac", "Films")
+    assert "ffmpeg couldn't copy" in failed["error"]
+    [made] = page["copies"]
+    assert (made["id"], made["rel_path"], made["current"]) == (good, "transport_stream.mp4", True)
+    assert made["copy_size"] > 0 and made["made_at"] and made["file_size"] > 0
+    assert page["totals"]["count"] == 1
+
+    client.delete(f"/api/items/{bad}/mp4-copy")                  # Dismiss
+    assert client.get("/api/copies").json()["jobs"] == []
+
+
+def test_jobs_are_listed_running_then_waiting_in_order_then_failed(tmp_path):
+    manager = copies.CopyManager(tmp_path / "db", tmp_path / "copies")
+    for uid, state in (("a", "error"), ("b", "queued"), ("c", "running"), ("d", "queued")):
+        job = copies.Job(uid, tmp_path / uid, 1.0, None, "r")
+        job.status["state"] = state
+        manager.jobs[uid] = job
+    assert [uid for uid, _ in manager.all()] == ["c", "b", "d", "a"]
+
+
+def test_waiting_copies_say_their_place_in_line(conn, media_root, fake_probe, tmp_path):
+    from reel.libraries import create_library
+
+    from conftest import make_files
+    make_files(media_root, "T/a.mkv", "T/b.mkv", "T/c.mkv")
+    lib = create_library(conn, media_root, "T", str(media_root / "T"))
+    scan_library(conn, lib, probe_fn=fake_probe)
+    uid = {r["rel_path"]: r["uid"] for r in conn.execute("SELECT uid, rel_path FROM media_items")}
+    jobs = [(uid["a.mkv"], {"state": "running", "progress": 0.5, "error": None}),
+            (uid["b.mkv"], {"state": "queued", "progress": 0.0, "error": None}),
+            (uid["c.mkv"], {"state": "queued", "progress": 0.0, "error": None}),
+            ("gone", {"state": "queued", "progress": 0.0, "error": None})]        # its video was removed
+    listed = copies.listing(conn, jobs)["jobs"]
+    assert [(j["rel_path"], j.get("place")) for j in listed] == [("a.mkv", None), ("b.mkv", 1), ("c.mkv", 2)]
+
+
+def test_copies_made_before_their_time_was_recorded_get_their_files_time(client, videos, settings):
+    video = videos["transport_stream.mp4"]
+    client.post(f"/api/items/{video}/mp4-copy")
+    wait_for_copy(client, video)
+    conn = connect(settings.db_path)
+    conn.execute("UPDATE media_items SET mp4_copy_at = NULL")
+    conn.commit()
+    copies.adopt_times(conn, settings.copies_dir)
+    assert conn.execute("SELECT mp4_copy_at FROM media_items WHERE uid = ?", (video,)).fetchone()[0]
+    conn.close()

@@ -202,6 +202,7 @@ permissions. The usual cause is a `./data` that Docker created owned by root.
 | Edit video | `#/edit/<video-uuid>` | The video with a timeline, **Mark**, **Clear marks** and **Make clip**, then its clips. See [Making clips](#making-clips). |
 | Player | `#/play/<video-uuid>` | Full-window player. `?t=<seconds>` starts there; `?clip=<clip-uuid>` plays just that clip (its back button goes to the clip's page). |
 | Tags | `#/tags` | Every tag: set its image, rename or merge, delete. |
+| Copies | `#/copies` | [MP4 copies](#mp4-copies): the one being made (with progress), the ones waiting their turn (Cancel), failed ones (Retry, Dismiss), and every copy there is, with its size and when it was made (Remove). |
 | Tag | `#/tag/<tag-uuid>` | The videos with that tag. |
 | Libraries | `#/manage` | Add, rename, remove and scan libraries, with live progress. |
 
@@ -532,7 +533,12 @@ on every play, and every seek starts ffmpeg again. An MP4 copy fixes that once:
 - A copy is current while the video file is the one it was made from (the size and modification
   time the last scan recorded). A file replaced on the NAS makes it stale once a scan sees that:
   the original plays again, and the copy is deleted. A moved or renamed file keeps its copy.
-- **Remove** (on the video's page, after a question) plays the original again. A removed copy's
+- **Several at once:** click Make MP4 copy on as many videos as you like; they wait their turn.
+  The **Copies** page (top bar) shows them all: the one being made, with its progress (Stop); the
+  ones waiting, with their place in line (Cancel); failed ones, with why (Retry, Dismiss); and every
+  copy there is, with its size and when it was made. The queue is kept in memory: copies not
+  finished when Reel stops are dropped (nothing half-made is kept), and are asked for again.
+- **Remove** (on the video's page or the Copies page, after a question) plays the original again. A removed copy's
   file is deleted by the clean-up an hour later (a play may still be reading it), like a replaced
   picture; copies of a video or library removed from Reel go the same way. `/api/health` shows how
   many copies there are and their size.
@@ -757,6 +763,7 @@ JSON over HTTP. Every ID is a UUID. There's no authentication yet (see
 | POST | `/api/items/{id}/clips` | `{start, end}`: make a clip between two marks, in either order (to 0.1 s, kept inside the video, at least 0.5 s long). Returns the clips; 400 with the reason if it can't be made. |
 | DELETE | `/api/items/{id}/clips/{clip}` | Delete a clip. Returns the clips left. |
 | POST | `/api/items/{id}/mp4-copy` | Start making an MP4 copy (202, returns `{state, progress, error}`); 409 if it has one or wouldn't be helped by one, 507 without the disk space. `GET /api/items/{id}` shows `can_copy`, `copy_size` (bytes, once there's a current copy) and `copy_job` (while one is queued or being made, or why it failed). |
+| GET | `/api/copies` | The Copies page: `jobs` (running, then waiting with their `place` in line, then failed), `copies` (every copy, newest first: its video, `copy_size`, `made_at`, `current`) and `totals`. |
 | DELETE | `/api/items/{id}/mp4-copy` | Stop the copy being made, or remove the copy: the original plays again. |
 | DELETE | `/api/items/{id}/image` | Remove the uploaded picture (the NAS one, if any, shows again). |
 | POST | `/api/items/{id}/tags` | `{name}`: tag the video. Returns its tags. |
@@ -808,9 +815,9 @@ version); bump `THUMBS` when the server changes how thumbnails are made.
 ### Tests
 
 ```sh
-uv run pytest              # backend: 664 tests
+uv run pytest              # backend: 668 tests
 node --test tests/js/      # frontend: 48 tests
-uv run pytest -m browser   # browser: 29 tests (about 3 minutes; needs Chromium and ffmpeg)
+uv run pytest -m browser   # browser: 30 tests (about 3 minutes; needs Chromium and ffmpeg)
 scripts/docker-smoke.sh    # builds the image and checks it end to end (needs Docker)
 ```
 
@@ -891,6 +898,7 @@ reel/
     vendor/          hls.js (light build, Apache-2.0)
     manage.js        Libraries page, folder picker
     tags.js          Tags page
+    copies.js        Copies page: MP4 copies being made, waiting, failed and made
     imagedialog.js   the shared "photo or URL" dialog
     style.css        app styles;  player.css  player styles
     fonts/           Inter (SIL Open Font License)

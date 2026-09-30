@@ -33,7 +33,7 @@ def test_live_schema(tmp_path):
                         "container", "video_codec", "audio_codec", "pix_fmt", "width", "height", "duration",
                         "interlaced", "probe_error", "custom_image", "missing_since", "scanned_at", "fingerprint",
                         "probe_version", "parent_dir", "title_key", "poster_rev", "path_key", "mp4_copy", "mp4_copy_of",
-                        "mp4_copy_size"],
+                        "mp4_copy_size", "mp4_copy_at"],
         "tags": ["id", "uid", "name", "created_at", "image_version"],
         "item_tags": ["item_id", "tag_id", "added_at"],
         "folder_images": ["uid", "library_id", "rel_dir", "version"],

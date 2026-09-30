@@ -31,7 +31,7 @@ const rerender = () => window.dispatchEvent(new HashChangeEvent("hashchange"));
 
 /** A video's picture: one you uploaded (or snapped in the player), else its image
  *  on the NAS, else null (placeholder). */
-function videoImageSrc(item) {
+export function videoImageSrc(item) {
   if (item.custom_image) return `/api/items/${item.id}/thumb?${THUMBS}&v=${item.custom_image}`;
   // The poster's version (from the last scan) is in the URL, so the browser can keep it for good.
   if (item.has_poster) return `/api/items/${item.id}/thumb?${THUMBS}${item.poster_rev ? `&v=${item.poster_rev}` : ""}`;
