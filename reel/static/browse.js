@@ -2,7 +2,7 @@
 import { api, artBox, encodePath, fill, formatDuration, formatSize, h, parseTags, pathBelow, plural, tagError } from "./api.js";
 import { openImageDialog } from "./imagedialog.js";
 import { capabilities, capsQuery, hlsSupport } from "./caps.js";
-import { clipCard, clipPageUrl } from "./clips.js";
+import { clipCard, clipPageUrl, confirmDelete } from "./clips.js";
 
 const SORT_KEY = "reel.sort";
 
@@ -706,6 +706,84 @@ export function listNav(around, list) {
   );
 }
 
+/**
+ * The video's MP4 copy (see copies.py): a button to make one where it would make
+ * the video play directly, its progress while it's made, and once it's there,
+ * a note and Remove. Returns { button, section, stop }: the button goes with Play,
+ * the section below; stop() ends the polling when the page is left.
+ */
+function mp4Copy(item) {
+  const error = h("p", { class: "error", hidden: true, role: "alert" });
+  const button = h("button", { type: "button", class: "btn edit-link", hidden: true, onclick: make },
+    "Make MP4 copy");
+  button.title = "Copy the video into a real MP4 in Reel's data folder, so it plays directly (the file on the NAS is untouched)";
+  const section = h("section", { class: "tags-section copy-section", hidden: true });
+  let timer = null;
+
+  const showError = (message) => {
+    error.textContent = message || "";
+    error.hidden = !message;
+  };
+
+  async function make() {
+    button.disabled = true;
+    showError();
+    try {
+      show(await api("POST", `/api/items/${item.id}/mp4-copy`));
+    } catch (err) {
+      button.disabled = false;
+      showError(err.message);
+    }
+  }
+
+  async function remove() {
+    const what = item.copy_size ? "The video plays from the file on the NAS again." : "The copy being made is stopped.";
+    if (!(await confirmDelete("Remove the MP4 copy?", `${what} The file on the NAS is not touched.`))) return;
+    try {
+      await api("DELETE", `/api/items/${item.id}/mp4-copy`);
+      rerender();
+    } catch (err) {
+      showError(err.message);
+    }
+  }
+
+  // Poll while a copy is made; once it's done, the page is shown again (it now plays the copy).
+  async function poll() {
+    try {
+      const fresh = await api("GET", `/api/items/${item.id}`);
+      if (!fresh.copy_job) return rerender();
+      show(fresh.copy_job);
+    } catch (err) {
+      showError(err.message);
+      timer = setTimeout(poll, 3000);
+    }
+  }
+
+  function show(job) {
+    clearTimeout(timer);
+    button.hidden = !item.can_copy || Boolean(item.copy_size);
+    if (job && (job.state === "queued" || job.state === "running")) {
+      button.disabled = true;
+      button.textContent = job.state === "queued" ? "Waiting to copy…" : `Making MP4 copy… ${Math.floor(job.progress * 100)}%`;
+      timer = setTimeout(poll, 1000);
+    } else {
+      button.disabled = false;
+      button.textContent = job?.state === "error" ? "Try the MP4 copy again" : "Make MP4 copy";
+      showError(job?.state === "error" ? `The MP4 copy failed: ${job.error}` : null);
+    }
+    section.hidden = !item.copy_size;
+    if (item.copy_size) {
+      fill(section,
+        h("div", { class: "section-head" }, h("h3", {}, "MP4 copy"),
+          h("button", { type: "button", class: "text-btn", onclick: remove, title: "Play the file on the NAS again" }, "Remove")),
+        h("p", { class: "copy-note" }, `Plays from an MP4 copy in Reel's data folder (${formatSize(item.copy_size)}), not the file on the NAS.`));
+    }
+  }
+
+  show(item.copy_job);
+  return { button, section, error, stop: () => clearTimeout(timer) };
+}
+
 /** A video's page. `list`: the folder whose "Show all" list it was opened from
  *  (prev/next buttons), or null. */
 export async function renderItem(view, itemId, list = null) {
@@ -733,6 +811,7 @@ export async function renderItem(view, itemId, list = null) {
         ),
   ];
   const playable = item.play_mode !== "unsupported" && !item.missing;
+  const copy = mp4Copy(item);
   const playHref = playUrl(item.id, around ? list : null);
   const facts = [
     ["Length", formatDuration(item.duration) || "unknown"],
@@ -774,12 +853,16 @@ export async function renderItem(view, itemId, list = null) {
             : h("button", { class: "btn primary play", disabled: true }, "▶ Play"),
           playable && item.duration > 0 &&
             h("a", { class: "btn edit-link", href: `#/edit/${item.id}`, title: "Make clips of this video" }, "Edit video"),
+          copy.button,
         ),
+        copy.error,
+        copy.section,
         tagEditor(item),
         marksSection(item, around ? list : null),
         h("dl", { class: "facts" }, facts.map(([k, v]) => [h("dt", {}, k), h("dd", {}, v)])),
       ),
     ),
   );
+  return () => copy.stop();
 }
 

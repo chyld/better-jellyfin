@@ -171,3 +171,28 @@ def test_back_to_a_long_list_returns_to_the_same_video(server, page):
     page.js("history.back()")
     page.wait_for(f"location.hash.endsWith('?all') && window.scrollY === {before}", message="back at the same spot")
     assert page.js(on_screen) == seen
+
+
+def test_making_and_removing_an_mp4_copy(server, page):
+    """Make MP4 copy on a video in the wrong container: progress, then the page plays
+    the copy directly; Remove (after a question) plays the original again."""
+    video = server.videos["remux.mkv"]
+    page.goto(f"{server.base}/#/item/{video}")
+    page.wait_for("!!document.querySelector('.pill.mode')", message="the video's page")
+    assert page.js("document.querySelector('.pill.mode').textContent") == "Quick repackage"
+    assert page.js("document.querySelector('.copy-section').hidden")
+    button = "[...document.querySelectorAll('.detail-actions .btn')].find(b => b.textContent.includes('MP4'))"
+    assert page.js(f"{button}.textContent") == "Make MP4 copy"
+    page.js(f"{button}.click()")
+    page.wait_for("!document.querySelector('.copy-section').hidden", timeout=60, message="the copy")
+    assert page.js("document.querySelector('.pill.mode').textContent") == "Direct play"
+    assert page.js(f"{button} === undefined || {button}.hidden")
+    assert "Plays from an MP4 copy" in page.js("document.querySelector('.copy-note').textContent")
+    assert server.call("GET", f"/api/items/{video}/plan")["delivery"] == "file"
+
+    page.js("document.querySelector('.copy-section .text-btn').click()")
+    page.wait_for("!!document.querySelector('dialog.confirm-dialog[open]')", message="the question")
+    page.js("document.querySelector('dialog.confirm-dialog .btn.danger').click()")
+    page.wait_for("document.querySelector('.copy-section').hidden && "
+                  "document.querySelector('.pill.mode').textContent === 'Quick repackage'", message="the original again")
+    assert server.call("GET", f"/api/items/{video}/plan")["delivery"] == "progressive"

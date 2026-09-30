@@ -5,6 +5,7 @@ Everything here comes from the database, so browsing never touches the NAS.
 import sqlite3
 from pathlib import PurePosixPath
 
+from . import copies
 from .catalog import NotFound, clean_dir, descendants, page_bounds
 from .clips import clip_fields
 from .plan import Capabilities, plan
@@ -41,7 +42,9 @@ def video_type(container: str | None, rel_path: str) -> str | None:
 def item_out(row: sqlite3.Row, caps: Capabilities | None = None, hls_support: str = "none") -> dict:
     """A video for a list or its page. With the viewer's `caps` (and how it plays
     HLS), also `play_mode`: how that browser will play it (see plan.py), which
-    colours its card, and matches what its page says."""
+    colours its card, and matches what its page says. A video with a current MP4
+    copy is the copy: its format is MP4, and it plays as one (see copies.py)."""
+    facts = copies.facts(row)
     out = {
         "id": row["uid"],
         "title": row["title"],
@@ -53,10 +56,10 @@ def item_out(row: sqlite3.Row, caps: Capabilities | None = None, hls_support: st
         "poster_rev": row["poster_rev"],                # its version (in its thumbnail's URL)
         "custom_image": row["custom_image"],            # version of an uploaded one, if any
         "rel_path": row["rel_path"],                    # its path in the library, file name included
-        "type": video_type(row["container"], row["rel_path"]),
+        "type": video_type(facts["container"], facts["rel_path"]),
     }
     if caps is not None:
-        out["play_mode"] = plan(row, caps, hls_support).mode
+        out["play_mode"] = plan(facts, caps, hls_support).mode
     return out
 
 
@@ -366,4 +369,6 @@ def item_detail(conn: sqlite3.Connection, item_uid: str) -> dict:
         "interlaced": bool(row["interlaced"]),
         "probe_error": row["probe_error"],
         "missing": row["missing_since"] is not None,
+        "can_copy": copies.can_copy(row),                          # an MP4 copy would play it directly
+        "copy_size": row["mp4_copy_size"] if copies.is_current(row) else None,   # it has one (bytes)
     }

@@ -59,6 +59,11 @@ class Settings:
         return self.data_dir / "hls"
 
     @property
+    def copies_dir(self) -> Path:
+        """MP4 copies of videos in the wrong container (see copies.py)."""
+        return self.data_dir / "copies"
+
+    @property
     def images_dir(self) -> Path:
         """Uploaded images: images/tags, images/videos and images/folders."""
         return self.data_dir / "images"

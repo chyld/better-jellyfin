@@ -25,6 +25,7 @@ ffmpeg converts on the fly.
   - [Titles](#titles)
   - [Pictures](#pictures)
   - [Playback](#playback)
+  - [MP4 copies](#mp4-copies)
   - [Tags](#tags)
   - [Uploaded images](#uploaded-images)
   - [IDs and URLs](#ids-and-urls)
@@ -70,6 +71,10 @@ ffmpeg converts on the fly.
   and again where it ends, then **Make clip**. Clips (Clip 1, Clip 2...) are listed on the
   edit page and after their video in its folder, and each plays just its stretch. The
   file itself is never changed.
+- **MP4 copies.** A video whose tracks are fine but whose container isn't (an MPEG-TS saved as
+  `.mp4`, an MKV) is repackaged live on every play. **Make MP4 copy** on its page copies it once
+  into a real MP4 in the data folder, and from then on it plays from the copy, directly. See
+  [MP4 copies](#mp4-copies).
 - **Snap a preview.** The camera button in the player (or **P**) makes the frame on screen the
   video's picture, replacing any it had.
 - **Pictures from your files.** `movie.png` beside `movie.mp4` and `folder.png` in a folder are
@@ -192,7 +197,7 @@ permissions. The usual cause is a `./data` that Docker created owned by root.
 | Home | `#/` | Library tiles, and a card for every tag. |
 | Library / folder | `#/library/<library-uuid>/<folder path>` | Subfolders as posters, then videos, each followed by its clips. Breadcrumbs and a Name/Year sort. |
 | Show all | `#/library/<library-uuid>/<folder path>?all` | Every video in the folder and its subfolders, each with its path from that folder down (file name included), sorted by that path, and each followed by its clips. **Show folders** goes back. |
-| Video | `#/item/<video-uuid>` | Picture, title, pills (year, length, resolution, play mode), **Play**, **Edit video**, tags, marks and file details. Opened from a Show all list (`?all=<folder path>`), also prev/next through it. |
+| Video | `#/item/<video-uuid>` | Picture, title, pills (year, length, resolution, play mode), **Play**, **Edit video**, **Make MP4 copy** (where it helps), tags, marks and file details. Opened from a Show all list (`?all=<folder path>`), also prev/next through it. |
 | Clip | `#/clip/<clip-uuid>` | A clip's first frame, name, length and times, **Play** (just the clip), **Go to video** and **Delete**. Opened from a Show all list, also prev/next through it. |
 | Edit video | `#/edit/<video-uuid>` | The video with a timeline, **Mark**, **Clear marks** and **Make clip**, then its clips. See [Making clips](#making-clips). |
 | Player | `#/play/<video-uuid>` | Full-window player. `?t=<seconds>` starts there; `?clip=<clip-uuid>` plays just that clip (its back button goes to the clip's page). |
@@ -504,6 +509,34 @@ Details:
   of an empty video. A file missing from the NAS gives "The video file is missing. Is the NAS
   connected?"
 
+### MP4 copies
+
+Some files hold tracks the browser plays in a container it can't open, most often an MPEG
+transport stream saved as `.mp4` (its card says **TS**, in blue). Those are repackaged by ffmpeg
+on every play, and every seek starts ffmpeg again. An MP4 copy fixes that once:
+
+- **Make MP4 copy** on the video's page is offered only where it helps: when the video isn't played
+  directly now, but would be as an MP4 (in a typical browser). Converted videos (amber) aren't
+  offered one: their video would have to be re-encoded.
+- ffmpeg copies both tracks **untouched** into an MP4 with its index at the front (`+faststart`),
+  in the background, one video at a time. The button shows the progress; it's quick, since
+  nothing is re-encoded (mostly the time to read the file from the NAS). The copy is about the
+  size of the original, and needs twice that free (ffmpeg moves the index at the end) on top of
+  `REEL_MIN_FREE_MB`, or it isn't started ("not enough free disk space", HTTP 507). A copy running
+  when the disk falls below the reserve is stopped.
+- It's saved as `copies/<video uuid>-<version>.mp4` in the data folder. **Nothing is written to
+  the NAS.**
+- While the copy is **current**, the video *is* the copy: its card says MP4 (green), its page says
+  "Direct play" and "Plays from an MP4 copy", and the player gets the copy's bytes, with native
+  seeking. Everything else stays the video's: its id, tags, marks, clips and pictures.
+- A copy is current while the video file is the one it was made from (the size and modification
+  time the last scan recorded). A file replaced on the NAS makes it stale once a scan sees that:
+  the original plays again, and the copy is deleted. A moved or renamed file keeps its copy.
+- **Remove** (on the video's page, after a question) plays the original again. A removed copy's
+  file is deleted by the clean-up an hour later (a play may still be reading it), like a replaced
+  picture; copies of a video or library removed from Reel go the same way. `/api/health` shows how
+  many copies there are and their size.
+
 ### Tags
 
 - A video can have **any number of tags**.
@@ -599,6 +632,7 @@ data/
 ├── thumbs/             cached thumbnails of NAS pictures and clips' pictures (safe to delete; they're remade)
 │   └── ab/abcdef….jpg
 ├── hls/                HLS segments being served (emptied at startup)
+├── copies/             MP4 copies of videos in the wrong container (<video uuid>-<version>.mp4)
 └── images/             pictures you uploaded (and frames snapped in the player)
     ├── tags/<tag uuid>-<version>.jpg
     ├── videos/<video uuid>-<version>.jpg
@@ -610,7 +644,8 @@ data/
   are saved with `synchronous=FULL`, so they survive a power cut too. Scans save with
   `synchronous=NORMAL` (no disk flush per file): a power cut may roll back recent scan results,
   which just means those files are probed again on the next scan.
-- **Back up** `reel.db` and `images/`. `thumbs/` and `hls/` are only caches. Don't copy
+- **Back up** `reel.db` and `images/`. `thumbs/` and `hls/` are only caches. `copies/` can be
+  made again from the NAS; a backup without it just plays those videos from the NAS until you do. Don't copy
   `reel.db` while Reel runs: recent changes can still be in `reel.db-wal`, so the copy may miss
   them. Either:
   - **stop Reel first** (simplest and fully consistent):
@@ -721,6 +756,8 @@ JSON over HTTP. Every ID is a UUID. There's no authentication yet (see
 | GET | `/api/clips/{clip}/neighbors?path=` | As for a video: where the clip is in the Show all list of folder `path`. |
 | POST | `/api/items/{id}/clips` | `{start, end}`: make a clip between two marks, in either order (to 0.1 s, kept inside the video, at least 0.5 s long). Returns the clips; 400 with the reason if it can't be made. |
 | DELETE | `/api/items/{id}/clips/{clip}` | Delete a clip. Returns the clips left. |
+| POST | `/api/items/{id}/mp4-copy` | Start making an MP4 copy (202, returns `{state, progress, error}`); 409 if it has one or wouldn't be helped by one, 507 without the disk space. `GET /api/items/{id}` shows `can_copy`, `copy_size` (bytes, once there's a current copy) and `copy_job` (while one is queued or being made, or why it failed). |
+| DELETE | `/api/items/{id}/mp4-copy` | Stop the copy being made, or remove the copy: the original plays again. |
 | DELETE | `/api/items/{id}/image` | Remove the uploaded picture (the NAS one, if any, shows again). |
 | POST | `/api/items/{id}/tags` | `{name}`: tag the video. Returns its tags. |
 | DELETE | `/api/items/{id}/tags/{tag}` | Untag. Returns its remaining tags. |
@@ -738,7 +775,7 @@ JSON over HTTP. Every ID is a UUID. There's no authentication yet (see
 
 **Other:** `GET /api/me` returns the current user (for now, always the built-in local user).
 `GET /api/health` returns `{"ok", "database", "ffmpeg", "ffprobe", "streams": {"active", "limit"}, "hls":
-{"sessions", "cache_mb", "target_mb"}, "disk": {"free_mb", "reserve_mb", "low"}}`. It answers **503**
+{"sessions", "cache_mb", "target_mb"}, "disk": {"free_mb", "reserve_mb", "low"}, "copies": {"count", "mb"}}`. It answers **503**
 with `ok: false` when the database doesn't answer or ffmpeg or ffprobe is missing, so Docker marks
 the container unhealthy. (A disk below the reserve is reported, but doesn't make it unhealthy.) The tools' versions are checked once, at
 startup (with a time limit), not on every poll. It's used by the Docker health check and kept
@@ -771,9 +808,9 @@ version); bump `THUMBS` when the server changes how thumbnails are made.
 ### Tests
 
 ```sh
-uv run pytest              # backend: 650 tests
+uv run pytest              # backend: 664 tests
 node --test tests/js/      # frontend: 48 tests
-uv run pytest -m browser   # browser: 28 tests (about 3 minutes; needs Chromium and ffmpeg)
+uv run pytest -m browser   # browser: 29 tests (about 3 minutes; needs Chromium and ffmpeg)
 scripts/docker-smoke.sh    # builds the image and checks it end to end (needs Docker)
 ```
 
@@ -827,6 +864,7 @@ reel/
   hls.py             HLS playlists and on-demand segment encoding
   playback.py        ffmpeg commands for remux/convert; streaming and killing ffmpeg
   images.py          shrinking/cropping thumbnails; processing uploads
+  copies.py          MP4 copies of videos in the wrong container: making, playing, cleaning up
   pictures.py        your pictures for tags, videos and folders: one way to set, remove and clean up
   thumbnails.py      pictures on cards (NAS pictures, clips' frames): finding, thumbnailing (limited),
                      and after-scan warming/cleanup

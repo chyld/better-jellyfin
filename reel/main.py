@@ -17,7 +17,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import browse, catalog, clips, fetch, hls, libraries, marks, pictures, playback, tags, users
+from . import browse, catalog, clips, copies, fetch, hls, libraries, marks, pictures, playback, tags, users
 from .paths import OutsideRoot, resolve_inside
 from .plan import HLS_SUPPORT, Capabilities, Plan, plan as make_plan
 from .config import DataLock, Settings
@@ -102,11 +102,18 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
                             low_on_disk=settings.low_on_disk)
     hls_sessions = hls.HlsManager(settings.hls_dir, streams, cache_limit=settings.hls_cache_mb * 1024**2,
                                   low_on_disk=settings.low_on_disk)
-    # Pictures whose video, folder or tag is gone are cleaned up after every scan
-    # (and at startup). Once the scan queue runs dry, thumbnails of old picture
-    # versions are deleted and missing ones made, giving way to new scans, to
-    # anyone watching, and to shutdown.
-    scans.after_scan = lambda conn: pictures.prune(conn, settings.images_dir)
+    copier = copies.CopyManager(settings.db_path, settings.copies_dir, room=lambda: not settings.low_on_disk())
+
+    def prune_files(conn: sqlite3.Connection) -> None:
+        """Pictures whose video, folder or tag is gone, and MP4 copies no longer
+        current or wanted."""
+        pictures.prune(conn, settings.images_dir)
+        copies.prune(conn, settings.copies_dir)
+
+    # Files nobody needs are cleaned up after every scan (and at startup). Once the
+    # scan queue runs dry, thumbnails of old picture versions are deleted and
+    # missing ones made, giving way to new scans, to anyone watching, and to shutdown.
+    scans.after_scan = prune_files
 
     def after_batch(library_ids: list[int], should_stop) -> bool:
         thumbnails.prune()
@@ -124,10 +131,11 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
             conn = connect(settings.db_path)
             try:
                 pictures.adopt_unversioned_files(conn, settings.images_dir)
-                pictures.prune(conn, settings.images_dir)
+                prune_files(conn)
             finally:
                 conn.close()
             hls_sessions.start()
+            copier.clean_up_partials()
             tools.update(ffmpeg=tool_version("ffmpeg"), ffprobe=tool_version("ffprobe"))
             for name, version in tools.items():
                 if version is None:
@@ -141,6 +149,7 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
     async def lifespan(app: FastAPI):
         lock = await run_in_threadpool(startup)
         scans.start()
+        copier.start()
         housekeeping = asyncio.create_task(hls_sessions.run_housekeeping())
         try:
             yield
@@ -149,6 +158,7 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
             with contextlib.suppress(asyncio.CancelledError):
                 await housekeeping
             await hls_sessions.shutdown()
+            await copier.shutdown()
             await streams.shutdown()
             thumbs.stop()   # a thumbnail being made after a scan ends now too
             # A scan stops between files; wait for it off the event loop.
@@ -164,6 +174,7 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
     app.state.hls = hls_sessions
     app.state.watching = watching
     app.state.thumbnails = thumbnails
+    app.state.copies = copier
 
     def get_db() -> Iterator[sqlite3.Connection]:
         conn = connect(settings.db_path)
@@ -273,7 +284,53 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
     def get_item(item_uid: str, conn: sqlite3.Connection = Db):
         item = browse.item_detail(conn, item_uid)
         return {**item, "tags": tags.item_tags(conn, tags.item_pk(conn, item_uid)),
-                "marks": marks.list_marks(conn, item_uid), "clips": clips.list_clips(conn, item_uid)}
+                "marks": marks.list_marks(conn, item_uid), "clips": clips.list_clips(conn, item_uid),
+                "copy_job": copier.status(item_uid)}
+
+    # ---- MP4 copies (see copies.py) ----
+
+    def copy_job(item_uid: str) -> copies.Job:
+        """Check a copy can be made of the video now, and what it's made from."""
+        conn = connect(settings.db_path)
+        try:
+            row = conn.execute("SELECT * FROM media_items WHERE uid = ?", (item_uid,)).fetchone()
+            if row is None:
+                raise HTTPException(404, "Video not found.")
+            if copies.is_current(row):
+                raise HTTPException(409, "This video already has an MP4 copy.")
+            if not copies.can_copy(row):
+                raise HTTPException(409, "This video doesn't need an MP4 copy: a copy wouldn't make it play directly.")
+            src = original_file(conn, row)
+        finally:
+            conn.close()
+        # Room for the copy (and a second one while ffmpeg moves its index to the
+        # front), on top of the free-space reserve.
+        free = settings.free_bytes()
+        needed = 2 * row["size"] + settings.min_free_mb * 1024 * 1024
+        if free is not None and free < needed:
+            raise HTTPException(507, f"There isn't enough free disk space for an MP4 copy of this video "
+                                     f"(it needs about {row['size'] * 2 / 1024**3:.1f} GB).")
+        return copies.Job(item_uid, src, row["duration"], row["audio_codec"], catalog.video_rev(row["size"], row["mtime"]))
+
+    @app.post("/api/items/{item_uid}/mp4-copy", status_code=202)
+    async def make_copy(item_uid: str):
+        """Start making an MP4 copy of the video (in the background). Returns its status."""
+        return copier.request(await run_in_threadpool(copy_job, item_uid))
+
+    @app.delete("/api/items/{item_uid}/mp4-copy", status_code=204)
+    async def remove_copy(item_uid: str):
+        """Stop a copy being made, or remove the one there is: the original plays again."""
+        copier.cancel(item_uid)
+
+        def forget() -> None:
+            conn = connect(settings.db_path)
+            try:
+                copies.remove(conn, settings.copies_dir, item_uid)
+            finally:
+                conn.close()
+
+        await run_in_threadpool(forget)
+        return Response(status_code=204)
 
     @app.get("/api/items/{item_uid}/neighbors")
     def get_neighbors(item_uid: str, path: str = "", conn: sqlite3.Connection = Db):
@@ -427,20 +484,32 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
         return {"custom_image": version}
 
     def media_file(conn: sqlite3.Connection, item_uid: str) -> tuple[sqlite3.Row, Path]:
+        """The video's row and the file to play: its current MP4 copy, if it has
+        one (see copies.py), else the original on the NAS."""
         row = conn.execute("SELECT * FROM media_items WHERE uid = ?", (item_uid,)).fetchone()
         if row is None:
             raise HTTPException(404, "Video not found.")
+        copy = copies.current_file(settings.copies_dir, row)
+        if copy is not None and copy.is_file():
+            return row, copy
+        return row, original_file(conn, row)
+
+    def original_file(conn: sqlite3.Connection, row: sqlite3.Row) -> Path:
         path = library_file(conn, row["library_id"], row["rel_path"])
         if not path.is_file():
             raise HTTPException(404, "The video file is missing. Is the NAS connected?")
-        return row, path
+        return path
+
+    def playing_facts(row: sqlite3.Row, path: Path):
+        """What to plan from: the copy's facts when it's the copy that's played."""
+        return copies.as_copied(row) if path.parent == settings.copies_dir else row
 
     @app.get("/api/items/{item_uid}/file", operation_id="get_item_file")
     @app.head("/api/items/{item_uid}/file", operation_id="head_item_file")
     def get_item_file(item_uid: str, conn: sqlite3.Connection = Db):
         """The original file, with range requests so the browser can seek."""
         row, path = media_file(conn, item_uid)
-        return playback.WatchedFile(path, media_type=playback.direct_content_type(row["rel_path"]),
+        return playback.WatchedFile(path, media_type=playback.direct_content_type(playing_facts(row, path)["rel_path"]),
                                     watching=watching)
 
     def stream_source(item_uid: str) -> tuple[sqlite3.Row, Path]:
@@ -466,7 +535,7 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
         if hls_support not in HLS_SUPPORT:
             hls_support = "none"
         caps = Capabilities.from_query(video, audio)
-        p = make_plan(row, caps, hls_support)
+        p = make_plan(copies.facts(row), caps, hls_support)
         query = urlencode({"video": ",".join(sorted(caps.video)), "audio": ",".join(sorted(caps.audio))})
         url = {
             "file": f"/api/items/{item_uid}/file",
@@ -481,7 +550,7 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
     async def hls_session_for(item_uid: str, caps: Capabilities, hls_support: str) -> tuple[str, float]:
         """Open (or find) the HLS session for this video and browser: (its id, the length)."""
         row, path = await run_in_threadpool(stream_source, item_uid)
-        p = make_plan(row, caps, hls_support)
+        p = make_plan(playing_facts(row, path), caps, hls_support)
         if p.mode == "unsupported":
             raise HTTPException(409, "This video can't be played.")
         if not row["duration"]:
@@ -544,7 +613,7 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
         # The database and the NAS can be slow: keep them off the event loop.
         watching.saw_playback()
         row, path = await run_in_threadpool(stream_source, item_uid)
-        p = make_plan(row, Capabilities.from_query(video, audio))
+        p = make_plan(playing_facts(row, path), Capabilities.from_query(video, audio))
         if p.mode == "unsupported":
             raise HTTPException(409, "This video can't be played.")
         if not p.streamed:
@@ -599,6 +668,16 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
         return {"free_mb": None if free is None else round(free / 1024**2), "reserve_mb": settings.min_free_mb,
                 "low": settings.low_on_disk()}
 
+    def mp4_copies() -> dict | None:
+        try:
+            conn = connect(settings.db_path)
+            try:
+                return copies.totals(conn)
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            return None
+
     @app.get("/api/health")
     def health():
         """For Docker's health check (503 when not ready): the database answers,
@@ -624,6 +703,7 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
             "streams": {"active": len(streams.active), "limit": settings.max_streams},
             "hls": hls_sessions.status(),
             "disk": disk_status(),
+            "copies": mp4_copies(),
         }
         return JSONResponse(body, status_code=200 if ready else 503)
 
@@ -654,12 +734,13 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
             raise HTTPException(409, "Wait for the scan to finish before removing this library.")
         try:
             pictures.retire_library(conn, settings.images_dir, library_id)   # first, as for any picture
+            copies.retire_library(conn, settings.copies_dir, library_id)
             libraries.delete_library(conn, library_id)
         except BaseException:
             scans.unclaim(library_id)
             raise
         scans.forget(library_id)
-        pictures.prune(conn, settings.images_dir)
+        prune_files(conn)
         return Response(status_code=204)
 
     @app.post("/api/libraries/scan", status_code=202)

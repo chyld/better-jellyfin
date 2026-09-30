@@ -348,6 +348,15 @@ def _v13_unique_clip_numbers(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE UNIQUE INDEX clips_item ON clips (item_id, number)")
 
 
+def _v14_mp4_copies(conn: sqlite3.Connection) -> None:
+    # An MP4 copy of a video, kept in the data folder (for tracks in the wrong
+    # container, e.g. MPEG-TS named .mp4) and played instead of the file on the NAS
+    # while it's current: see copies.py.
+    conn.execute("ALTER TABLE media_items ADD COLUMN mp4_copy TEXT")         # names its file: copies/<uid>-<mp4_copy>.mp4
+    conn.execute("ALTER TABLE media_items ADD COLUMN mp4_copy_of TEXT")      # the video file's version it was made from
+    conn.execute("ALTER TABLE media_items ADD COLUMN mp4_copy_size INTEGER")
+
+
 # (version, what it does, function). Append only; functions must not commit.
 MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (2, "fingerprints and probe versions for media items", _v2_identity),
@@ -362,6 +371,7 @@ MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (11, "ranges: stretches of a video to skip, keep as clips, or just mark", _v11_ranges),
     (12, "clips only: numbered clips replace ranges", _v12_clips),
     (13, "a video's clip numbers are unique", _v13_unique_clip_numbers),
+    (14, "MP4 copies of videos in the wrong container", _v14_mp4_copies),
 ]
 
 

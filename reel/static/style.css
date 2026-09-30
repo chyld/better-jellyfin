@@ -322,6 +322,9 @@ a.chip:hover, .chip:has(a:hover) { border-color: rgb(56 189 248 / 0.5); backgrou
 .text-btn:hover, .text-btn:focus-visible { color: var(--text); }
 .text-btn[aria-pressed="true"] { color: #fbbf24; }
 .marks .chip a { font-variant-numeric: tabular-nums; }
+.copy-section[hidden], .btn[hidden] { display: none; }
+.copy-note { margin: 0; color: var(--muted); font-size: 14px; }
+.detail-actions + .error { margin-top: 12px; }
 .tag-add { display: flex; gap: 8px; margin-bottom: 8px; }
 .tag-add input { flex: 1; min-width: 0; }
 
