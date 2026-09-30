@@ -43,8 +43,8 @@ def item_out(row: sqlite3.Row, caps: Capabilities | None = None, hls_support: st
     """A video for a list or its page. With the viewer's `caps` (and how it plays
     HLS), also `play_mode`: how that browser will play it (see plan.py), which
     colours its card, and matches what its page says. A video with a current MP4
-    copy is the copy: its format is MP4, and it plays as one (see copies.py)."""
-    facts = copies.facts(row)
+    copy plays as the copy (see copies.py), but its format is still the file's own,
+    with `has_copy` saying it has one."""
     out = {
         "id": row["uid"],
         "title": row["title"],
@@ -56,10 +56,11 @@ def item_out(row: sqlite3.Row, caps: Capabilities | None = None, hls_support: st
         "poster_rev": row["poster_rev"],                # its version (in its thumbnail's URL)
         "custom_image": row["custom_image"],            # version of an uploaded one, if any
         "rel_path": row["rel_path"],                    # its path in the library, file name included
-        "type": video_type(facts["container"], facts["rel_path"]),
+        "type": video_type(row["container"], row["rel_path"]),   # the file's real format, copy or not
+        "has_copy": copies.is_current(row),                        # it plays from an MP4 copy
     }
     if caps is not None:
-        out["play_mode"] = plan(facts, caps, hls_support).mode
+        out["play_mode"] = plan(copies.facts(row), caps, hls_support).mode
     return out
 
 

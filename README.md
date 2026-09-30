@@ -527,9 +527,10 @@ on every play, and every seek starts ffmpeg again. An MP4 copy fixes that once:
   when the disk falls below the reserve is stopped.
 - It's saved as `copies/<video uuid>-<version>.mp4` in the data folder. **Nothing is written to
   the NAS.**
-- While the copy is **current**, the video *is* the copy: its card says MP4 (green), its page says
-  "Direct play" and "Plays from an MP4 copy", and the player gets the copy's bytes, with native
-  seeking. Everything else stays the video's: its id, tags, marks, clips and pictures.
+- While the copy is **current**, the video plays as the copy: the player gets the copy's bytes,
+  with native seeking, and its page says "Direct play". Its format is still shown as the file's own
+  (**TS**, **MKV**), now green, with a **COPY** badge beside it on its card and a **Copy** pill on
+  its page ("Plays from an MP4 copy"). Everything else stays the video's: its id, tags, marks, clips and pictures.
 - A copy is current while the video file is the one it was made from (the size and modification
   time the last scan recorded). A file replaced on the NAS makes it stale once a scan sees that:
   the original plays again, and the copy is deleted. A moved or renamed file keeps its copy.
@@ -731,7 +732,7 @@ JSON over HTTP. Every ID is a UUID. There's no authentication yet (see
 | DELETE | `/api/libraries/{id}` | Remove from Reel (409 while scanning). Files untouched. |
 | POST | `/api/libraries/{id}/scan` | Queue a scan (202). |
 | POST | `/api/libraries/scan` | Queue a scan of every library. |
-| GET | `/api/libraries/{id}/browse?path=&sort=name\|year&limit=&offset=&all=` | Subfolders and one page of the videos in a folder (`limit` defaults to 200, at most 500). `total_items` is how many videos the folder has. Each video is followed by its clips, as described for `all=true` below. With `all=true`: no subfolders, and every video in the folder and below it, sorted by path (`sort` is ignored), each followed by its clips (`kind: "clip"`, with `id`, `name`, `start`, `end`, and the video's `video_id`, `title` and `rel_path`); pages count videos only (a video comes with all its clips), `next_offset` is where the next page starts, and `total_clips` counts the list's clips. Every video has its `rel_path`, `type` (its real format, e.g. `MP4`, `TS`) and `play_mode`: pass `video=&audio=&hls_support=` as for `/plan` to get it for your browser (without them, a typical browser). |
+| GET | `/api/libraries/{id}/browse?path=&sort=name\|year&limit=&offset=&all=` | Subfolders and one page of the videos in a folder (`limit` defaults to 200, at most 500). `total_items` is how many videos the folder has. Each video is followed by its clips, as described for `all=true` below. With `all=true`: no subfolders, and every video in the folder and below it, sorted by path (`sort` is ignored), each followed by its clips (`kind: "clip"`, with `id`, `name`, `start`, `end`, and the video's `video_id`, `title` and `rel_path`); pages count videos only (a video comes with all its clips), `next_offset` is where the next page starts, and `total_clips` counts the list's clips. Every video has its `rel_path`, `type` (its real format, e.g. `MP4`, `TS`), `has_copy` (it plays from an [MP4 copy](#mp4-copies)) and `play_mode`: pass `video=&audio=&hls_support=` as for `/plan` to get it for your browser (without them, a typical browser). |
 | GET | `/api/libraries/{id}/folder-art?path=` | A folder's picture (NAS `folder.<ext>`, else uploaded). |
 | PUT | `/api/libraries/{id}/folder-image?path=` | Upload a folder picture (request body = the image). |
 | POST | `/api/libraries/{id}/folder-image-url?path=` | `{url}`: set a folder picture from a URL. |

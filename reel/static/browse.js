@@ -433,7 +433,7 @@ function videoCard(item, { from = "", list = null } = {}) {
       artBox({ kind: "video", shape: "landscape", src: videoImageSrc(item) }),
       h("div", { class: "label" }, item.title),
       h("div", { class: "sub where" }, pathBelow(item.rel_path, from)),
-      h("div", { class: "sub meta" }, meta && h("span", {}, meta), typeBadge(item)),
+      h("div", { class: "sub meta" }, meta && h("span", {}, meta), typeBadge(item), copyBadge(item)),
     ),
   );
 }
@@ -444,6 +444,12 @@ function typeBadge(item) {
   if (!item.type) return null;
   const [tone, label, text] = PLAY_MODES[item.play_mode] || ["", "", ""];
   return h("span", { class: `type-badge ${tone}`, title: label && `${label}: ${text}` }, item.type);
+}
+
+/** "COPY" beside the format of a video that plays from its MP4 copy (see copies.py). */
+function copyBadge(item) {
+  if (!item.has_copy) return null;
+  return h("span", { class: "type-badge copy", title: "Plays from an MP4 copy in Reel's data folder" }, "Copy");
 }
 
 function folderCard(libraryId, folder) {
@@ -802,6 +808,8 @@ export async function renderItem(view, itemId, list = null) {
     item.year && h("span", { class: "pill" }, item.year),
     item.duration && h("span", { class: "pill" }, formatDuration(item.duration)),
     item.height && h("span", { class: "pill" }, resolutionLabel(item)),
+    item.type && h("span", { class: "pill" }, item.type),
+    item.copy_size && h("span", { class: "pill copy", title: "Plays from an MP4 copy in Reel's data folder" }, "Copy"),
     item.missing
       ? h("span", { class: "pill mode err", title: "The last scan couldn't find this file. It's kept for a while in case it comes back." }, "Missing from the library")
       : h(

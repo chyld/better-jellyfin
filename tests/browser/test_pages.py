@@ -186,6 +186,13 @@ def test_making_and_removing_an_mp4_copy(server, page):
     page.js(f"{button}.click()")
     page.wait_for("!document.querySelector('.copy-section').hidden", timeout=60, message="the copy")
     assert page.js("document.querySelector('.pill.mode').textContent") == "Direct play"
+    assert page.js("document.querySelector('.pill.copy').textContent") == "Copy"
+    page.js(f"location.hash = '#/library/{server.library}'")                   # its card: MKV, plus COPY
+    page.wait_for("!!document.querySelector('.type-badge.copy')", message="the card")
+    assert page.js("document.querySelector('.type-badge.copy').closest('.meta').textContent").endswith("MKVCopy")
+    page.js("history.back()")
+    page.wait_for("!!document.querySelector('.copy-section') && !document.querySelector('.copy-section').hidden",
+                  message="the video's page again")
     assert page.js(f"{button} === undefined || {button}.hidden")
     assert "Plays from an MP4 copy" in page.js("document.querySelector('.copy-note').textContent")
     assert server.call("GET", f"/api/items/{video}/plan")["delivery"] == "file"

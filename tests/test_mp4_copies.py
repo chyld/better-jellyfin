@@ -92,7 +92,7 @@ def test_a_transport_stream_is_copied_into_a_real_mp4_and_played_from_it(client,
     assert client.get(plan["url"], headers={"Range": "bytes=0-99"}).status_code == 206
 
     card = next(i for i in client.get(f"/api/libraries/{videos['lib']}/browse").json()["items"] if i["id"] == video)
-    assert (card["type"], card["play_mode"]) == ("MP4", "direct")
+    assert (card["type"], card["has_copy"], card["play_mode"]) == ("TS", True, "direct")   # its own format, plus COPY
     assert [p.name for p in settings.copies_dir.iterdir()] == [f"{video}-{copy_version(settings, video)}.mp4"]
     assert client.get("/api/health").json()["copies"]["count"] == 1
     assert (videos["folder"] / "transport_stream.mp4").read_bytes()[:1] == b"G"        # the NAS file: untouched
