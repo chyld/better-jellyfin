@@ -222,3 +222,33 @@ def test_the_copies_page(server, page):
     page.js("document.querySelector('dialog.confirm-dialog .btn.danger').click()")
     page.wait_for("!!document.querySelector('.copies-made .empty')", message="the empty page again")
     assert server.call("GET", f"/api/items/{video}")["copy_size"] is None
+
+
+def test_making_english_subtitles(server, page):
+    """Make English subtitles on a video's page (a stand-in for Whisper here): its
+    progress on the button, then the finished subtitles on the page, with Download;
+    and on the Subtitles page, with Remove."""
+    import sys
+    from pathlib import Path
+    server.app.state.subtitles.worker = [sys.executable, str(Path(__file__).parent.parent / "fake_subtitle_worker.py")]
+    video = server.videos["direct.mp4"]
+    page.goto(f"{server.base}/#/item/{video}")
+    button = "[...document.querySelectorAll('.detail-actions .btn')].find(b => /subtitles/i.test(b.textContent))"
+    page.wait_for(f"!!({button})", message="the button")
+    assert page.js(f"{button}.textContent") == "Make English subtitles"
+    page.js(f"{button}.click()")
+    page.wait_for("[...document.querySelectorAll('.copy-section h3')].some(h => h.textContent === 'English subtitles')",
+                  message="the subtitles")
+    assert "from Japanese" in page.js("[...document.querySelectorAll('.copy-note')].map(p => p.textContent).join()")
+    assert page.js(f"!({button}) || {button}.hidden")
+    assert "cake" in server.call("GET", f"/api/items/{video}/subtitles.vtt").decode()
+
+    page.js("location.hash = '#/subtitles'")
+    page.wait_for("document.querySelectorAll('.subtitles-made .copy-row').length === 1", message="the list")
+    assert page.js("document.querySelector('.nav a.active').textContent") == "Subtitles"
+    assert page.js("document.querySelector('.subtitles-made .copy-status').textContent").startswith("English from Japanese")
+    page.js("document.querySelector('.subtitles-made .btn.danger').click()")
+    page.wait_for("!!document.querySelector('dialog.confirm-dialog[open]')", message="the question")
+    page.js("document.querySelector('dialog.confirm-dialog .btn.danger').click()")
+    page.wait_for("!!document.querySelector('.subtitles-made .empty')", message="none left")
+    assert server.call("GET", f"/api/items/{video}")["subtitles"] is None

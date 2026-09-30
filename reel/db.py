@@ -363,6 +363,25 @@ def _v15_mp4_copy_times(conn: sqlite3.Connection) -> None:
     conn.execute("ALTER TABLE media_items ADD COLUMN mp4_copy_at TEXT")
 
 
+def _v16_subtitles(conn: sqlite3.Connection) -> None:
+    # Subtitles made by Whisper (see subtitles.py): one file per video and language,
+    # in the data folder.
+    conn.execute(
+        """
+        CREATE TABLE subtitles (
+            id              INTEGER PRIMARY KEY,
+            item_id         INTEGER NOT NULL REFERENCES media_items(id) ON DELETE CASCADE,
+            language        TEXT NOT NULL,             -- the subtitles' language ('en')
+            source_language TEXT,                      -- what was spoken, as Whisper heard it
+            version         TEXT NOT NULL,             -- names the file: subtitles/<video uid>-<version>.<language>.vtt
+            model           TEXT NOT NULL,             -- the Whisper model that made them
+            made_at         TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE (item_id, language)
+        )
+        """
+    )
+
+
 # (version, what it does, function). Append only; functions must not commit.
 MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (2, "fingerprints and probe versions for media items", _v2_identity),
@@ -379,6 +398,7 @@ MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (13, "a video's clip numbers are unique", _v13_unique_clip_numbers),
     (14, "MP4 copies of videos in the wrong container", _v14_mp4_copies),
     (15, "when each MP4 copy was made", _v15_mp4_copy_times),
+    (16, "subtitles made by Whisper", _v16_subtitles),
 ]
 
 

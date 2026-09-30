@@ -3,6 +3,7 @@ import { api, artBox, encodePath, fill, formatDuration, formatSize, h, parseTags
 import { openImageDialog } from "./imagedialog.js";
 import { capabilities, capsQuery, hlsSupport } from "./caps.js";
 import { clipCard, clipPageUrl, confirmDelete } from "./clips.js";
+import { languageName, subtitleStatus } from "./subtitlespage.js";
 
 const SORT_KEY = "reel.sort";
 
@@ -790,6 +791,85 @@ function mp4Copy(item) {
   return { button, section, error, stop: () => clearTimeout(timer) };
 }
 
+/**
+ * English subtitles made by Whisper (see subtitles.py): a button to make them,
+ * what's happening while they're made, and once they're there, what they were
+ * made from, Download and Remove. Returns { button, section, error, stop } like mp4Copy().
+ */
+function subtitlesUi(item) {
+  const error = h("p", { class: "error", hidden: true, role: "alert" });
+  const button = h("button", { type: "button", class: "btn edit-link", hidden: true, onclick: make }, "Make English subtitles");
+  button.title = "Whisper listens to the video on this machine and writes English subtitles (translating what's said)";
+  const section = h("section", { class: "tags-section copy-section", hidden: true });
+  let timer = null;
+
+  const showError = (message) => {
+    error.textContent = message || "";
+    error.hidden = !message;
+  };
+
+  async function make() {
+    button.disabled = true;
+    showError();
+    try {
+      show(await api("POST", `/api/items/${item.id}/subtitles`));
+    } catch (err) {
+      button.disabled = false;
+      showError(err.message);
+    }
+  }
+
+  async function remove() {
+    const text = item.subtitles ? "The video itself is not touched." : "What's been made so far is thrown away.";
+    if (!(await confirmDelete(item.subtitles ? "Remove the subtitles?" : "Stop making the subtitles?", text))) return;
+    try {
+      await api("DELETE", `/api/items/${item.id}/subtitles`);
+      rerender();
+    } catch (err) {
+      showError(err.message);
+    }
+  }
+
+  async function poll() {
+    try {
+      const fresh = await api("GET", `/api/items/${item.id}`);
+      if (!fresh.subtitle_job) return rerender();
+      show(fresh.subtitle_job);
+    } catch (err) {
+      showError(err.message);
+      timer = setTimeout(poll, 3000);
+    }
+  }
+
+  function show(job) {
+    clearTimeout(timer);
+    button.hidden = !item.can_subtitle || Boolean(item.subtitles);
+    const busy = job && job.state !== "error";
+    if (busy) {
+      button.disabled = true;
+      button.textContent = subtitleStatus(job);
+      timer = setTimeout(poll, 1000);
+    } else {
+      button.disabled = false;
+      button.textContent = job ? "Try the subtitles again" : "Make English subtitles";
+      showError(job ? `The subtitles failed: ${job.error}` : null);
+    }
+    section.hidden = !item.subtitles;
+    if (item.subtitles) {
+      const sub = item.subtitles;
+      const from = sub.source_language && sub.source_language !== "en" ? ` from ${languageName(sub.source_language)}` : "";
+      fill(section,
+        h("div", { class: "section-head" }, h("h3", {}, "English subtitles"),
+          h("button", { type: "button", class: "text-btn", onclick: remove }, "Remove")),
+        h("p", { class: "copy-note" }, `Made${from} by Whisper (${sub.model}). `,
+          h("a", { href: `/api/items/${item.id}/subtitles.vtt?download=true` }, "Download (.vtt)")));
+    }
+  }
+
+  show(item.subtitle_job);
+  return { button, section, error, stop: () => clearTimeout(timer) };
+}
+
 /** A video's page. `list`: the folder whose "Show all" list it was opened from
  *  (prev/next buttons), or null. */
 export async function renderItem(view, itemId, list = null) {
@@ -820,6 +900,7 @@ export async function renderItem(view, itemId, list = null) {
   ];
   const playable = item.play_mode !== "unsupported" && !item.missing;
   const copy = mp4Copy(item);
+  const subs = subtitlesUi(item);
   const playHref = playUrl(item.id, around ? list : null);
   const facts = [
     ["Length", formatDuration(item.duration) || "unknown"],
@@ -862,15 +943,21 @@ export async function renderItem(view, itemId, list = null) {
           playable && item.duration > 0 &&
             h("a", { class: "btn edit-link", href: `#/edit/${item.id}`, title: "Make clips of this video" }, "Edit video"),
           copy.button,
+          subs.button,
         ),
         copy.error,
+        subs.error,
         copy.section,
+        subs.section,
         tagEditor(item),
         marksSection(item, around ? list : null),
         h("dl", { class: "facts" }, facts.map(([k, v]) => [h("dt", {}, k), h("dd", {}, v)])),
       ),
     ),
   );
-  return () => copy.stop();
+  return () => {
+    copy.stop();
+    subs.stop();
+  };
 }
 

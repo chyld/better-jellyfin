@@ -44,6 +44,10 @@ class Settings:
     # start and no pictures are saved, so the database and your pictures never
     # compete with the HLS cache for the last of the disk.
     min_free_mb: int = 2048
+    # Whisper, for subtitles: which model (large-v3 is the best at Japanese), and
+    # how many CPU threads it may use.
+    subtitle_model: str = "large-v3"
+    subtitle_threads: int = 4
 
     @property
     def db_path(self) -> Path:
@@ -62,6 +66,16 @@ class Settings:
     def copies_dir(self) -> Path:
         """MP4 copies of videos in the wrong container (see copies.py)."""
         return self.data_dir / "copies"
+
+    @property
+    def subtitles_dir(self) -> Path:
+        """Subtitles made by Whisper (see subtitles.py)."""
+        return self.data_dir / "subtitles"
+
+    @property
+    def models_dir(self) -> Path:
+        """Whisper's models, downloaded on first use."""
+        return self.data_dir / "models"
 
     @property
     def images_dir(self) -> Path:
@@ -103,6 +117,9 @@ class Settings:
             max_streams=_number("REEL_MAX_STREAMS", "3", minimum=1),
             hls_cache_mb=_number("REEL_HLS_CACHE_MB", "2048", minimum=100),
             min_free_mb=_number("REEL_MIN_FREE_MB", "2048", minimum=0),
+            subtitle_model=os.environ.get("REEL_SUBTITLE_MODEL", "large-v3").strip() or "large-v3",
+            # Half the CPU by default: the other half stays with playback and the rest of Reel.
+            subtitle_threads=_number("REEL_SUBTITLE_THREADS", str(max(1, (os.cpu_count() or 2) // 2)), minimum=1),
         )
 
     def free_bytes(self) -> int | None:

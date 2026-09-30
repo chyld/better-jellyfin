@@ -41,6 +41,7 @@ def test_live_schema(tmp_path):
         "users": ["id", "uid", "name", "is_local", "created_at"],
         "marks": ["id", "uid", "item_id", "seconds", "created_at"],
         "clips": ["id", "uid", "item_id", "number", "start", "end", "created_at"],
+        "subtitles": ["id", "item_id", "language", "source_language", "version", "model", "made_at"],
     }
     # Browsing, tag order, move detection and the one local user depend on these.
     assert indexes == {"media_items_browse", "media_items_paths", "item_tags_order", "item_tags_tag", "media_items_fingerprint",

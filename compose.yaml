@@ -30,6 +30,8 @@ services:
       REEL_MAX_STREAMS: "${REEL_MAX_STREAMS:-3}"
       REEL_HLS_CACHE_MB: "${REEL_HLS_CACHE_MB:-2048}"
       REEL_MIN_FREE_MB: "${REEL_MIN_FREE_MB:-2048}"
+      REEL_SUBTITLE_MODEL: "${REEL_SUBTITLE_MODEL:-large-v3}"
+      # REEL_SUBTITLE_THREADS: "4"          # default: half the CPU
       # Behind a reverse proxy? Trust forwarded headers from it only:
       # FORWARDED_ALLOW_IPS: "172.18.0.1"
     volumes:

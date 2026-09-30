@@ -18,7 +18,6 @@ Copies are made one at a time, in the background, with progress. Only videos a
 copy makes directly playable (in a typical browser) can have one: see can_copy().
 """
 import asyncio
-import logging
 import os
 import sqlite3
 import time
@@ -31,16 +30,15 @@ import anyio
 from .catalog import NotFound, video_rev
 from .db import connect, new_uid, write_transaction
 from .images import ORPHAN_GRACE_SECONDS, durable_replace
+from .jobs import JobError, JobQueue
 from .plan import plan
 from .playback import drain
-
-log = logging.getLogger(__name__)
 
 MP4 = "mov,mp4,m4a,3gp,3g2,mj2"   # ffprobe's name for the MP4 family
 DISK_CHECK_SECONDS = 5.0           # how often a running copy checks the free space
 
 
-class CopyError(Exception):
+class CopyError(JobError):
     """A copy couldn't be made; the message says why."""
 
 
@@ -232,22 +230,18 @@ class Job:
     status: dict = field(default_factory=lambda: {"state": "queued", "progress": 0.0, "error": None})
 
 
-class CopyManager:
-    """Makes copies one at a time on the event loop, reading ffmpeg's progress.
+class CopyManager(JobQueue):
+    """Makes copies one at a time on the event loop (see jobs.py), reading
+    ffmpeg's progress. Below the disk's free-space reserve (`room()` says no) a
+    running copy is stopped."""
 
-    Status lives in memory while a copy is queued or running, and after a failure
-    (with the reason); a finished copy is in the catalog instead. Below the disk's
-    free-space reserve (`room()` says no) a running copy is stopped."""
+    what = "MP4 copy"
 
     def __init__(self, db_path: Path, folder: Path, room=lambda: True):
+        super().__init__()
         self.db_path = db_path
         self.folder = folder
         self.room = room
-        self.jobs: dict[str, Job] = {}
-        self._queue: asyncio.Queue[Job] = asyncio.Queue()
-        self._worker: asyncio.Task | None = None
-        self._proc: asyncio.subprocess.Process | None = None
-        self._current: Job | None = None
 
     def clean_up_partials(self) -> None:
         """Copies being made when Reel last stopped are useless: delete them.
@@ -255,67 +249,9 @@ class CopyManager:
         for path in self.folder.glob("*.part"):
             path.unlink(missing_ok=True)
 
-    def start(self) -> None:
-        self._worker = asyncio.create_task(self._run())
-
-    def all(self) -> list[tuple[str, dict]]:
-        """Every job there is (item uid, status): the running one, then the queued ones
-        in order, then failures."""
-        order = {"running": 0, "queued": 1, "error": 2}
-        jobs = [(uid, dict(job.status)) for uid, job in list(self.jobs.items())]
-        return sorted(jobs, key=lambda j: order.get(j[1]["state"], 3))   # stable: queue order kept
-
-    def status(self, item_uid: str) -> dict | None:
-        job = self.jobs.get(item_uid)
-        return dict(job.status) if job else None
-
-    def request(self, job: Job) -> dict:
-        """Queue a copy (on the event loop). Asking again while one is queued or
-        running does nothing."""
-        current = self.jobs.get(job.item_uid)
-        if current and current.status["state"] in ("queued", "running"):
-            return dict(current.status)
-        self.jobs[job.item_uid] = job
-        self._queue.put_nowait(job)
-        return dict(job.status)
-
-    def cancel(self, item_uid: str) -> None:
-        """Drop the video's queued, running or failed copy (on the event loop)."""
-        job = self.jobs.pop(item_uid, None)
-        if job is not None and job is self._current and self._proc and self._proc.returncode is None:
-            self._proc.kill()
-
     async def shutdown(self) -> None:
-        if self._proc and self._proc.returncode is None:
-            self._proc.kill()
-        if self._worker:
-            self._worker.cancel()
-            try:
-                await self._worker
-            except asyncio.CancelledError:
-                pass
+        await super().shutdown()
         self.clean_up_partials()
-
-    async def _run(self) -> None:
-        while True:
-            job = await self._queue.get()
-            if self.jobs.get(job.item_uid) is not job:
-                continue                        # cancelled while queued
-            self._current = job
-            job.status["state"] = "running"
-            try:
-                await self._make(job)
-                if self.jobs.get(job.item_uid) is job:
-                    del self.jobs[job.item_uid]  # done: the catalog has it now
-            except CopyError as exc:
-                job.status.update(state="error", error=str(exc))
-                log.warning("MP4 copy of %s failed: %s", job.item_uid, exc)
-            except Exception:
-                log.exception("MP4 copy of %s failed unexpectedly", job.item_uid)
-                job.status.update(state="error", error="The copy failed unexpectedly; see the log.")
-            finally:
-                self._current = None
-                self._proc = None
 
     async def _make(self, job: Job) -> None:
         self.folder.mkdir(parents=True, exist_ok=True)
@@ -344,14 +280,14 @@ class CopyManager:
                             break
             finally:
                 with anyio.CancelScope(shield=True):
-                    if proc.returncode is None and (out_of_room or self.jobs.get(job.item_uid) is not job):
+                    if proc.returncode is None and (out_of_room or not self.wanted(job)):
                         proc.kill()
                     await proc.wait()
                     try:
                         await asyncio.wait_for(reader, 2)
                     except (TimeoutError, asyncio.CancelledError, Exception):
                         reader.cancel()
-            if self.jobs.get(job.item_uid) is not job:
+            if not self.wanted(job):
                 return                           # cancelled: nothing to keep
             if out_of_room:
                 raise CopyError("The server's disk is nearly full, so the copy was stopped.")

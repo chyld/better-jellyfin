@@ -5,20 +5,40 @@ import { itemUrl, videoImageSrc } from "./browse.js";
 import { confirmDelete } from "./clips.js";
 
 /** "2026-09-29 23:41:07" (UTC, from SQLite) as a local date and time. */
-function madeAt(utc) {
+export function madeAt(utc) {
   if (!utc) return "";
   const date = new Date(utc.replace(" ", "T") + "Z");
   return date.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
 }
 
 /** Where a waiting copy is in the queue: "next", "2nd in line"... */
-function place(n) {
+export function place(n) {
   if (n === 1) return "next";
   const suffix = n % 100 >= 11 && n % 100 <= 13 ? "th" : { 1: "st", 2: "nd", 3: "rd" }[n % 10] || "th";
   return `${n}${suffix} in line`;
 }
 
 const countCopies = (n) => `${n} ${n === 1 ? "copy" : "copies"}`;
+
+/** A row on the Copies and Subtitles pages: the video's picture and title (both
+ *  open its page), where it is, a status line, anything `extra`, and buttons. */
+export function row(video, { status = null, extra = [], buttons = [] } = {}) {
+  return h(
+    "li",
+    { class: "copy-row" },
+    h("a", { class: "copy-art", href: itemUrl(video.id), tabindex: -1, "aria-hidden": "true" },
+      artBox({ kind: "video", shape: "landscape", src: videoImageSrc(video) })),
+    h(
+      "div",
+      { class: "copy-info" },
+      h("a", { class: "copy-title", href: itemUrl(video.id) }, video.title),
+      h("div", { class: "copy-path" }, `${video.library_name} › ${video.rel_path}`),
+      status && h("div", { class: `copy-status ${status.tone || ""}`.trim() }, status.text),
+      extra,
+    ),
+    h("div", { class: "buttons" }, buttons),
+  );
+}
 
 export async function renderCopies(view) {
   const summary = h("p", { class: "summary" });
@@ -48,24 +68,6 @@ export async function renderCopies(view) {
     if (!(await confirmDelete(`${question} ${video.title}?`, `${what} The file on the NAS is not touched.`))) return;
     await api("DELETE", `/api/items/${video.id}/mp4-copy`);
   });
-
-  function row(video, { status = null, extra = [], buttons = [] } = {}) {
-    return h(
-      "li",
-      { class: "copy-row" },
-      h("a", { class: "copy-art", href: itemUrl(video.id), tabindex: -1, "aria-hidden": "true" },
-        artBox({ kind: "video", shape: "landscape", src: videoImageSrc(video) })),
-      h(
-        "div",
-        { class: "copy-info" },
-        h("a", { class: "copy-title", href: itemUrl(video.id) }, video.title),
-        h("div", { class: "copy-path" }, `${video.library_name} › ${video.rel_path}`),
-        status && h("div", { class: `copy-status ${status.tone || ""}`.trim() }, status.text),
-        extra,
-      ),
-      h("div", { class: "buttons" }, buttons),
-    );
-  }
 
   function jobRow(job) {
     if (job.state === "running") {

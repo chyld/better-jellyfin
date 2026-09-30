@@ -26,6 +26,7 @@ ffmpeg converts on the fly.
   - [Pictures](#pictures)
   - [Playback](#playback)
   - [MP4 copies](#mp4-copies)
+  - [Subtitles](#subtitles)
   - [Tags](#tags)
   - [Uploaded images](#uploaded-images)
   - [IDs and URLs](#ids-and-urls)
@@ -75,6 +76,9 @@ ffmpeg converts on the fly.
   `.mp4`, an MKV) is repackaged live on every play. **Make MP4 copy** on its page copies it once
   into a real MP4 in the data folder, and from then on it plays from the copy, directly. See
   [MP4 copies](#mp4-copies).
+- **English subtitles.** **Make English subtitles** on a video's page: Whisper listens to it on this
+  machine (no GPU needed, nothing sent anywhere) and writes English subtitles, translating what's
+  said. See [Subtitles](#subtitles). (Showing them in the player comes next.)
 - **Snap a preview.** The camera button in the player (or **P**) makes the frame on screen the
   video's picture, replacing any it had.
 - **Pictures from your files.** `movie.png` beside `movie.mp4` and `folder.png` in a folder are
@@ -174,6 +178,8 @@ documents each one.
 | `REEL_PROBE_WORKERS` | `4` | How many ffprobe processes run at once during a scan. |
 | `REEL_MAX_STREAMS` | `3` | How many videos may be converted or repackaged at once. More viewers get a "try again in a moment" message. |
 | `REEL_HLS_CACHE_MB` | `2048` | Size target for the HLS segment cache (`<data>/hls`). Over it, segments no viewer is near are deleted first. A soft target: see [HLS details](#playback). |
+| `REEL_SUBTITLE_MODEL` | `large-v3` | The Whisper model for [subtitles](#subtitles): `large-v3` (best), `medium`, `small`... Downloaded on first use. |
+| `REEL_SUBTITLE_THREADS` | half the CPUs | CPU threads Whisper may use while making subtitles. |
 | `REEL_MIN_FREE_MB` | `2048` | Free space Reel tries to keep on the data folder's disk, for the database and your pictures. Below it: no conversion starts, and a running one stops after its next segment ("the server's disk is nearly full", HTTP 507); the HLS cache gives back every segment no viewer is about to play, even under `REEL_HLS_CACHE_MB` (checked every 15 seconds); no picture or thumbnail is saved (cards show their placeholder). Videos that need no conversion play as usual. It's a line Reel stops writing at, not a hard guarantee: a segment or picture already being written is finished. `/api/health` shows the free space. |
 | `REEL_MISSING_GRACE_DAYS` | `7` | How long a video a scan can no longer find stays in the catalog (hidden, with its tags and pictures) before it's removed. |
 | `REEL_IMAGE_URLS` | `internet` | Where pictures may be downloaded from when you paste a URL: `internet` (public addresses only), `lan` (also your local network) or `off`. |
@@ -202,6 +208,7 @@ permissions. The usual cause is a `./data` that Docker created owned by root.
 | Edit video | `#/edit/<video-uuid>` | The video with a timeline, **Mark**, **Clear marks** and **Make clip**, then its clips. See [Making clips](#making-clips). |
 | Player | `#/play/<video-uuid>` | Full-window player. `?t=<seconds>` starts there; `?clip=<clip-uuid>` plays just that clip (its back button goes to the clip's page). |
 | Tags | `#/tags` | Every tag: set its image, rename or merge, delete. |
+| Subtitles | `#/subtitles` | [Subtitles](#subtitles): the ones being made (with progress; paused while a video plays), waiting or failed, and every video with subtitles (Download, Remove). |
 | Copies | `#/copies` | [MP4 copies](#mp4-copies): the one being made (with progress), the ones waiting their turn (Cancel), failed ones (Retry, Dismiss), and every copy there is, with its size and when it was made (Remove). |
 | Tag | `#/tag/<tag-uuid>` | The videos with that tag. |
 | Libraries | `#/manage` | Add, rename, remove and scan libraries, with live progress. |
@@ -544,6 +551,35 @@ on every play, and every seek starts ffmpeg again. An MP4 copy fixes that once:
   picture; copies of a video or library removed from Reel go the same way. `/api/health` shows how
   many copies there are and their size.
 
+### Subtitles
+
+**Make English subtitles** on a video's page has [Whisper](https://github.com/openai/whisper) (via
+[faster-whisper](https://github.com/SYSTRAN/faster-whisper), on the CPU) listen to the video and
+write what's said in English: Japanese (or any language it hears) is translated on the way; English
+is just written down.
+
+- **Everything stays on this machine.** The first run downloads the model into the data folder
+  (`models/`; `large-v3` is about 3 GB), so that one needs internet; after that nothing is sent anywhere.
+- **Speed:** on a Ryzen 7 7735U (8 cores, no GPU), `large-v3` handled a 2-minute sample in about
+  11 seconds with 8 threads; a whole video takes longer (see below). `REEL_SUBTITLE_MODEL=medium` or
+  `small` is faster and less accurate, noticeably so for Japanese.
+- **It never gets in the way:** it runs as a separate process at low priority, with
+  `REEL_SUBTITLE_THREADS` threads (default: half the CPU), one video at a time (more wait their
+  turn), and it's **paused while anyone is watching** (the process is stopped, not ended, and
+  carries on afterwards).
+- **Timing:** each line appears when it's said (Whisper's word timings), and stays up about as long
+  as it takes to read (at least 1 second, at most 7, never over the next line), even where Whisper
+  stretches a line over a long silence. Silence and music are skipped, and lines Whisper is known to
+  invent over them ("Thank you for watching") are dropped.
+- **Accuracy:** clear speech comes out well; mumbling, overlapping voices and background noise
+  cause mistakes, and the English is a fairly literal translation.
+- They're saved as WebVTT (`subtitles/<video uuid>-<version>.en.vtt` in the data folder, never on the
+  NAS): **Download** gets the file. Making them again replaces them. They belong to the video: they
+  follow a moved or renamed file, and go when the video leaves the catalog.
+- The **Subtitles** page (top bar) shows the one being made ("Getting Whisper ready", "Reading the
+  audio", "Making subtitles: 42%", "Paused while a video plays"), the ones waiting (Cancel), failed
+  ones (Retry, Dismiss), and every video with subtitles, what language they were made from and when.
+
 ### Tags
 
 - A video can have **any number of tags**.
@@ -639,6 +675,8 @@ data/
 ├── thumbs/             cached thumbnails of NAS pictures and clips' pictures (safe to delete; they're remade)
 │   └── ab/abcdef….jpg
 ├── hls/                HLS segments being served (emptied at startup)
+├── subtitles/          English subtitles made by Whisper (<video uuid>-<version>.en.vtt)
+├── models/             Whisper's model, downloaded on first use (large-v3: ~3 GB; safe to delete)
 ├── copies/             MP4 copies of videos in the wrong container (<video uuid>-<version>.mp4)
 └── images/             pictures you uploaded (and frames snapped in the player)
     ├── tags/<tag uuid>-<version>.jpg
@@ -765,6 +803,10 @@ JSON over HTTP. Every ID is a UUID. There's no authentication yet (see
 | DELETE | `/api/items/{id}/clips/{clip}` | Delete a clip. Returns the clips left. |
 | POST | `/api/items/{id}/mp4-copy` | Start making an MP4 copy (202, returns `{state, progress, error}`); 409 if it has one or wouldn't be helped by one, 507 without the disk space. `GET /api/items/{id}` shows `can_copy`, `copy_size` (bytes, once there's a current copy) and `copy_job` (while one is queued or being made, or why it failed). |
 | GET | `/api/copies` | The Copies page: `jobs` (running, then waiting with their `place` in line, then failed), `copies` (every copy, newest first: its video, `copy_size`, `made_at`, `current`) and `totals`. |
+| POST | `/api/items/{id}/subtitles` | `{language?}` (what's spoken, e.g. `ja`; left out, Whisper works it out): start making English subtitles (202, returns `{state, stage, progress, error}`). `GET /api/items/{id}` shows `can_subtitle`, `subtitles` (`{version, source_language, model, made_at}`) and `subtitle_job`. |
+| GET | `/api/items/{id}/subtitles.vtt?download=` | The English subtitles (WebVTT); `download=true` to save them as a file. |
+| DELETE | `/api/items/{id}/subtitles` | Stop subtitles being made, or remove them. |
+| GET | `/api/subtitles` | The Subtitles page: `jobs` and `subtitles`, as on `/api/copies`. |
 | DELETE | `/api/items/{id}/mp4-copy` | Stop the copy being made, or remove the copy: the original plays again. |
 | DELETE | `/api/items/{id}/image` | Remove the uploaded picture (the NAS one, if any, shows again). |
 | POST | `/api/items/{id}/tags` | `{name}`: tag the video. Returns its tags. |
@@ -873,6 +915,9 @@ reel/
   playback.py        ffmpeg commands for remux/convert; streaming and killing ffmpeg
   images.py          shrinking/cropping thumbnails; processing uploads
   copies.py          MP4 copies of videos in the wrong container: making, playing, cleaning up
+  subtitles.py       English subtitles by Whisper: timing, the files, the queue (pausing while you watch)
+  subtitle_worker.py the Whisper process: decodes the audio, listens, writes the WebVTT
+  jobs.py            the background queue MP4 copies and subtitles share
   pictures.py        your pictures for tags, videos and folders: one way to set, remove and clean up
   thumbnails.py      pictures on cards (NAS pictures, clips' frames): finding, thumbnailing (limited),
                      and after-scan warming/cleanup
@@ -900,6 +945,7 @@ reel/
     manage.js        Libraries page, folder picker
     tags.js          Tags page
     copies.js        Copies page: MP4 copies being made, waiting, failed and made
+    subtitlespage.js Subtitles page (and how a subtitle job is described)
     imagedialog.js   the shared "photo or URL" dialog
     style.css        app styles;  player.css  player styles
     fonts/           Inter (SIL Open Font License)
@@ -925,7 +971,8 @@ Dockerfile, compose.yaml, .env.example
   stops at startup with "Another Reel is already using the data folder". Nothing in the data
   folder is changed until the lock is held (migrations, clean-up and emptying the HLS cache all
   happen then, not when the app is built).
-- **No subtitles** (neither external `.srt` nor embedded tracks).
+- **Subtitles aren't shown in the player yet**: they can be made (see [Subtitles](#subtitles)) and
+  downloaded. External `.srt` files and embedded subtitle tracks aren't read.
 - **No hardware transcoding.** Conversion runs on the CPU, which is fine for this library.
   `compose.yaml` notes where a GPU would go.
 - **Tags** are limited to lowercase ASCII letters, digits and dashes, by design.
@@ -940,9 +987,10 @@ Dockerfile, compose.yaml, .env.example
   copied cuts that snap to keyframes). Files would go only to a separate writable folder, never
   the media folder, which could be added as a library so exports show up in Reel. Waiting on
   where that folder should live.
+- **Showing subtitles in the player** (a CC button), from the ones Reel makes.
 
 Decided against: watch progress / resume (single-user setup), sorting a tag's videos (they stay
-in tagging order), subtitles, hardware transcoding, and a background pass that pre-converts old
+in tagging order), hardware transcoding, and a background pass that pre-converts old
 formats (videos are converted live, when played).
 
 ---

@@ -17,7 +17,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import browse, catalog, clips, copies, fetch, hls, libraries, marks, pictures, playback, tags, users
+from . import browse, catalog, clips, copies, fetch, subtitles, hls, libraries, marks, pictures, playback, tags, users
 from .paths import OutsideRoot, resolve_inside
 from .plan import HLS_SUPPORT, Capabilities, Plan, plan as make_plan
 from .config import DataLock, Settings
@@ -104,11 +104,16 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
                                   low_on_disk=settings.low_on_disk)
     copier = copies.CopyManager(settings.db_path, settings.copies_dir, room=lambda: not settings.low_on_disk())
 
+    subtitler = subtitles.SubtitleManager(settings.db_path, settings.subtitles_dir, settings.models_dir,
+                                          model=settings.subtitle_model, threads=settings.subtitle_threads,
+                                          watching=watching)
+
     def prune_files(conn: sqlite3.Connection) -> None:
-        """Pictures whose video, folder or tag is gone, and MP4 copies no longer
-        current or wanted."""
+        """Pictures whose video, folder or tag is gone, MP4 copies no longer current
+        or wanted, and subtitles of videos that are gone."""
         pictures.prune(conn, settings.images_dir)
         copies.prune(conn, settings.copies_dir)
+        subtitles.prune(conn, settings.subtitles_dir)
 
     # Files nobody needs are cleaned up after every scan (and at startup). Once the
     # scan queue runs dry, thumbnails of old picture versions are deleted and
@@ -137,6 +142,7 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
                 conn.close()
             hls_sessions.start()
             copier.clean_up_partials()
+            subtitler.clean_up_partials()
             tools.update(ffmpeg=tool_version("ffmpeg"), ffprobe=tool_version("ffprobe"))
             for name, version in tools.items():
                 if version is None:
@@ -151,6 +157,7 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
         lock = await run_in_threadpool(startup)
         scans.start()
         copier.start()
+        subtitler.start()
         housekeeping = asyncio.create_task(hls_sessions.run_housekeeping())
         try:
             yield
@@ -160,6 +167,7 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
                 await housekeeping
             await hls_sessions.shutdown()
             await copier.shutdown()
+            await subtitler.shutdown()
             await streams.shutdown()
             thumbs.stop()   # a thumbnail being made after a scan ends now too
             # A scan stops between files; wait for it off the event loop.
@@ -176,6 +184,7 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
     app.state.watching = watching
     app.state.thumbnails = thumbnails
     app.state.copies = copier
+    app.state.subtitles = subtitler
 
     def get_db() -> Iterator[sqlite3.Connection]:
         conn = connect(settings.db_path)
@@ -286,7 +295,66 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
         item = browse.item_detail(conn, item_uid)
         return {**item, "tags": tags.item_tags(conn, tags.item_pk(conn, item_uid)),
                 "marks": marks.list_marks(conn, item_uid), "clips": clips.list_clips(conn, item_uid),
-                "copy_job": copier.status(item_uid)}
+                "copy_job": copier.status(item_uid),
+                "can_subtitle": subtitles.can_make(conn.execute("SELECT * FROM media_items WHERE uid = ?",
+                                                                (item_uid,)).fetchone()),
+                "subtitles": subtitles.info(conn, tags.item_pk(conn, item_uid)),
+                "subtitle_job": subtitler.status(item_uid)}
+
+    # ---- Subtitles (see subtitles.py) ----
+
+    class SubtitleRequest(BaseModel):
+        language: str | None = Field(default=None, pattern=r"^[a-z]{2,3}$")   # what's spoken; None: Whisper hears it
+
+    def subtitle_job(item_uid: str, language: str | None) -> subtitles.Job:
+        conn = connect(settings.db_path)
+        try:
+            row = conn.execute("SELECT * FROM media_items WHERE uid = ?", (item_uid,)).fetchone()
+            if row is None:
+                raise HTTPException(404, "Video not found.")
+            if not subtitles.can_make(row):
+                raise HTTPException(409, "This video has no sound to make subtitles from.")
+            src = original_file(conn, row)
+        finally:
+            conn.close()
+        return subtitles.Job(item_uid, src, row["duration"], language)
+
+    @app.post("/api/items/{item_uid}/subtitles", status_code=202)
+    async def make_subtitles(item_uid: str, body: SubtitleRequest | None = None):
+        """Start making English subtitles (in the background). Returns the job's status."""
+        language = body.language if body else None
+        return subtitler.request(await run_in_threadpool(subtitle_job, item_uid, language))
+
+    @app.delete("/api/items/{item_uid}/subtitles", status_code=204)
+    async def remove_subtitles(item_uid: str):
+        """Stop subtitles being made, or remove the ones there are."""
+        subtitler.cancel(item_uid)
+
+        def forget() -> None:
+            conn = connect(settings.db_path)
+            try:
+                subtitles.remove(conn, settings.subtitles_dir, item_uid)
+            finally:
+                conn.close()
+
+        await run_in_threadpool(forget)
+        return Response(status_code=204)
+
+    @app.get("/api/items/{item_uid}/subtitles.vtt")
+    def get_subtitles(item_uid: str, download: bool = False, conn: sqlite3.Connection = Db):
+        """The video's English subtitles (WebVTT); `download` to save them as a file."""
+        tags.item_pk(conn, item_uid)
+        path = subtitles.current_file(conn, settings.subtitles_dir, item_uid)
+        if path is None or not path.is_file():
+            raise HTTPException(404, "This video has no subtitles.")
+        title = conn.execute("SELECT title FROM media_items WHERE uid = ?", (item_uid,)).fetchone()["title"]
+        return FileResponse(path, media_type="text/vtt; charset=utf-8", headers={"Cache-Control": "no-cache"},
+                            filename=f"{title}.en.vtt" if download else None)
+
+    @app.get("/api/subtitles")
+    def list_subtitles(conn: sqlite3.Connection = Db):
+        """The Subtitles page: subtitles being made, waiting or failed, and every video with some."""
+        return subtitles.listing(conn, subtitler.all())
 
     # ---- MP4 copies (see copies.py) ----
 
@@ -710,6 +778,8 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
             "hls": hls_sessions.status(),
             "disk": disk_status(),
             "copies": mp4_copies(),
+            "subtitles": {"queued": len(subtitler.jobs), "model": settings.subtitle_model,
+                          "threads": settings.subtitle_threads},
         }
         return JSONResponse(body, status_code=200 if ready else 503)
 
@@ -741,6 +811,7 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
         try:
             pictures.retire_library(conn, settings.images_dir, library_id)   # first, as for any picture
             copies.retire_library(conn, settings.copies_dir, library_id)
+            subtitles.retire_library(conn, settings.subtitles_dir, library_id)
             libraries.delete_library(conn, library_id)
         except BaseException:
             scans.unclaim(library_id)
