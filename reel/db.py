@@ -382,6 +382,13 @@ def _v16_subtitles(conn: sqlite3.Connection) -> None:
     )
 
 
+def _v17_subtitle_files(conn: sqlite3.Connection) -> None:
+    # Subtitles beside a video on the NAS (movie.en.vtt beside movie.mp4), found by
+    # the scan like a poster: their path and version. Filled in by the next scan.
+    conn.execute("ALTER TABLE media_items ADD COLUMN subtitle_path TEXT")
+    conn.execute("ALTER TABLE media_items ADD COLUMN subtitle_rev TEXT")
+
+
 # (version, what it does, function). Append only; functions must not commit.
 MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (2, "fingerprints and probe versions for media items", _v2_identity),
@@ -399,6 +406,7 @@ MIGRATIONS: list[tuple[int, str, Callable[[sqlite3.Connection], None]]] = [
     (14, "MP4 copies of videos in the wrong container", _v14_mp4_copies),
     (15, "when each MP4 copy was made", _v15_mp4_copy_times),
     (16, "subtitles made by Whisper", _v16_subtitles),
+    (17, "subtitle files beside videos on the NAS", _v17_subtitle_files),
 ]
 
 

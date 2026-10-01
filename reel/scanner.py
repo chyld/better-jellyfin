@@ -23,6 +23,9 @@ VIDEO_EXTENSIONS = {
     "m2ts", "mts", "ts", "vob", "flv", "3gp", "ogv", "divx",
 }
 IMAGE_EXTENSIONS = ("jpg", "jpeg", "png", "webp")
+# Subtitles beside a video, named like it: movie.vtt, movie.en.vtt, movie.srt...
+SUBTITLE_EXTENSIONS = ("vtt", "srt")
+LANGUAGE_TAG = re.compile(r"^[a-z]{2,3}(-[a-z0-9]{2,8})?$")
 # Filenames that say nothing about the video, so the folder name is used instead.
 GENERIC_STEMS = {"movie", "video", "film", "main", "feature"}
 YEAR_PREFIX = re.compile(r"^((?:19|20)\d{2})[.\s_-]+(.+)$")
@@ -62,22 +65,61 @@ class FoundVideo:
     mtime: float
     poster_rev: str | None = None   # the poster's size and time: its thumbnail's version
     poster_unreadable: bool = False # the poster is there but couldn't be read: keep what's stored
+    subtitle_path: str | None = None    # subtitles beside it (movie.en.vtt), relative to the library
+    subtitle_rev: str | None = None     # their size and time
+    subtitle_unreadable: bool = False   # there but couldn't be read: keep what's stored
 
 
 def _matters(filename: str) -> bool:
-    """Videos and pictures: the only files the scan uses (and checks for links)."""
+    """Videos, pictures and subtitles: the only files the scan uses (and checks for links)."""
     if filename.startswith(".") or "." not in filename:
         return False
     ext = filename.rsplit(".", 1)[1].lower()
-    return ext in VIDEO_EXTENSIONS or ext in IMAGE_EXTENSIONS
+    return ext in VIDEO_EXTENSIONS or ext in IMAGE_EXTENSIONS or ext in SUBTITLE_EXTENSIONS
+
+
+def _subtitle_parts(filename: str) -> tuple[str, str | None]:
+    """A subtitle file's video stem and language: "movie.en.vtt" -> ("movie", "en"),
+    "movie.vtt" -> ("movie", None)."""
+    base = filename.rsplit(".", 1)[0]
+    if "." in base:
+        stem, tag = base.rsplit(".", 1)
+        if LANGUAGE_TAG.match(tag.lower()):
+            return stem, tag.lower()
+    return base, None
+
+
+def _stem_of(filename: str) -> str:
+    """What a picture or subtitle file must be named like to belong to a video."""
+    if filename.rsplit(".", 1)[1].lower() in SUBTITLE_EXTENSIONS:
+        return _subtitle_parts(filename)[0].lower()
+    return filename.rsplit(".", 1)[0].lower()
 
 
 def _used(filenames: list[str]) -> list[str]:
     """The files in one folder the scan uses: its videos, its folder.<ext>, and
-    pictures named like one of its videos (zombie.mp4 -> zombie.png)."""
+    pictures and subtitles named like one of its videos (zombie.mp4 -> zombie.png,
+    zombie.en.vtt)."""
     filenames = [f for f in filenames if _matters(f)]
     stems = {"folder"} | {f.rsplit(".", 1)[0].lower() for f in filenames if is_video(f)}
-    return [f for f in filenames if is_video(f) or f.rsplit(".", 1)[0].lower() in stems]
+    return [f for f in filenames if is_video(f) or _stem_of(f) in stems]
+
+
+def find_subtitles(video_name: str, names: list[str]) -> str | None:
+    """A video's subtitles: the file beside it named like it. English first
+    (movie.en.vtt), then no language given (movie.vtt), then any; WebVTT before SRT."""
+    stem = Path(video_name).stem.lower()
+    found = []
+    for name in names:
+        ext = name.rsplit(".", 1)[-1].lower()
+        if ext not in SUBTITLE_EXTENSIONS:
+            continue
+        base, language = _subtitle_parts(name)
+        if base.lower() != stem:
+            continue
+        rank = 0 if language in ("en", "eng") or (language or "").startswith("en-") else 1 if language is None else 2
+        found.append((rank, SUBTITLE_EXTENSIONS.index(ext), name.lower(), name))
+    return min(found)[3] if found else None
 
 
 def _look(root: Path, rel_dir: Path, dirpath: str, name: str) -> tuple[str, os.stat_result | None]:
@@ -262,6 +304,7 @@ def walk_library(root: Path, cancel: threading.Event | None = None) -> Walk:
                 alone = len(video_names) == 1 and not dirnames
                 title, year = derive_title(rel_path, alone_in_folder=alone)
                 poster = find_poster(name, names_lower)
+                subs = find_subtitles(name, filenames)
                 videos.append(FoundVideo(
                     rel_path=rel_path,
                     title=title,
@@ -269,6 +312,9 @@ def walk_library(root: Path, cancel: threading.Event | None = None) -> Walk:
                     poster_path=(rel_dir / poster).as_posix() if poster else None,
                     poster_rev=_rev(stats[poster]) if poster in stats else None,
                     poster_unreadable=bool(poster) and poster not in stats,
+                    subtitle_path=(rel_dir / subs).as_posix() if subs else None,
+                    subtitle_rev=_rev(stats[subs]) if subs in stats else None,
+                    subtitle_unreadable=bool(subs) and subs not in stats,
                     size=st.st_size,
                     mtime=st.st_mtime,
                 ))
@@ -391,7 +437,7 @@ def scan_library(
         for row in conn.execute(
             """
             SELECT id, rel_path, size, mtime, probe_error, missing_since, fingerprint, probe_version,
-                   title, year, poster_path, poster_rev
+                   title, year, poster_path, poster_rev, subtitle_path, subtitle_rev
             FROM media_items WHERE library_id = ?
             """,
             (library_id,),
@@ -402,6 +448,9 @@ def scan_library(
         if v.poster_unreadable and v.rel_path in existing:
             v.poster_path = existing[v.rel_path]["poster_path"]
             v.poster_rev = existing[v.rel_path]["poster_rev"]
+        if v.subtitle_unreadable and v.rel_path in existing:
+            v.subtitle_path = existing[v.rel_path]["subtitle_path"]
+            v.subtitle_rev = existing[v.rel_path]["subtitle_rev"]
     # A library that used to have videos but now reads as completely empty is
     # almost always an unmounted NAS (an empty mount point), not a real deletion.
     present = sum(1 for row in existing.values() if not row["missing_since"])
@@ -433,11 +482,13 @@ def scan_library(
             conn.execute(
                 """
                 UPDATE media_items SET rel_path = ?, title = ?, year = ?, poster_path = ?, poster_rev = ?,
+                    subtitle_path = ?, subtitle_rev = ?,
                     size = ?, mtime = ?, missing_since = NULL, parent_dir = ?, title_key = ?,
                     path_key = ?
                 WHERE id = ?
                 """,
-                (video.rel_path, video.title, video.year, video.poster_path, video.poster_rev, video.size,
+                (video.rel_path, video.title, video.year, video.poster_path, video.poster_rev,
+                 video.subtitle_path, video.subtitle_rev, video.size,
                  video.mtime, parent_dir(video.rel_path), sort_key(video.title, video.rel_path),
                  path_key(video.rel_path), row["id"]),
             )
@@ -497,16 +548,19 @@ def scan_library(
         refreshed = [
             v for v in unchanged
             if (existing[v.rel_path]["title"], existing[v.rel_path]["year"], existing[v.rel_path]["poster_path"],
-                existing[v.rel_path]["poster_rev"])
-            != (v.title, v.year, v.poster_path, v.poster_rev) or existing[v.rel_path]["missing_since"]
+                existing[v.rel_path]["poster_rev"], existing[v.rel_path]["subtitle_path"],
+                existing[v.rel_path]["subtitle_rev"])
+            != (v.title, v.year, v.poster_path, v.poster_rev, v.subtitle_path, v.subtitle_rev)
+            or existing[v.rel_path]["missing_since"]
         ]
         conn.executemany(
             """
-            UPDATE media_items SET title = ?, year = ?, poster_path = ?, poster_rev = ?, missing_since = NULL,
-                title_key = ?
+            UPDATE media_items SET title = ?, year = ?, poster_path = ?, poster_rev = ?, subtitle_path = ?,
+                subtitle_rev = ?, missing_since = NULL, title_key = ?
             WHERE library_id = ? AND rel_path = ?
             """,
-            [(v.title, v.year, v.poster_path, v.poster_rev, sort_key(v.title, v.rel_path), library_id, v.rel_path)
+            [(v.title, v.year, v.poster_path, v.poster_rev, v.subtitle_path, v.subtitle_rev,
+              sort_key(v.title, v.rel_path), library_id, v.rel_path)
              for v in refreshed],
         )
         conn.commit()
@@ -530,14 +584,16 @@ def scan_library(
             conn.execute(
                 """
                 INSERT INTO media_items (
-                    uid, library_id, rel_path, title, year, poster_path, poster_rev, size, mtime,
+                    uid, library_id, rel_path, title, year, poster_path, poster_rev, subtitle_path, subtitle_rev,
+                    size, mtime,
                     container, video_codec, audio_codec, pix_fmt, width, height,
                     duration, interlaced, probe_error, fingerprint, probe_version, parent_dir, title_key,
                     path_key, scanned_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
                 ON CONFLICT (library_id, rel_path) DO UPDATE SET
                     title = excluded.title, year = excluded.year,
-                    poster_path = excluded.poster_path, poster_rev = excluded.poster_rev, size = excluded.size,
+                    poster_path = excluded.poster_path, poster_rev = excluded.poster_rev,
+                    subtitle_path = excluded.subtitle_path, subtitle_rev = excluded.subtitle_rev, size = excluded.size,
                     mtime = excluded.mtime, container = excluded.container,
                     video_codec = excluded.video_codec, audio_codec = excluded.audio_codec,
                     pix_fmt = excluded.pix_fmt, width = excluded.width,
@@ -550,7 +606,7 @@ def scan_library(
                 """,
                 (
                     new_uid(), library_id, video.rel_path, video.title, video.year, video.poster_path,
-                    video.poster_rev, video.size, video.mtime, result.container, result.video_codec,
+                    video.poster_rev, video.subtitle_path, video.subtitle_rev, video.size, video.mtime, result.container, result.video_codec,
                     result.audio_codec, result.pix_fmt, result.width, result.height,
                     result.duration, int(result.interlaced), result.error,
                     fp, PROBE_VERSION, parent_dir(video.rel_path), sort_key(video.title, video.rel_path),

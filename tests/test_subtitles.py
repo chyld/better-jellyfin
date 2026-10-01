@@ -105,7 +105,7 @@ def test_making_subtitles(client, videos, settings):
     assert vtt.status_code == 200 and vtt.headers["content-type"].startswith("text/vtt")
     assert vtt.text.startswith("WEBVTT") and "cake" in vtt.text
     download = client.get(f"/api/items/{video}/subtitles.vtt", params={"download": True})
-    assert 'attachment; filename="a.en.vtt"' in download.headers["content-disposition"]
+    assert download.headers["content-disposition"] == "attachment; filename*=UTF-8''a.en.vtt"
     assert [p.name.endswith(".en.vtt") for p in settings.subtitles_dir.iterdir()] == [True]
 
     listed = client.get("/api/subtitles").json()
@@ -242,3 +242,75 @@ def test_the_real_worker(tmp_path):
     news = [json.loads(line) for line in run.stdout.splitlines()]
     assert {"stage": "listening"} in news and news[-1] == {"progress": 1.0}
     assert out.read_text().startswith("WEBVTT")
+
+
+# ---- Subtitle files beside a video on the NAS --------------------------------------------------
+
+
+@pytest.mark.parametrize("files, found", [
+    (["movie.mp4", "movie.en.vtt"], "movie.en.vtt"),
+    (["movie.mp4", "movie.vtt"], "movie.vtt"),
+    (["movie.mp4", "Movie.EN.SRT"], "Movie.EN.SRT"),                 # any capitalisation
+    (["movie.mp4", "movie.ja.vtt", "movie.en.srt"], "movie.en.srt"),  # English first
+    (["movie.mp4", "movie.ja.vtt", "movie.vtt"], "movie.vtt"),        # then no language given
+    (["movie.mp4", "movie.en.srt", "movie.en.vtt"], "movie.en.vtt"),  # WebVTT before SRT
+    (["movie.mp4", "movie.ja.vtt"], "movie.ja.vtt"),                  # then any
+    (["movie.mp4", "other.en.vtt", "movie2.vtt"], None),              # another video's
+    (["1992.zoo-trip.mpg", "1992.zoo-trip.en.vtt"], "1992.zoo-trip.en.vtt"),
+    (["a.b.mp4", "a.b.vtt"], "a.b.vtt"),                              # "b" isn't a language here: it's the name
+])
+def test_finding_a_videos_subtitle_file(files, found):
+    from reel.scanner import find_subtitles
+    assert find_subtitles(files[0], files[1:]) == found
+
+
+def test_the_scan_finds_subtitles_beside_videos(client, media_root, settings):
+    make_files(media_root, "S/001/movie.mp4", "S/001/movie.png", "S/002/movie.mp4", "S/003/movie.mp4")
+    (media_root / "S/001/movie.en.vtt").write_text("WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nHello.\n")
+    (media_root / "S/003/movie.srt").write_text("1\r\n00:00:01,500 --> 00:00:03,000\r\nHi there.\r\n\r\n2\r\n"
+                                                 "00:00:04,000 --> 00:00:05,250\r\n12\r\n")
+    lib = client.post("/api/libraries", json={"name": "S", "path": str(media_root / "S")}).json()["id"]
+    client.post(f"/api/libraries/{lib}/scan")
+    client.app.state.scans.wait_idle()
+    ids = {i["rel_path"]: i["id"] for i in client.get(f"/api/libraries/{lib}/browse", params={"all": True}).json()["items"]}
+    one, two, three = (client.get(f"/api/items/{ids[f'00{n}/movie.mp4']}").json() for n in (1, 2, 3))
+    assert (one["subtitle_file"], two["subtitle_file"], three["subtitle_file"]) == ("movie.en.vtt", None, "movie.srt")
+    assert one["subtitles"] is None                                          # none made by Reel
+
+    vtt = client.get(f"/api/items/{one['id']}/subtitles.vtt")
+    assert vtt.status_code == 200 and vtt.text.endswith("Hello.\n")
+    converted = client.get(f"/api/items/{three['id']}/subtitles.vtt", params={"download": True})
+    assert converted.text == ("WEBVTT\n\n00:00:01.500 --> 00:00:03.000\nHi there.\n\n"
+                              "00:00:04.000 --> 00:00:05.250\n12\n")             # a line that's just a number stays
+    assert converted.headers["content-disposition"].endswith("movie.vtt")
+    assert client.get(f"/api/items/{two['id']}/subtitles.vtt").status_code == 404
+
+    # Not made again over them; listed on the Subtitles page.
+    assert client.post(f"/api/items/{one['id']}/subtitles").status_code == 409
+    listed = {s["id"]: s for s in client.get("/api/subtitles").json()["subtitles"]}
+    assert (listed[one["id"]]["kind"], listed[one["id"]]["file"], listed[one["id"]]["language"]) == ("nas", "movie.en.vtt", "en")
+    assert listed[three["id"]]["language"] is None and two["id"] not in listed
+
+    # Ones Reel makes win over the file beside it.
+    client.post(f"/api/items/{two['id']}/subtitles")
+    wait(client, two["id"])
+    (media_root / "S/002/movie.vtt").write_text("WEBVTT\n\n00:00:09.000 --> 00:00:10.000\nFrom the NAS.\n")
+    client.post(f"/api/libraries/{lib}/scan")
+    client.app.state.scans.wait_idle()
+    both = client.get(f"/api/items/{two['id']}").json()
+    assert both["subtitle_file"] == "movie.vtt" and both["subtitles"]["file"].endswith(".en.vtt")
+    assert "cake" in client.get(f"/api/items/{two['id']}/subtitles.vtt").text
+    assert [s["kind"] for s in client.get("/api/subtitles").json()["subtitles"] if s["id"] == two["id"]] == ["made"]
+
+    # A subtitle file that's gone from the NAS is forgotten by the next scan.
+    (media_root / "S/001/movie.en.vtt").unlink()
+    client.post(f"/api/libraries/{lib}/scan")
+    client.app.state.scans.wait_idle()
+    assert client.get(f"/api/items/{one['id']}").json()["subtitle_file"] is None
+
+
+def test_srt_to_vtt():
+    from reel.subtitles import as_vtt
+    assert as_vtt("﻿1\n00:00:01,5 --> 00:00:02,250 align:start\n<i>Hi</i>\n", "a.srt") == \
+        "WEBVTT\n\n00:00:01.500 --> 00:00:02.250 align:start\n<i>Hi</i>\n"
+    assert as_vtt("﻿WEBVTT\n\nx\n", "a.vtt") == "WEBVTT\n\nx\n"

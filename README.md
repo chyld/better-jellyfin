@@ -293,6 +293,8 @@ needs the video to play in this browser.
 A scan walks the library folder and records every video in SQLite. Pages are then built from
 the database, so **browsing never touches the NAS**.
 
+- **Subtitle files** beside a video and named like it (`movie.en.vtt`, `movie.srt`) are recorded with
+  it: see [Subtitles](#subtitles).
 - **Videos** are recognised by extension: `mp4 m4v mov mkv webm avi wmv asf mpg mpeg m2ts mts
   ts vob flv 3gp ogv divx`. Hidden files and folders (`.zfs`, `.Trash`, …) are skipped.
 - Each new or changed file is read with **ffprobe**: container, video and audio codecs, pixel
@@ -573,6 +575,13 @@ is just written down.
   invent over them ("Thank you for watching") are dropped.
 - **Accuracy:** clear speech comes out well; mumbling, overlapping voices and background noise
   cause mistakes, and the English is a fairly literal translation.
+- **Subtitles already on the NAS count too.** The scan picks up a subtitle file beside a video,
+  named like it, as it does a poster: `movie.en.vtt` or `movie.vtt` beside `movie.mp4`, or `.srt`
+  (English first, then one with no language in its name, then any; WebVTT before SRT). A video
+  that has one isn't offered Make English subtitles, its details name the file ("movie.en.vtt
+  (beside the video)"), and it's listed on the Subtitles page. An `.srt` is converted to WebVTT
+  when it's sent. One Reel made wins over the file beside the video. Like any NAS file, it's never
+  changed or deleted by Reel; one that's gone is forgotten by the next scan.
 - They're saved as WebVTT (`subtitles/<video uuid>-<version>.en.vtt` in the data folder, never on the
   NAS): **Download** gets the file. Making them again replaces them. They belong to the video: they
   follow a moved or renamed file, and go when the video leaves the catalog.
@@ -804,9 +813,9 @@ JSON over HTTP. Every ID is a UUID. There's no authentication yet (see
 | POST | `/api/items/{id}/mp4-copy` | Start making an MP4 copy (202, returns `{state, progress, error}`); 409 if it has one or wouldn't be helped by one, 507 without the disk space. `GET /api/items/{id}` shows `can_copy`, `copy_size` (bytes, once there's a current copy) and `copy_job` (while one is queued or being made, or why it failed). |
 | GET | `/api/copies` | The Copies page: `jobs` (running, then waiting with their `place` in line, then failed), `copies` (every copy, newest first: its video, `copy_size`, `made_at`, `current`) and `totals`. |
 | POST | `/api/items/{id}/subtitles` | `{language?}` (what's spoken, e.g. `ja`; left out, Whisper works it out): start making English subtitles (202, returns `{state, stage, progress, error}`). `GET /api/items/{id}` shows `can_subtitle`, `subtitles` (`{version, source_language, model, made_at}`) and `subtitle_job`. |
-| GET | `/api/items/{id}/subtitles.vtt?download=` | The English subtitles (WebVTT); `download=true` to save them as a file. |
+| GET | `/api/items/{id}/subtitles.vtt?download=` | The video's subtitles as WebVTT: the ones Reel made, else the file beside it on the NAS (`subtitle_file` in `GET /api/items/{id}`; an `.srt` is converted). `download=true` to save them as a file. |
 | DELETE | `/api/items/{id}/subtitles` | Stop subtitles being made, or remove them. |
-| GET | `/api/subtitles` | The Subtitles page: `jobs` and `subtitles`, as on `/api/copies`. |
+| GET | `/api/subtitles` | The Subtitles page: `jobs`, and `subtitles`: those Reel made (`kind: "made"`), then files beside videos on the NAS (`kind: "nas"`, with `file` and `language`). |
 | DELETE | `/api/items/{id}/mp4-copy` | Stop the copy being made, or remove the copy: the original plays again. |
 | DELETE | `/api/items/{id}/image` | Remove the uploaded picture (the NAS one, if any, shows again). |
 | POST | `/api/items/{id}/tags` | `{name}`: tag the video. Returns its tags. |
@@ -858,9 +867,9 @@ version); bump `THUMBS` when the server changes how thumbnails are made.
 ### Tests
 
 ```sh
-uv run pytest              # backend: 668 tests
+uv run pytest              # backend: 695 tests
 node --test tests/js/      # frontend: 48 tests
-uv run pytest -m browser   # browser: 30 tests (about 3 minutes; needs Chromium and ffmpeg)
+uv run pytest -m browser   # browser: 32 tests (about 3 minutes; needs Chromium and ffmpeg)
 scripts/docker-smoke.sh    # builds the image and checks it end to end (needs Docker)
 ```
 

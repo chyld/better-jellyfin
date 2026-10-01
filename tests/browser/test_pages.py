@@ -252,3 +252,24 @@ def test_making_english_subtitles(server, page):
     page.js("document.querySelector('dialog.confirm-dialog .btn.danger').click()")
     page.wait_for("!!document.querySelector('.subtitles-made .empty')", message="none left")
     assert server.call("GET", f"/api/items/{video}")["subtitles"] is None
+
+
+def test_a_video_with_subtitles_beside_it(server, page):
+    """Subtitles on the NAS (direct.en.vtt beside direct.mp4), found by a scan: no
+    Make English subtitles button, and the details name the file."""
+    (server.media / "Videos/direct.en.vtt").write_text("WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nHello.\n")
+    server.call("POST", f"/api/libraries/{server.library}/scan")
+    server.app.state.scans.wait_idle(60)
+    video = server.videos["direct.mp4"]
+    page.goto(f"{server.base}/#/item/{video}")
+    page.wait_for("!!document.querySelector('.facts')", message="the video's page")
+    assert page.js("[...document.querySelectorAll('.detail-actions .btn')]"
+                   ".filter(b => /subtitles/i.test(b.textContent) && !b.hidden).length") == 0
+    facts = page.js("Object.fromEntries([...document.querySelectorAll('.facts dt')].map(dt => [dt.textContent, dt.nextElementSibling.textContent]))")
+    assert facts["Subtitles"] == "direct.en.vtt (beside the video)"
+    other = server.videos["remux.mkv"]                       # no subtitles: the button is there
+    page.goto(f"{server.base}/#/item/{other}")
+    page.wait_for("(document.querySelector('.detail h2') || {}).textContent === 'remux'", message="another video's page")
+    assert page.js("[...document.querySelectorAll('.detail-actions .btn')]"
+                   ".some(b => b.textContent === 'Make English subtitles' && !b.hidden)")
+    assert page.js("[...document.querySelectorAll('.facts dt')].some(dt => dt.textContent === 'Subtitles')") is False

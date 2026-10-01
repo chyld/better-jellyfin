@@ -19,6 +19,7 @@ them (it's most likely the same video); make them again if it isn't.
 import asyncio
 import json
 import os
+import re
 import signal
 import sqlite3
 import sys
@@ -82,6 +83,33 @@ def timestamp(seconds: float) -> str:
     minutes, ms = divmod(ms, 60_000)
     secs, ms = divmod(ms, 1000)
     return f"{hours:02}:{minutes:02}:{secs:02}.{ms:03}"
+
+
+_SRT_TIME = re.compile(r"^(\d+:\d\d:\d\d),(\d{1,3})\s*-->\s*(\d+:\d\d:\d\d),(\d{1,3})(.*)$")
+
+
+def srt_to_vtt(text: str) -> str:
+    """SubRip (.srt) as WebVTT, which browsers show: a header, dots in the times
+    instead of commas, and no cue numbers."""
+    lines = text.lstrip("\ufeff").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    out = ["WEBVTT", ""]
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        timing = _SRT_TIME.match(stripped)
+        if timing:
+            a, ams, b, bms, rest = timing.groups()
+            out.append(f"{a}.{ams.ljust(3, '0')} --> {b}.{bms.ljust(3, '0')}{rest}")
+        elif stripped.isdigit() and i + 1 < len(lines) and _SRT_TIME.match(lines[i + 1].strip()):
+            continue                                   # the cue's number
+        else:
+            out.append(line.rstrip())
+    return "\n".join(out).rstrip("\n") + "\n"
+
+
+def as_vtt(text: str, name: str) -> str:
+    """A subtitle file's text as WebVTT, whatever it was (.vtt or .srt)."""
+    text = text.lstrip("\ufeff")
+    return srt_to_vtt(text) if name.lower().endswith(".srt") else text
 
 
 def to_vtt(cue_list) -> str:
@@ -170,7 +198,8 @@ def prune(conn: sqlite3.Connection, folder: Path, *, grace_seconds: float = ORPH
 
 def listing(conn: sqlite3.Connection, jobs: list[tuple[str, dict]]) -> dict:
     """The Subtitles page: jobs (running first, then waiting in order, then failed),
-    and every video with subtitles (newest first)."""
+    every video with subtitles Reel made (newest first), then every video with a
+    subtitle file beside it on the NAS (by path; `kind: "nas"`, its `file`)."""
     fields = """m.uid, m.title, m.rel_path, m.custom_image, m.poster_path, m.poster_rev, m.duration,
                 l.uid AS library_uid, l.name AS library_name"""
 
@@ -200,7 +229,22 @@ def listing(conn: sqlite3.Connection, jobs: list[tuple[str, dict]]) -> dict:
             for r in conn.execute(f"SELECT {fields}, s.language, s.source_language, s.model, s.made_at "
                                   "FROM subtitles s JOIN media_items m ON m.id = s.item_id "
                                   "JOIN libraries l ON l.id = m.library_id ORDER BY s.made_at DESC, m.title")]
-    return {"jobs": out_jobs, "subtitles": made}
+    for item in made:
+        item["kind"] = "made"
+    beside = [{**video(r), "kind": "nas", "file": r["subtitle_path"].rsplit("/", 1)[-1],
+               "language": file_language(r["subtitle_path"])}
+              for r in conn.execute(f"SELECT {fields}, m.subtitle_path FROM media_items m "
+                                    "JOIN libraries l ON l.id = m.library_id "
+                                    "WHERE m.subtitle_path IS NOT NULL AND m.missing_since IS NULL "
+                                    "AND NOT EXISTS (SELECT 1 FROM subtitles s WHERE s.item_id = m.id) "
+                                    "ORDER BY l.name, m.path_key")]
+    return {"jobs": out_jobs, "subtitles": made + beside}
+
+
+def file_language(path: str) -> str | None:
+    """The language a subtitle file's name gives: "movie.en.vtt" -> "en"."""
+    parts = path.rsplit("/", 1)[-1].split(".")
+    return parts[-2].lower() if len(parts) >= 3 and re.fullmatch(r"[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})?", parts[-2]) else None
 
 
 # ---- Making them ------------------------------------------------------------------------------

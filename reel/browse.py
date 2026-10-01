@@ -372,4 +372,6 @@ def item_detail(conn: sqlite3.Connection, item_uid: str) -> dict:
         "missing": row["missing_since"] is not None,
         "can_copy": copies.can_copy(row),                          # an MP4 copy would play it directly
         "copy_size": row["mp4_copy_size"] if copies.is_current(row) else None,   # it has one (bytes)
+        # A subtitle file beside it on the NAS (movie.en.vtt), found by the scan.
+        "subtitle_file": row["subtitle_path"].rsplit("/", 1)[-1] if row["subtitle_path"] else None,
     }

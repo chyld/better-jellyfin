@@ -73,7 +73,10 @@ a { color: var(--accent); }
   background: var(--neon); box-shadow: 0 4px 18px rgb(56 189 248 / 0.35);
 }
 .logo svg { width: 14px; height: 14px; margin-left: 2px; }
-.nav { display: flex; gap: 4px; }
+/* The links scroll within the bar, rather than widening the page, on a narrow screen. */
+.nav { display: flex; gap: 4px; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+.nav::-webkit-scrollbar { display: none; }
+.nav a { flex: none; }
 .nav a {
   color: var(--muted); text-decoration: none; font-size: 14px; font-weight: 550;
   padding: 7px 14px; border-radius: 999px; transition: color 0.2s, background 0.2s;
@@ -486,7 +489,8 @@ dialog .note { margin: 0 0 14px; font-size: 14px; color: var(--warn); }
 @media (max-width: 560px) {
   .topbar { padding: 0 16px; gap: 14px; height: 58px; }
   .brand span:last-child { display: none; }
-  .nav a { padding: 7px 11px; }
+  .nav { gap: 0; }
+  .nav a { padding: 7px 9px; font-size: 13.5px; }
   main { padding: 24px 16px 56px; }
   .page-title, .crumbs { font-size: 22px; }
   .grid { gap: 20px 12px; }

@@ -843,7 +843,8 @@ function subtitlesUi(item) {
 
   function show(job) {
     clearTimeout(timer);
-    button.hidden = !item.can_subtitle || Boolean(item.subtitles);
+    // Not offered where there are subtitles already: made by Reel, or beside the video on the NAS.
+    button.hidden = !item.can_subtitle || Boolean(item.subtitles) || Boolean(item.subtitle_file);
     const busy = job && job.state !== "error";
     if (busy) {
       button.disabled = true;
@@ -910,6 +911,13 @@ export async function renderItem(view, itemId, list = null) {
     ["File size", formatSize(item.size)],
     ["File", item.rel_path],
   ];
+  // Which subtitle file it has: one Reel made (in the data folder, shown first: it's
+  // the one used), and/or one beside the video on the NAS.
+  const subtitleFiles = [
+    item.subtitles && `${item.subtitles.file} (made by Reel, in its data folder)`,
+    item.subtitle_file && `${item.subtitle_file} (beside the video)`,
+  ].filter(Boolean);
+  if (subtitleFiles.length) facts.push(["Subtitles", subtitleFiles.join(" · ")]);
 
   fill(view,
     // The video's picture, blurred, glowing behind the top of the page.

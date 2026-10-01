@@ -8,7 +8,7 @@ import sqlite3
 import subprocess
 from collections.abc import Iterator
 from contextlib import asynccontextmanager
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
@@ -298,10 +298,17 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
                 "copy_job": copier.status(item_uid),
                 "can_subtitle": subtitles.can_make(conn.execute("SELECT * FROM media_items WHERE uid = ?",
                                                                 (item_uid,)).fetchone()),
-                "subtitles": subtitles.info(conn, tags.item_pk(conn, item_uid)),
+                "subtitles": made_subtitles(conn, item_uid),
                 "subtitle_job": subtitler.status(item_uid)}
 
     # ---- Subtitles (see subtitles.py) ----
+
+    def made_subtitles(conn: sqlite3.Connection, item_uid: str) -> dict | None:
+        """The subtitles Reel made for the video, with their file's name."""
+        made = subtitles.info(conn, tags.item_pk(conn, item_uid))
+        if made:
+            made["file"] = subtitles.file_name(item_uid, made["version"])
+        return made
 
     class SubtitleRequest(BaseModel):
         language: str | None = Field(default=None, pattern=r"^[a-z]{2,3}$")   # what's spoken; None: Whisper hears it
@@ -314,6 +321,8 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
                 raise HTTPException(404, "Video not found.")
             if not subtitles.can_make(row):
                 raise HTTPException(409, "This video has no sound to make subtitles from.")
+            if row["subtitle_path"]:
+                raise HTTPException(409, "This video already has subtitles beside it on the NAS.")
             src = original_file(conn, row)
         finally:
             conn.close()
@@ -342,14 +351,29 @@ def create_app(settings: Settings | None = None, scan_manager: ScanManager | Non
 
     @app.get("/api/items/{item_uid}/subtitles.vtt")
     def get_subtitles(item_uid: str, download: bool = False, conn: sqlite3.Connection = Db):
-        """The video's English subtitles (WebVTT); `download` to save them as a file."""
-        tags.item_pk(conn, item_uid)
-        path = subtitles.current_file(conn, settings.subtitles_dir, item_uid)
-        if path is None or not path.is_file():
+        """The video's subtitles as WebVTT: the ones Reel made, else the file beside
+        it on the NAS (an .srt is converted). `download` to save them as a file."""
+        row = conn.execute("SELECT * FROM media_items WHERE uid = ?", (item_uid,)).fetchone()
+        if row is None:
+            raise HTTPException(404, "Video not found.")
+        made = subtitles.current_file(conn, settings.subtitles_dir, item_uid)
+        if made is not None and made.is_file():
+            text, name = made.read_text(encoding="utf-8", errors="replace"), f"{row['title']}.en.vtt"
+        elif row["subtitle_path"]:
+            try:
+                path = library_file(conn, row["library_id"], row["subtitle_path"])
+                raw = path.read_bytes()
+            except OSError:
+                raise HTTPException(404, "The subtitle file is missing. Is the NAS connected?")
+            name = row["subtitle_path"].rsplit("/", 1)[-1]
+            text = subtitles.as_vtt(raw.decode("utf-8", errors="replace"), name)
+            name = name.rsplit(".", 1)[0] + ".vtt"
+        else:
             raise HTTPException(404, "This video has no subtitles.")
-        title = conn.execute("SELECT title FROM media_items WHERE uid = ?", (item_uid,)).fetchone()["title"]
-        return FileResponse(path, media_type="text/vtt; charset=utf-8", headers={"Cache-Control": "no-cache"},
-                            filename=f"{title}.en.vtt" if download else None)
+        headers = {"Cache-Control": "no-cache"}
+        if download:
+            headers["Content-Disposition"] = f"attachment; filename*=UTF-8''{quote(name)}"
+        return Response(text, media_type="text/vtt; charset=utf-8", headers=headers)
 
     @app.get("/api/subtitles")
     def list_subtitles(conn: sqlite3.Connection = Db):

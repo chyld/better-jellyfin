@@ -67,6 +67,13 @@ export async function renderSubtitles(view) {
   }
 
   function madeRow(sub) {
+    if (sub.kind === "nas") {
+      const lang = sub.language ? `${languageName(sub.language)} · ` : "";
+      return row(sub, {
+        status: { text: `${lang}${sub.file}, beside the video`, tone: "ok" },
+        buttons: h("a", { class: "btn", href: `/api/items/${sub.id}/subtitles.vtt?download=true` }, "Download"),
+      });
+    }
     const from = sub.source_language && sub.source_language !== "en" ? ` from ${languageName(sub.source_language)}` : "";
     return row(sub, {
       status: { text: `English${from} · Whisper ${sub.model} · made ${madeAt(sub.made_at)}`, tone: "ok" },
@@ -93,8 +100,10 @@ export async function renderSubtitles(view) {
     if (closed) return;
     const { jobs, subtitles } = data;
     const busy = jobs.filter((j) => j.state !== "error").length;
+    const beside = subtitles.filter((s) => s.kind === "nas").length;
     summary.textContent = [
-      subtitles.length ? `${subtitles.length} ${subtitles.length === 1 ? "video has" : "videos have"} English subtitles` : "No subtitles yet.",
+      subtitles.length ? `${subtitles.length} ${subtitles.length === 1 ? "video has" : "videos have"} subtitles` : "No subtitles yet.",
+      beside && `${beside} beside the video on the NAS`,
       busy && `${busy} being made or waiting`,
     ].filter(Boolean).join(" · ");
     fill(jobsSection, jobs.length > 0 && [
