@@ -3,3 +3,26 @@ __pycache__/
 .pytest_cache/
 data/
 .env
+
+# Never commit media or subtitles (yours stay on the NAS and in the data folder).
+*.mp4
+*.m4v
+*.mov
+*.mkv
+*.webm
+*.avi
+*.wmv
+*.asf
+*.mpg
+*.mpeg
+*.ts
+*.m2ts
+*.mts
+*.vob
+*.flv
+*.3gp
+*.ogv
+*.divx
+*.vtt
+*.srt
+*.ass
