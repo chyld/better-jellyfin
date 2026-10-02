@@ -134,6 +134,27 @@ body.playing main { padding: 0; max-width: none; }
 .volume::-moz-range-thumb { width: 12px; height: 12px; border: 0; border-radius: 50%; background: #fff; box-shadow: 0 0 10px rgb(56 189 248 / 0.8); }
 .volume::-moz-range-track { background: transparent; }
 
+/* Subtitles: drawn by the player, centred near the bottom; just above the dock
+   while it shows (--dock-height, set from its size), lower once the controls hide. */
+.subtitles {
+  position: absolute; left: 50%; transform: translateX(-50%); z-index: 1;
+  bottom: calc(var(--dock-height, 110px) + 40px);
+  width: min(92%, 1100px); display: flex; flex-direction: column; align-items: center; gap: 0.12em;
+  pointer-events: none; text-align: center; transition: bottom 0.35s ease;
+  font: 600 clamp(17px, 1.6vw + 1.6vh, 46px)/1.25 "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: #fff; letter-spacing: 0.005em;
+}
+.subtitles[hidden] { display: none; }
+.subtitles span {
+  max-width: 100%; padding: 0.06em 0.45em; border-radius: 0.3em; overflow-wrap: anywhere;
+  background: rgb(0 0 0 / 0.55);
+  text-shadow: 0 0 2px #000, 0 1px 3px rgb(0 0 0 / 0.9);
+  -webkit-box-decoration-break: clone; box-decoration-break: clone;
+}
+.player.idle .subtitles { bottom: 6vh; }
+/* The CC button, lit while subtitles are on. */
+.pbtn.on { color: var(--neon-a); }
+
 /* Loading ring */
 .spinner {
   position: absolute; inset: 0; margin: auto; width: 56px; height: 56px; border-radius: 50%; pointer-events: none;
@@ -185,6 +206,8 @@ body.playing main { padding: 0; max-width: none; }
   .pbtn { width: 38px; height: 38px; }
   .pbtn.primary { width: 50px; height: 50px; }
   .vol .volume { display: none; }
+  .subtitles { bottom: calc(var(--dock-height, 120px) + 24px); }
+  .player.idle .subtitles { bottom: 4vh; }
   .clock.total { padding-right: 2px; }
   /* Two rows on a phone: the time and the play controls, then the tools
      (total time, sound, marks, snapshot, full screen), spread across. */

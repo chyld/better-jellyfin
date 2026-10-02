@@ -4,7 +4,7 @@ import re
 import sqlite3
 from pathlib import Path
 
-from .browse import item_out
+from .browse import item_out, subtitled
 from .plan import Capabilities
 from .catalog import NotFound, page_bounds
 from .db import NOW_MS, new_uid, write_transaction
@@ -199,6 +199,7 @@ def tag_videos(conn: sqlite3.Connection, tag_uid: str, *, limit: int | None = No
     total = conn.execute(f"SELECT COUNT(*) {joined}", (tag["id"],)).fetchone()[0]
     rows = conn.execute(
         f"SELECT m.* {joined} ORDER BY it.added_at, it.rowid LIMIT ? OFFSET ?", (tag["id"], limit, offset)
-    )
-    return {"tag": _tag_out(tag), "items": [item_out(r, caps, hls_support) for r in rows],
+    ).fetchall()
+    with_subtitles = subtitled(conn, (r["id"] for r in rows))
+    return {"tag": _tag_out(tag), "items": [item_out(r, caps, hls_support, r["id"] in with_subtitles) for r in rows],
             "total_items": total, "offset": offset, "limit": limit}

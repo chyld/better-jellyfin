@@ -276,6 +276,10 @@ def test_the_scan_finds_subtitles_beside_videos(client, media_root, settings):
     one, two, three = (client.get(f"/api/items/{ids[f'00{n}/movie.mp4']}").json() for n in (1, 2, 3))
     assert (one["subtitle_file"], two["subtitle_file"], three["subtitle_file"]) == ("movie.en.vtt", None, "movie.srt")
     assert one["subtitles"] is None                                          # none made by Reel
+    cards = {i["rel_path"]: i["has_subtitles"] for i in
+             client.get(f"/api/libraries/{lib}/browse", params={"all": True}).json()["items"]}
+    assert cards == {"001/movie.mp4": True, "002/movie.mp4": False, "003/movie.mp4": True}
+    assert (one["has_subtitles"], two["has_subtitles"]) == (True, False)
 
     vtt = client.get(f"/api/items/{one['id']}/subtitles.vtt")
     assert vtt.status_code == 200 and vtt.text.endswith("Hello.\n")
@@ -301,6 +305,8 @@ def test_the_scan_finds_subtitles_beside_videos(client, media_root, settings):
     assert both["subtitle_file"] == "movie.vtt" and both["subtitles"]["file"].endswith(".en.vtt")
     assert "cake" in client.get(f"/api/items/{two['id']}/subtitles.vtt").text
     assert [s["kind"] for s in client.get("/api/subtitles").json()["subtitles"] if s["id"] == two["id"]] == ["made"]
+    tag = client.post(f"/api/items/{two['id']}/tags", json={"name": "subs"}).json()[0]
+    assert client.get(f"/api/tags/{tag['id']}").json()["items"][0]["has_subtitles"] is True   # made by Reel counts
 
     # A subtitle file that's gone from the NAS is forgotten by the next scan.
     (media_root / "S/001/movie.en.vtt").unlink()

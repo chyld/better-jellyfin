@@ -187,6 +187,7 @@ select { padding: 7px 30px 7px 12px; appearance: none; cursor: pointer;
 .type-badge.err { color: var(--danger); background: rgb(251 113 133 / 0.1); border-color: rgb(251 113 133 / 0.3); }
 .type-badge.copy, .pill.copy { color: var(--neon-a); background: rgb(56 189 248 / 0.1); border-color: rgb(56 189 248 / 0.3); }
 .type-badge.copy { text-transform: uppercase; }
+.type-badge.cc, .pill.cc { color: #e5e7eb; background: rgb(255 255 255 / 0.08); border-color: rgb(255 255 255 / 0.28); }
 .type-badge.clip { color: var(--neon-b); background: rgb(167 139 250 / 0.1); border-color: rgb(167 139 250 / 0.3); }
 
 .art {

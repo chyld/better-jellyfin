@@ -434,7 +434,7 @@ function videoCard(item, { from = "", list = null } = {}) {
       artBox({ kind: "video", shape: "landscape", src: videoImageSrc(item) }),
       h("div", { class: "label" }, item.title),
       h("div", { class: "sub where" }, pathBelow(item.rel_path, from)),
-      h("div", { class: "sub meta" }, meta && h("span", {}, meta), typeBadge(item), copyBadge(item)),
+      h("div", { class: "sub meta" }, meta && h("span", {}, meta), typeBadge(item), copyBadge(item), ccBadge(item)),
     ),
   );
 }
@@ -451,6 +451,12 @@ function typeBadge(item) {
 function copyBadge(item) {
   if (!item.has_copy) return null;
   return h("span", { class: "type-badge copy", title: "Plays from an MP4 copy in Reel's data folder" }, "Copy");
+}
+
+/** "CC" on a video with subtitles (beside it on the NAS, or made by Reel). */
+function ccBadge(item) {
+  if (!item.has_subtitles) return null;
+  return h("span", { class: "type-badge cc", title: "Has subtitles (CC in the player)" }, "CC");
 }
 
 function folderCard(libraryId, folder) {
@@ -891,6 +897,7 @@ export async function renderItem(view, itemId, list = null) {
     item.height && h("span", { class: "pill" }, resolutionLabel(item)),
     item.type && h("span", { class: "pill" }, item.type),
     item.copy_size && h("span", { class: "pill copy", title: "Plays from an MP4 copy in Reel's data folder" }, "Copy"),
+    item.has_subtitles && h("span", { class: "pill cc", title: "Has subtitles: turn them on and off with CC in the player" }, "CC"),
     item.missing
       ? h("span", { class: "pill mode err", title: "The last scan couldn't find this file. It's kept for a while in case it comes back." }, "Missing from the library")
       : h(

@@ -5,11 +5,35 @@
 import { api, formatDuration, h } from "./api.js";
 import { capabilities, capsQuery, hlsSupport } from "./caps.js";
 import { makeSource } from "./sources.js";
+import { parseVtt, textAt } from "./vtt.js";
 
 const HIDE_CONTROLS_AFTER = 3000;
 const BADGES = { remux: "Repackaging", audio: "Converting audio", transcode: "Converting" };
 const SKIP_SECONDS = 10; // arrow keys
 const JUMP_SECONDS = 60; // the 1-minute buttons, and Shift + arrow keys
+const SUBTITLES_KEY = "reel.subtitles"; // "off" once they're turned off (remembered in this browser)
+
+/** Whether subtitles are on: they are, unless turned off in this browser. */
+export function subtitlesWanted(storage = globalThis.localStorage) {
+  try {
+    return storage?.getItem(SUBTITLES_KEY) !== "off";
+  } catch {
+    return true; // private mode: on, and not remembered
+  }
+}
+
+function rememberSubtitles(on, storage = globalThis.localStorage) {
+  try {
+    storage?.setItem(SUBTITLES_KEY, on ? "on" : "off");
+  } catch {
+    /* not remembered */
+  }
+}
+
+/** Does the video have subtitles (made by Reel, or a file beside it)? */
+export function hasSubtitles(item) {
+  return Boolean(item.subtitles || item.subtitle_file);
+}
 
 // The player that owns the page-wide state (the "playing" look). A replaced player
 // whose loading finishes late is cleaned up then, and must not undo the current one's.
@@ -69,6 +93,7 @@ const ICONS = {
   prevMark: '<path d="M6 5v14"/><path d="M19 12h-9M13.5 8l-4 4 4 4"/>',
   nextMark: '<path d="M18 5v14"/><path d="M5 12h9M10.5 8l4 4-4 4"/>',
   mark: '<path d="M7 4.5h10a1 1 0 0 1 1 1v14l-6-3.8-6 3.8v-14a1 1 0 0 1 1-1z"/><path d="M12 8v5M9.5 10.5h5"/>',
+  cc: '<rect x="3" y="5.5" width="18" height="13" rx="2.5"/><path d="M10.6 10.2a2.3 2.3 0 1 0 0 3.6M17.4 10.2a2.3 2.3 0 1 0 0 3.6"/>',
   camera: '<path d="M4 8.5A1.5 1.5 0 0 1 5.5 7h2.2l1.5-2h5.6l1.5 2h2.2A1.5 1.5 0 0 1 20 8.5v9a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 17.5z"/><circle cx="12" cy="13" r="3.3"/>',
 };
 
@@ -157,6 +182,9 @@ export async function renderPlayer(page, itemId, start = 0, backUrl = `#/item/${
   const markBtn = iconButton("mark", "Mark this spot");
   const prevMarkBtn = iconButton("prevMark", "Previous mark");
   const nextMarkBtn = iconButton("nextMark", "Next mark");
+  const ccBtn = iconButton("cc", "Subtitles", "C");
+  // The subtitles, drawn by the player from its own clock (see showSubtitles).
+  const subtitleBox = h("div", { class: "subtitles", hidden: true, "aria-live": "off" });
   const toast = h("div", { class: "player-toast", role: "status", "aria-live": "polite", hidden: true });
   const volume = h("input", { type: "range", class: "volume", min: 0, max: 1, step: 0.05, value: 1, "aria-label": "Volume" });
 
@@ -188,7 +216,7 @@ export async function renderPlayer(page, itemId, start = 0, backUrl = `#/item/${
       { class: "dock-row" },
       h("div", { class: "dock-side" }, timeNow),
       h("div", { class: "dock-center" }, startBtn, backBtn, playBtn, forwardBtn),
-      h("div", { class: "dock-side right" }, timeTotal, h("div", { class: "vol" }, muteBtn, volume), prevMarkBtn, markBtn, nextMarkBtn, snapBtn, fullBtn),
+      h("div", { class: "dock-side right" }, timeTotal, h("div", { class: "vol" }, muteBtn, volume), prevMarkBtn, markBtn, nextMarkBtn, ccBtn, snapBtn, fullBtn),
     ),
   );
   const backLink = h("a", { class: "pbtn glass", href: backUrl, "aria-label": "Back", title: "Back" }, icon("chevron"));
@@ -203,7 +231,8 @@ export async function renderPlayer(page, itemId, start = 0, backUrl = `#/item/${
       streamed && h("span", { class: "badge" }, h("i", { class: "pulse" }), BADGES[plan.mode] || "Converting"),
     ),
   );
-  const player = h("div", { class: "player" }, video, h("div", { class: "scrim" }), flash, spinner, message, toast, top, dock);
+  const player = h("div", { class: "player" }, video, h("div", { class: "scrim" }), subtitleBox, flash, spinner, message, toast,
+    top, dock);
   page.replaceChildren(player);
   // Only the current page takes the page-wide state: a replaced one (the router
   // has detached it) is about to be cleaned up.
@@ -244,6 +273,7 @@ export async function renderPlayer(page, itemId, start = 0, backUrl = `#/item/${
   function seek(t) {
     source.seek(clip ? Math.max(from, Math.min(t, clip.end - 0.5)) : clampSeek(t, duration()));
     updateTime();
+    showSubtitles();
   }
 
   // Seek bar positions and the clock are measured from `from` (a clip's start).
@@ -357,6 +387,59 @@ export async function renderPlayer(page, itemId, start = 0, backUrl = `#/item/${
       marking = false;
     }
   }
+
+  // ---- Subtitles: fetched once, then the line for the player's position is shown.
+  // Drawn here rather than by the browser's own <track>: a repackaged stream's clock
+  // restarts at each seek, but position() is always the video's real time (clips too).
+  let cues = [];
+  let subtitlesOn = subtitlesWanted();
+  let shownText = null;
+  let frame = null;
+  ccBtn.hidden = !hasSubtitles(item);
+
+  function showSubtitles() {
+    const text = subtitlesOn && cues.length ? textAt(cues, position()) : "";
+    if (text === shownText) return;
+    shownText = text;
+    subtitleBox.hidden = !text;
+    subtitleBox.replaceChildren(...text.split("\n").filter(Boolean).map((line) => h("span", {}, line)));
+  }
+  // Smoother than timeupdate's few updates a second: every frame while it plays.
+  function followSubtitles() {
+    cancelAnimationFrame(frame);
+    showSubtitles();
+    if (!video.paused && subtitlesOn && cues.length) frame = requestAnimationFrame(followSubtitles);
+  }
+  function showCcState() {
+    ccBtn.classList.toggle("on", subtitlesOn);
+    ccBtn.setAttribute("aria-pressed", String(subtitlesOn));
+    ccBtn.setAttribute("aria-label", subtitlesOn ? "Turn subtitles off" : "Turn subtitles on");
+    ccBtn.title = `${subtitlesOn ? "Turn subtitles off" : "Turn subtitles on"} (C)`;
+  }
+  function toggleSubtitles() {
+    if (ccBtn.hidden) return;
+    subtitlesOn = !subtitlesOn;
+    rememberSubtitles(subtitlesOn);
+    showCcState();
+    showToast(subtitlesOn ? "Subtitles on" : "Subtitles off");
+    followSubtitles();
+  }
+  async function loadSubtitles() {
+    try {
+      const res = await fetch(`/api/items/${item.id}/subtitles.vtt`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      cues = parseVtt(await res.text());
+      followSubtitles();
+    } catch (err) {
+      ccBtn.hidden = true; // nothing to show after all
+      console.warn("Reel: couldn't load subtitles", err);
+    }
+  }
+  // Keep them clear of the controls: they sit just above the dock while it shows.
+  const dockSize = new ResizeObserver(() => player.style.setProperty("--dock-height", `${dock.offsetHeight}px`));
+  dockSize.observe(dock);
+  showCcState();
+  if (!ccBtn.hidden) loadSubtitles();
 
   function flashIcon(name) {
     flash.replaceChildren(icon(name));
@@ -479,6 +562,10 @@ export async function renderPlayer(page, itemId, start = 0, backUrl = `#/item/${
   prevMarkBtn.addEventListener("click", () => goToMark(prevMark(marks, position())));
   nextMarkBtn.addEventListener("click", () => goToMark(nextMark(marks, position())));
   video.addEventListener("timeupdate", updateMarkButtons);
+  video.addEventListener("timeupdate", showSubtitles);
+  video.addEventListener("play", followSubtitles);
+  video.addEventListener("seeked", followSubtitles);
+  ccBtn.addEventListener("click", toggleSubtitles);
   video.addEventListener("durationchange", showMarks);
   muteBtn.addEventListener("click", () => (video.muted = !video.muted));
   volume.addEventListener("input", () => {
@@ -496,6 +583,7 @@ export async function renderPlayer(page, itemId, start = 0, backUrl = `#/item/${
       f: toggleFullscreen,
       m: () => (video.muted = !video.muted),
       p: takeSnapshot,
+      c: toggleSubtitles,
       Home: () => seek(from),
       ArrowLeft: () => seek(position() - (e.shiftKey ? JUMP_SECONDS : SKIP_SECONDS)),
       ArrowRight: () => seek(position() + (e.shiftKey ? JUMP_SECONDS : SKIP_SECONDS)),
@@ -515,6 +603,8 @@ export async function renderPlayer(page, itemId, start = 0, backUrl = `#/item/${
 
   return () => {
     document.removeEventListener("keydown", onKey);
+    cancelAnimationFrame(frame);
+    dockSize.disconnect();
     document.removeEventListener("fullscreenchange", onFullscreen);
     document.removeEventListener("webkitfullscreenchange", onFullscreen);
     releasePage();

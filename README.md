@@ -76,9 +76,10 @@ ffmpeg converts on the fly.
   `.mp4`, an MKV) is repackaged live on every play. **Make MP4 copy** on its page copies it once
   into a real MP4 in the data folder, and from then on it plays from the copy, directly. See
   [MP4 copies](#mp4-copies).
-- **English subtitles.** **Make English subtitles** on a video's page: Whisper listens to it on this
-  machine (no GPU needed, nothing sent anywhere) and writes English subtitles, translating what's
-  said. See [Subtitles](#subtitles). (Showing them in the player comes next.)
+- **Subtitles.** The player shows subtitles (**CC**, or **C**) from a file beside the video
+  (`movie.en.vtt`, `movie.srt`) or made by Reel: **Make English subtitles** on a video's page has
+  Whisper listen to it on this machine (no GPU needed, nothing sent anywhere) and write English
+  subtitles, translating what's said. Videos with subtitles say **CC**. See [Subtitles](#subtitles).
 - **Snap a preview.** The camera button in the player (or **P**) makes the frame on screen the
   video's picture, replacing any it had.
 - **Pictures from your files.** `movie.png` beside `movie.mp4` and `folder.png` in a folder are
@@ -228,6 +229,7 @@ you had loaded are loaded again first, so a spot far down a list is still there.
 | Mute / volume | Speaker button; the slider appears on hover | **M** |
 | Full screen | ⛶ button, or double-click the video (on iPhone: iOS's own full-screen player, since Safari there can only put the video itself full screen) | **F** |
 | Use this frame as the preview | Camera button | **P** |
+| Subtitles on / off | **CC** button (only when the video has subtitles) | **C** |
 | Mark this spot | Bookmark button | |
 | Go to a mark | Click its tick on the seek bar, or the ⇤ / ⇥ buttons beside the bookmark for the previous / next mark | |
 
@@ -555,7 +557,16 @@ on every play, and every seek starts ffmpeg again. An MP4 copy fixes that once:
 
 ### Subtitles
 
-**Make English subtitles** on a video's page has [Whisper](https://github.com/openai/whisper) (via
+**In the player:** a video with subtitles (a file beside it on the NAS, or ones Reel made) gets a
+**CC** button in the player, and **C** does the same. They're on unless you've turned them off;
+that choice is remembered in this browser. The player draws them itself, centred near the bottom
+(just above the controls while those show), from its own clock: so they're right for every way a
+video is sent, including a repackaged or converted stream whose clock starts again at each seek,
+and for clips. Tags in the file (`<i>`, voices, colours) are shown as plain text. Cards and the
+video page say **CC**. (On an iPhone in full screen, iOS plays the video in its own player, which
+can't show them.)
+
+**Making them:** **Make English subtitles** on a video's page has [Whisper](https://github.com/openai/whisper) (via
 [faster-whisper](https://github.com/SYSTRAN/faster-whisper), on the CPU) listen to the video and
 write what's said in English: Japanese (or any language it hears) is translated on the way; English
 is just written down.
@@ -868,8 +879,8 @@ version); bump `THUMBS` when the server changes how thumbnails are made.
 
 ```sh
 uv run pytest              # backend: 695 tests
-node --test tests/js/      # frontend: 48 tests
-uv run pytest -m browser   # browser: 32 tests (about 3 minutes; needs Chromium and ffmpeg)
+node --test tests/js/      # frontend: 52 tests
+uv run pytest -m browser   # browser: 37 tests (about 3 minutes; needs Chromium and ffmpeg)
 scripts/docker-smoke.sh    # builds the image and checks it end to end (needs Docker)
 ```
 
@@ -944,7 +955,8 @@ reel/
     router.js        hash routing; each visit owns its page and cleans up (even A → B → A)
     api.js           fetch helper, h() element builder, formatting, tag rules
     browse.js        Home, folders, video page (with its clips), tag page, tag editor
-    player.js        the player (also plays clips)
+    player.js        the player (also plays clips; draws subtitles)
+    vtt.js           reading WebVTT, and what's said at a moment
     editor.js        a video's edit page: mark twice, make a clip
     clips.js         clip cards, links, the edit page's Clips list, deleting with a question
     clippage.js      a clip's page
@@ -980,8 +992,8 @@ Dockerfile, compose.yaml, .env.example
   stops at startup with "Another Reel is already using the data folder". Nothing in the data
   folder is changed until the lock is held (migrations, clean-up and emptying the HLS cache all
   happen then, not when the app is built).
-- **Subtitles aren't shown in the player yet**: they can be made (see [Subtitles](#subtitles)) and
-  downloaded. External `.srt` files and embedded subtitle tracks aren't read.
+- **Subtitle tracks inside a video file** (e.g. in an MKV) aren't read; files beside it are, and
+  Reel can make English ones (see [Subtitles](#subtitles)). One subtitle file per video is used.
 - **No hardware transcoding.** Conversion runs on the CPU, which is fine for this library.
   `compose.yaml` notes where a GPU would go.
 - **Tags** are limited to lowercase ASCII letters, digits and dashes, by design.
@@ -996,7 +1008,6 @@ Dockerfile, compose.yaml, .env.example
   copied cuts that snap to keyframes). Files would go only to a separate writable folder, never
   the media folder, which could be added as a library so exports show up in Reel. Waiting on
   where that folder should live.
-- **Showing subtitles in the player** (a CC button), from the ones Reel makes.
 
 Decided against: watch progress / resume (single-user setup), sorting a tag's videos (they stay
 in tagging order), hardware transcoding, and a background pass that pre-converts old

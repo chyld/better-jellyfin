@@ -73,7 +73,7 @@ def test_item_fields(client, lib):
     assert item == {
         "id": item["id"], "title": "zoo-trip", "year": 1992, "duration": 60.0,
         "width": 720, "height": 480, "has_poster": False, "poster_rev": None, "custom_image": None,
-        "rel_path": "Personal/Tapes/1992.zoo-trip.mpg", "type": "MPG", "has_copy": False,
+        "rel_path": "Personal/Tapes/1992.zoo-trip.mpg", "type": "MPG", "has_copy": False, "has_subtitles": False,
         "play_mode": "transcode",
     }
 

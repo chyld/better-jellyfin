@@ -39,7 +39,17 @@ def video_type(container: str | None, rel_path: str) -> str | None:
     return members.get(ext, usual)
 
 
-def item_out(row: sqlite3.Row, caps: Capabilities | None = None, hls_support: str = "none") -> dict:
+def subtitled(conn: sqlite3.Connection, item_ids) -> set[int]:
+    """Which of these videos have subtitles Reel made (one query for a page)."""
+    ids = list(item_ids)
+    if not ids:
+        return set()
+    return {r[0] for r in conn.execute(
+        f"SELECT DISTINCT item_id FROM subtitles WHERE item_id IN ({','.join('?' * len(ids))})", ids)}
+
+
+def item_out(row: sqlite3.Row, caps: Capabilities | None = None, hls_support: str = "none",
+             made_subtitles: bool = False) -> dict:
     """A video for a list or its page. With the viewer's `caps` (and how it plays
     HLS), also `play_mode`: how that browser will play it (see plan.py), which
     colours its card, and matches what its page says. A video with a current MP4
@@ -58,6 +68,8 @@ def item_out(row: sqlite3.Row, caps: Capabilities | None = None, hls_support: st
         "rel_path": row["rel_path"],                    # its path in the library, file name included
         "type": video_type(row["container"], row["rel_path"]),   # the file's real format, copy or not
         "has_copy": copies.is_current(row),                        # it plays from an MP4 copy
+        # Subtitles: a file beside it on the NAS, or ones Reel made (`made_subtitles`).
+        "has_subtitles": bool(row["subtitle_path"]) or made_subtitles,
     }
     if caps is not None:
         out["play_mode"] = plan(copies.facts(row), caps, hls_support).mode
@@ -252,8 +264,9 @@ def _with_clips(conn: sqlite3.Connection, rows: list[sqlite3.Row], total_clips: 
         ):
             clips_of.setdefault(c["item_id"], []).append(c)
     items = []
+    with_subtitles = subtitled(conn, (r["id"] for r in rows))
     for r in rows:
-        items.append(item_out(r, caps, hls_support))
+        items.append(item_out(r, caps, hls_support, r["id"] in with_subtitles))
         items += [clip_out(c, r) for c in clips_of.get(r["id"], [])]
     return items
 
@@ -356,7 +369,7 @@ def item_detail(conn: sqlite3.Connection, item_uid: str) -> dict:
     folder = str(PurePosixPath(row["rel_path"]).parent)
     folder = "" if folder == "." else folder
     return {
-        **item_out(row),
+        **item_out(row, made_subtitles=bool(subtitled(conn, [row["id"]]))),
         "library_id": row["library_uid"],
         "library_name": row["library_name"],
         "rel_path": row["rel_path"],
